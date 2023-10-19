@@ -4,6 +4,7 @@ pub mod solari;
 pub mod wireframe;
 
 mod alpha;
+mod bind_group_layout_entries;
 mod bundle;
 mod environment_map;
 mod fog;

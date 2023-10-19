@@ -1,7 +1,7 @@
 use super::{
     SolariGlobalIlluminationPipelines, SolariGlobalIlluminationSettings, WORLD_CACHE_SIZE,
 };
-use crate::solari::SpatiotemporalBlueNoise;
+use crate::{bind_group_layout_entries::*, solari::SpatiotemporalBlueNoise};
 use bevy_core::FrameCount;
 use bevy_core_pipeline::prepass::{
     DepthPrepass, MotionVectorPrepass, NormalPrepass, ViewPrepassTextures, DEPTH_PREPASS_FORMAT,
@@ -242,173 +242,70 @@ pub fn prepare_resources(
             });
     }
 }
-
 pub fn create_bind_group_layouts(
     render_device: &RenderDevice,
 ) -> (BindGroupLayout, BindGroupLayout) {
-    let mut entry_i = 0;
-    let mut entry = |ty| {
-        entry_i += 1;
-        BindGroupLayoutEntry {
-            binding: entry_i - 1,
-            visibility: ShaderStages::COMPUTE,
-            ty,
-            count: None,
-        }
-    };
-
-    let entries = &[
-        // View
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Uniform,
-            has_dynamic_offset: true,
-            min_binding_size: Some(ViewUniform::min_size()),
-        }),
-        // Spatiotemporal blue noise
-        entry(BindingType::Texture {
-            sample_type: TextureSampleType::Float { filterable: false },
-            view_dimension: TextureViewDimension::D2Array,
-            multisampled: false,
-        }),
-        // Previous depth buffer
-        entry(BindingType::Texture {
-            sample_type: TextureSampleType::Depth,
-            view_dimension: TextureViewDimension::D2,
-            multisampled: false,
-        }),
-        // Depth buffer
-        entry(BindingType::Texture {
-            sample_type: TextureSampleType::Depth,
-            view_dimension: TextureViewDimension::D2,
-            multisampled: false,
-        }),
-        // Normals buffer
-        entry(BindingType::Texture {
-            sample_type: TextureSampleType::Float { filterable: false },
-            view_dimension: TextureViewDimension::D2,
-            multisampled: false,
-        }),
-        // Motion vectors
-        entry(BindingType::Texture {
-            sample_type: TextureSampleType::Float { filterable: false },
-            view_dimension: TextureViewDimension::D2,
-            multisampled: false,
-        }),
-        // Screen probes history
-        entry(BindingType::Texture {
-            sample_type: TextureSampleType::Float { filterable: false },
-            view_dimension: TextureViewDimension::D2Array,
-            multisampled: false,
-        }),
-        // Screen probes
-        entry(BindingType::StorageTexture {
-            access: StorageTextureAccess::ReadWrite,
-            format: TextureFormat::Rgba16Float,
-            view_dimension: TextureViewDimension::D2Array,
-        }),
-        // Screen probes confidence history
-        entry(BindingType::Texture {
-            sample_type: TextureSampleType::Uint,
-            view_dimension: TextureViewDimension::D2Array,
-            multisampled: false,
-        }),
-        // Screen probes confidence
-        entry(BindingType::StorageTexture {
-            access: StorageTextureAccess::WriteOnly,
-            format: TextureFormat::R8Uint,
-            view_dimension: TextureViewDimension::D2Array,
-        }),
-        // Screen probes merge buffer
-        entry(BindingType::StorageTexture {
-            access: StorageTextureAccess::ReadWrite,
-            format: TextureFormat::Rgba16Float,
-            view_dimension: TextureViewDimension::D2Array,
-        }),
-        // Screen probe spherical harmonics
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(112) }),
-        }),
-        // Diffuse irradiance output
-        entry(BindingType::StorageTexture {
-            access: StorageTextureAccess::WriteOnly,
-            format: TextureFormat::Rgba16Float,
-            view_dimension: TextureViewDimension::D2,
-        }),
-        // World cache checksums
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(4) }),
-        }),
-        // World cache life
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(4) }),
-        }),
-        // World cache irradiance
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(16) }),
-        }),
-        // World cache cell data
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(32) }),
-        }),
-        // World cache active cells new irradiance
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(16) }),
-        }),
-        // World cache a
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(4) }),
-        }),
-        // World cache b
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(4) }),
-        }),
-        // World cache active cell indices
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(4) }),
-        }),
-        // World cache active cells count
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(4) }),
-        }),
-        // World cache active cells dispatch
-        entry(BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: Some(unsafe { NonZeroU64::new_unchecked(12) }),
-        }),
-    ];
+    let entries = BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            // View
+            uniform_buffer(true, Some(ViewUniform::min_size())),
+            // Spatiotemporal blue noise
+            texture_2d_array(TextureSampleType::Float { filterable: false }),
+            // Previous depth buffer
+            texture_depth_2d(),
+            // Depth buffer
+            texture_depth_2d(),
+            // Normals buffer
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            // Motion vectors
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            // Screen probes history
+            texture_2d_array(TextureSampleType::Float { filterable: false }),
+            // Screen probes
+            texture_storage_2d_array(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+            // Screen probes confidence history
+            texture_2d_array(TextureSampleType::Uint),
+            // Screen probes confidence
+            texture_storage_2d_array(TextureFormat::R8Uint, StorageTextureAccess::WriteOnly),
+            // Screen probes merge buffer
+            texture_storage_2d_array(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+            // Screen probe spherical harmonics
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(112) })),
+            // Diffuse irradiance output
+            texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+            // World cache checksums
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(4) })),
+            // World cache life
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(4) })),
+            // World cache irradiance
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(16) })),
+            // World cache cell data
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(32) })),
+            // World cache active cells new irradiance
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(16) })),
+            // World cache a
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(4) })),
+            // World cache b
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(4) })),
+            // World cache active cell indices
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(4) })),
+            // World cache active cells count
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(4) })),
+            // World cache active cells dispatch
+            storage_buffer(false, Some(unsafe { NonZeroU64::new_unchecked(12) })),
+        ),
+    );
 
     (
-        render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("solari_global_illumination_view_bind_group_layout"),
-            entries: &entries[0..entries.len() - 1],
-        }),
-        render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some(
-                "solari_global_illumination_view_with_world_cache_dispatch_bind_group_layout",
-            ),
-            entries,
-        }),
+        render_device.create_bind_group_layout_ext(
+            "solari_global_illumination_view_bind_group_layout",
+            &entries[0..entries.len() - 1],
+        ),
+        render_device.create_bind_group_layout_ext(
+            "solari_global_illumination_view_with_world_cache_dispatch_bind_group_layout",
+            &entries,
+        ),
     )
 }
 

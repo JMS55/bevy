@@ -1,8 +1,9 @@
+use super::{Extract, ExtractSchedule};
 use crate::{
     render_resource::{encase::internal::WriteInto, DynamicUniformBuffer, ShaderType},
     renderer::{RenderDevice, RenderQueue},
     view::ViewVisibility,
-    Extract, ExtractSchedule, Render, RenderApp, RenderSet,
+    Render, RenderApp, RenderSet,
 };
 use bevy_app::{App, Plugin};
 use bevy_asset::{Asset, Handle};

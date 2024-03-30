@@ -10,7 +10,7 @@ use crate::{
         CameraMainTextureUsages, ClearColor, ClearColorConfig, Exposure, ExtractedCamera,
         ManualTextureViews, MipBias, TemporalJitter,
     },
-    extract_resource::{ExtractResource, ExtractResourcePlugin},
+    extract::extract_resource::{ExtractResource, ExtractResourcePlugin},
     prelude::{Image, Shader},
     primitives::Frustum,
     render_asset::RenderAssets,

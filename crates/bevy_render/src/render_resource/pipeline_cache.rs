@@ -1,5 +1,5 @@
 use crate::renderer::RenderAdapter;
-use crate::{render_resource::*, renderer::RenderDevice, Extract};
+use crate::{extract::Extract, render_resource::*, renderer::RenderDevice};
 use bevy_asset::{AssetEvent, AssetId, Assets};
 use bevy_ecs::system::{Res, ResMut};
 use bevy_ecs::{event::EventReader, system::Resource};

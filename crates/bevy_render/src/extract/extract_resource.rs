@@ -4,7 +4,9 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
 pub use bevy_render_macros::ExtractResource;
 
-use crate::{Extract, ExtractSchedule, RenderApp};
+use crate::RenderApp;
+
+use super::{Extract, ExtractSchedule};
 
 /// Describes how a resource gets extracted for rendering.
 ///

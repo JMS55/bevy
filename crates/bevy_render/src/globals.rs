@@ -1,9 +1,9 @@
 use crate::{
-    extract_resource::ExtractResource,
+    extract::{extract_resource::ExtractResource, Extract, ExtractSchedule},
     prelude::Shader,
     render_resource::{ShaderType, UniformBuffer},
     renderer::{RenderDevice, RenderQueue},
-    Extract, ExtractSchedule, Render, RenderApp, RenderSet,
+    Render, RenderApp, RenderSet,
 };
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};

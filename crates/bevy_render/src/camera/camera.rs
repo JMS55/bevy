@@ -1,13 +1,13 @@
 use crate::{
     camera::CameraProjection,
     camera::{ManualTextureViewHandle, ManualTextureViews},
+    extract::{extract_component::ExtractComponent, Extract},
     prelude::Image,
     primitives::Frustum,
     render_asset::RenderAssets,
     render_graph::{InternedRenderSubGraph, RenderSubGraph},
     render_resource::TextureView,
     view::{ColorGrading, ExtractedView, ExtractedWindows, RenderLayers, VisibleEntities},
-    Extract,
 };
 use bevy_asset::{AssetEvent, AssetId, Assets, Handle};
 use bevy_derive::{Deref, DerefMut};
@@ -22,7 +22,6 @@ use bevy_ecs::{
 };
 use bevy_math::{vec2, Dir3, Mat4, Ray3d, Rect, URect, UVec2, UVec4, Vec2, Vec3};
 use bevy_reflect::prelude::*;
-use bevy_render_macros::ExtractComponent;
 use bevy_transform::components::GlobalTransform;
 use bevy_utils::tracing::warn;
 use bevy_utils::{HashMap, HashSet};

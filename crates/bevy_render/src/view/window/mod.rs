@@ -1,10 +1,11 @@
 use crate::{
+    extract::Extract,
     render_resource::{
         BindGroupEntries, PipelineCache, SpecializedRenderPipelines, SurfaceTexture, TextureView,
     },
     renderer::{RenderAdapter, RenderDevice, RenderInstance},
     texture::TextureFormatPixelInfo,
-    Extract, ExtractSchedule, Render, RenderApp, RenderSet, WgpuWrapper,
+    ExtractSchedule, Render, RenderApp, RenderSet, WgpuWrapper,
 };
 use bevy_app::{App, Plugin};
 use bevy_ecs::{entity::EntityHashMap, prelude::*};

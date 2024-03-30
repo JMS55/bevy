@@ -1,4 +1,4 @@
-use crate::extract_resource::ExtractResource;
+use crate::extract::extract_resource::ExtractResource;
 use bevy_color::Color;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::prelude::*;

@@ -1,4 +1,4 @@
-use crate::extract_resource::ExtractResource;
+use crate::extract::extract_resource::ExtractResource;
 use crate::render_resource::TextureView;
 use crate::texture::BevyDefault;
 use bevy_ecs::system::Resource;

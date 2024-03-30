@@ -12,8 +12,9 @@ pub use manual_texture_view::*;
 pub use projection::*;
 
 use crate::{
-    extract_component::ExtractComponentPlugin, extract_resource::ExtractResourcePlugin,
-    render_graph::RenderGraph, ExtractSchedule, Render, RenderApp, RenderSet,
+    extract::{extract_component::ExtractComponentPlugin, extract_resource::ExtractResourcePlugin},
+    render_graph::RenderGraph,
+    ExtractSchedule, Render, RenderApp, RenderSet,
 };
 use bevy_app::{App, Plugin};
 use bevy_ecs::schedule::IntoSystemConfigs;

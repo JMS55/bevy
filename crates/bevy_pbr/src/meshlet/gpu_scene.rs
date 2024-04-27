@@ -637,7 +637,6 @@ pub struct MeshletGpuScene {
     /// Per-view per-instance visibility bit. Used for [`RenderLayers`] and [`NotShadowCaster`] support.
     view_instance_visibility: EntityHashMap<StorageBuffer<Vec<u32>>>,
     instance_material_ids: StorageBuffer<Vec<u32>>,
-    next_meshlet_count: u32,
     instance_meshlet_counts_prefix_sum: StorageBuffer<Vec<u32>>,
     instance_meshlet_slice_starts: StorageBuffer<Vec<u32>>,
     second_pass_candidates_buffer: Option<Buffer>,
@@ -684,7 +683,6 @@ impl FromWorld for MeshletGpuScene {
                 buffer.set_label(Some("meshlet_instance_material_ids"));
                 buffer
             },
-            next_meshlet_count: 0,
             instance_meshlet_counts_prefix_sum: {
                 let mut buffer = StorageBuffer::default();
                 buffer.set_label(Some("meshlet_instance_meshlet_counts_prefix_sum"));
@@ -794,7 +792,6 @@ impl MeshletGpuScene {
             .for_each(|b| b.get_mut().clear());
         self.instance_uniforms.get_mut().clear();
         self.instance_material_ids.get_mut().clear();
-        self.next_meshlet_count = 0;
         self.instance_meshlet_counts_prefix_sum.get_mut().clear();
         self.instance_meshlet_slice_starts.get_mut().clear();
         // TODO: Remove unused entries for view_instance_visibility and previous_depth_pyramids
@@ -860,18 +857,16 @@ impl MeshletGpuScene {
 
         let meshlet_count = meshlets_slice.end - meshlets_slice.start;
 
-        self.scene_meshlet_count += meshlet_count;
-        self.scene_triangle_count += triangle_count;
-
         // Append more instance data for this frame
         self.instance_meshlet_counts_prefix_sum
             .get_mut()
-            .push(self.next_meshlet_count);
+            .push(self.scene_meshlet_count);
         self.instance_meshlet_slice_starts
             .get_mut()
             .push(meshlets_slice.start);
 
-        self.next_meshlet_count += meshlet_count;
+        self.scene_meshlet_count += meshlet_count;
+        self.scene_triangle_count += triangle_count;
     }
 
     /// Get the depth value for use with the material depth texture for a given [`Material`] asset.

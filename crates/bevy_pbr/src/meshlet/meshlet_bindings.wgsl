@@ -124,7 +124,7 @@ fn get_meshlet_index(index_id: u32) -> u32 {
 fn get_cluster_metadata(cluster_id: u32) -> MeshletClusterMetadata {
     // Binary search to find the instance this cluster belongs to
     var left = 0u;
-    var right = arrayLength(meshlet_instance_meshlet_counts_prefix_sum) - 1u;
+    var right = arrayLength(&meshlet_instance_meshlet_counts_prefix_sum) - 1u;
     while left < right {
         let mid = (left + right) / 2u;
         let mid_value = meshlet_instance_meshlet_counts_prefix_sum[mid];

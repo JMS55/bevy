@@ -58,13 +58,13 @@ struct DrawIndirectArgs {
 
 #ifdef MESHLET_CULLING_PASS
 var<push_constant> cluster_count: u32;
-@group(0) @binding(0) var<storage, read> meshlet_counts_prefix_sum: array<u32>; // Per entity instance
-@group(0) @binding(1) var<storage, read> meshlet_slice_starts: array<u32>; // Per entity instance
-@group(0) @binding(2) var<storage, read> meshlet_bounding_spheres: array<MeshletBoundingSpheres>; // pet meshlet
+@group(0) @binding(0) var<storage, read> meshlet_instance_meshlet_counts_prefix_sum: array<u32>; // Per entity instance
+@group(0) @binding(1) var<storage, read> meshlet_instance_meshlet_slice_starts: array<u32>; // Per entity instance
+@group(0) @binding(2) var<storage, read> meshlet_bounding_spheres: array<MeshletBoundingSpheres>; // per meshlet
 @group(0) @binding(3) var<storage, read> meshlet_instance_uniforms: array<Mesh>; // Per entity instance
 @group(0) @binding(4) var<storage, read> meshlet_view_instance_visibility: array<u32>; // 1 bit per entity instance, packed as a bitmask
 @group(0) @binding(5) var<storage, read_write> meshlet_second_pass_candidates: array<atomic<u32>>; // 1 bit per cluster, packed as a bitmask
-@group(0) @binding(6) var<storage, read> meshlets: array<Meshlet>; // pet meshlet
+@group(0) @binding(6) var<storage, read> meshlets: array<Meshlet>; // per meshlet
 @group(0) @binding(7) var<storage, read_write> draw_indirect_args: DrawIndirectArgs; // Single object shared between all workgroups/meshlets/triangles
 @group(0) @binding(8) var<storage, read_write> draw_triangle_buffer: array<u32>; // Single object shared between all workgroups/meshlets/triangles
 @group(0) @binding(9) var depth_pyramid: texture_2d<f32>; // From the end of the last frame for the first culling pass, and from the first raster pass for the second culling pass
@@ -86,12 +86,12 @@ fn cluster_is_second_pass_candidate(cluster_id: u32) -> bool {
 #endif
 
 #ifdef MESHLET_VISIBILITY_BUFFER_RASTER_PASS
-@group(0) @binding(0) var<storage, read> meshlet_counts_prefix_sum: array<u32>; // Per entity instance
-@group(0) @binding(1) var<storage, read> meshlet_slice_starts: array<u32>; // Per entity instance
-@group(0) @binding(2) var<storage, read> meshlets: array<Meshlet>; // pet meshlet
-@group(0) @binding(3) var<storage, read> meshlet_indices: array<u32>; // Many pet meshlet
-@group(0) @binding(4) var<storage, read> meshlet_vertex_ids: array<u32>; // Many pet meshlet
-@group(0) @binding(5) var<storage, read> meshlet_vertex_data: array<PackedMeshletVertex>; // Many pet meshlet
+@group(0) @binding(0) var<storage, read> meshlet_instance_meshlet_counts_prefix_sum: array<u32>; // Per entity instance
+@group(0) @binding(1) var<storage, read> meshlet_instance_meshlet_slice_starts: array<u32>; // Per entity instance
+@group(0) @binding(2) var<storage, read> meshlets: array<Meshlet>; // per meshlet
+@group(0) @binding(3) var<storage, read> meshlet_indices: array<u32>; // Many per meshlet
+@group(0) @binding(4) var<storage, read> meshlet_vertex_ids: array<u32>; // Many per meshlet
+@group(0) @binding(5) var<storage, read> meshlet_vertex_data: array<PackedMeshletVertex>; // Many per meshlet
 @group(0) @binding(6) var<storage, read> meshlet_instance_uniforms: array<Mesh>; // Per entity instance
 @group(0) @binding(7) var<storage, read> meshlet_instance_material_ids: array<u32>; // Per entity instance
 @group(0) @binding(8) var<storage, read> draw_triangle_buffer: array<u32>; // Single object shared between all workgroups/meshlets/triangles
@@ -106,12 +106,12 @@ fn get_meshlet_index(index_id: u32) -> u32 {
 
 #ifdef MESHLET_MESH_MATERIAL_PASS
 @group(1) @binding(0) var meshlet_visibility_buffer: texture_2d<u32>; // Generated from the meshlet raster passes
-@group(1) @binding(1) var<storage, read> meshlet_counts_prefix_sum: array<u32>; // Per entity instance
-@group(1) @binding(2) var<storage, read> meshlet_slice_starts: array<u32>; // Per entity instance
-@group(1) @binding(3) var<storage, read> meshlets: array<Meshlet>; // pet meshlet
-@group(1) @binding(4) var<storage, read> meshlet_indices: array<u32>; // Many pet meshlet
-@group(1) @binding(5) var<storage, read> meshlet_vertex_ids: array<u32>; // Many pet meshlet
-@group(1) @binding(6) var<storage, read> meshlet_vertex_data: array<PackedMeshletVertex>; // Many pet meshlet
+@group(1) @binding(1) var<storage, read> meshlet_instance_meshlet_counts_prefix_sum: array<u32>; // Per entity instance
+@group(1) @binding(2) var<storage, read> meshlet_instance_meshlet_slice_starts: array<u32>; // Per entity instance
+@group(1) @binding(3) var<storage, read> meshlets: array<Meshlet>; // per meshlet
+@group(1) @binding(4) var<storage, read> meshlet_indices: array<u32>; // Many per meshlet
+@group(1) @binding(5) var<storage, read> meshlet_vertex_ids: array<u32>; // Many per meshlet
+@group(1) @binding(6) var<storage, read> meshlet_vertex_data: array<PackedMeshletVertex>; // Many per meshlet
 @group(1) @binding(7) var<storage, read> meshlet_instance_uniforms: array<Mesh>; // Per entity instance
 
 fn get_meshlet_index(index_id: u32) -> u32 {
@@ -122,11 +122,12 @@ fn get_meshlet_index(index_id: u32) -> u32 {
 #endif
 
 fn get_cluster_metadata(cluster_id: u32) -> MeshletClusterMetadata {
+    // Binary search to find the instance this cluster belongs to
     var left = 0u;
-    var right = arrayLength(meshlet_counts_prefix_sum) - 1u;
+    var right = arrayLength(meshlet_instance_meshlet_counts_prefix_sum) - 1u;
     while left < right {
         let mid = (left + right) / 2u;
-        let mid_value = meshlet_counts_prefix_sum[mid];
+        let mid_value = meshlet_instance_meshlet_counts_prefix_sum[mid];
         if mid_value < cluster_id {
             left = mid + 1u;
         } else if mid_value > cluster_id {
@@ -136,9 +137,13 @@ fn get_cluster_metadata(cluster_id: u32) -> MeshletClusterMetadata {
             break;
         }
     }
-
     let instance_id = right;
-    let meshlet_id_local = cluster_id - meshlet_counts_prefix_sum[left];
-    let meshlet_id = meshlet_id_local + meshlet_slice_starts[instance_id];
+
+    // Find the meshlet ID for this cluster within the instance's MeshletMesh
+    let meshlet_id_local = cluster_id - meshlet_instance_meshlet_counts_prefix_sum[left];
+
+    // Find the overall meshlet ID in the global meshlet buffer
+    let meshlet_id = meshlet_id_local + meshlet_instance_meshlet_slice_starts[instance_id];
+
     return MeshletClusterMetadata(instance_id, meshlet_id);
 }

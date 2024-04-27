@@ -104,6 +104,7 @@ impl Node for MeshletVisibilityBufferRasterPassNode {
             previous_view_offset,
             culling_first_pipeline,
             culling_workgroups,
+            meshlet_view_resources.scene_meshlet_count,
         );
         raster_pass(
             true,
@@ -130,6 +131,7 @@ impl Node for MeshletVisibilityBufferRasterPassNode {
             previous_view_offset,
             culling_second_pipeline,
             culling_workgroups,
+            meshlet_view_resources.scene_meshlet_count,
         );
         raster_pass(
             false,
@@ -192,6 +194,7 @@ impl Node for MeshletVisibilityBufferRasterPassNode {
                 previous_view_offset,
                 culling_first_pipeline,
                 culling_workgroups,
+                meshlet_view_resources.scene_meshlet_count,
             );
             raster_pass(
                 true,
@@ -218,6 +221,7 @@ impl Node for MeshletVisibilityBufferRasterPassNode {
                 previous_view_offset,
                 culling_second_pipeline,
                 culling_workgroups,
+                meshlet_view_resources.scene_meshlet_count,
             );
             raster_pass(
                 false,
@@ -251,12 +255,14 @@ fn cull_pass(
     previous_view_offset: &PreviousViewUniformOffset,
     culling_pipeline: &ComputePipeline,
     culling_workgroups: u32,
+    cluster_count: u32,
 ) {
     let command_encoder = render_context.command_encoder();
     let mut cull_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some(label),
         timestamp_writes: None,
     });
+    cull_pass.set_push_constants(0, &cluster_count.to_le_bytes());
     cull_pass.set_bind_group(
         0,
         culling_bind_group,

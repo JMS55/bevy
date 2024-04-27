@@ -30,13 +30,14 @@ fn cull_meshlets(
     // Calculate the cluster IDs for this thread
     let cluster_id = local_invocation_id.x + 128u * dot(workgroup_id, vec3(num_workgroups.x * num_workgroups.x, num_workgroups.x, 1u));
     if cluster_id >= cluster_count { return; }
-    let metadata = get_cluster_metadata(cluster_id);
-    let instance_id = metadata.instance_id;
-    let meshlet_id = metadata.meshlet_id;
 
 #ifdef MESHLET_SECOND_CULLING_PASS
     if !cluster_is_second_pass_candidate(cluster_id) { return; }
 #endif
+
+    let metadata = get_cluster_metadata(cluster_id);
+    let instance_id = metadata.instance_id;
+    let meshlet_id = metadata.meshlet_id;
 
 #ifdef MESHLET_FIRST_CULLING_PASS
     if should_cull_instance(instance_id) { return; }

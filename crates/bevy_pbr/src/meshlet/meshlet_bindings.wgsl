@@ -125,16 +125,12 @@ fn get_cluster_metadata(cluster_id: u32) -> MeshletClusterMetadata {
     // Binary search to find the instance this cluster belongs to
     var left = 0u;
     var right = arrayLength(&meshlet_instance_meshlet_counts_prefix_sum) - 1u;
-    while left < right {
+    while left <= right {
         let mid = (left + right) / 2u;
-        let mid_value = meshlet_instance_meshlet_counts_prefix_sum[mid];
-        if mid_value < cluster_id {
+        if meshlet_instance_meshlet_counts_prefix_sum[mid] <= cluster_id {
             left = mid + 1u;
-        } else if mid_value > cluster_id {
-            right = mid - 1u;
         } else {
-            right = mid;
-            break;
+            right = mid - 1u;
         }
     }
     let instance_id = right;

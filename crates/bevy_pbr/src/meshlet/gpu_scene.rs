@@ -840,11 +840,6 @@ impl MeshletGpuScene {
             )
         };
 
-        // Append instance data for this frame
-        self.instances
-            .push((instance, render_layers, not_shadow_caster));
-        self.instance_material_ids.get_mut().push(0);
-
         // If the MeshletMesh asset has not been uploaded to the GPU yet, queue it for uploading
         let ([_, _, _, meshlets_slice, _], triangle_count) = self
             .meshlet_mesh_slices
@@ -855,9 +850,11 @@ impl MeshletGpuScene {
         let meshlets_slice = (meshlets_slice.start as u32 / size_of::<Meshlet>() as u32)
             ..(meshlets_slice.end as u32 / size_of::<Meshlet>() as u32);
 
-        let meshlet_count = meshlets_slice.end - meshlets_slice.start;
-
-        // Append more instance data for this frame
+        // Append instance data for this frame
+        // TODO: Extract these from this function
+        self.instances
+            .push((instance, render_layers, not_shadow_caster));
+        self.instance_material_ids.get_mut().push(0);
         self.instance_meshlet_counts_prefix_sum
             .get_mut()
             .push(self.scene_meshlet_count);
@@ -865,7 +862,7 @@ impl MeshletGpuScene {
             .get_mut()
             .push(meshlets_slice.start);
 
-        self.scene_meshlet_count += meshlet_count;
+        self.scene_meshlet_count += meshlets_slice.end - meshlets_slice.start;
         self.scene_triangle_count += triangle_count;
     }
 

@@ -140,7 +140,7 @@ fn get_cluster_metadata(cluster_id: u32) -> MeshletClusterMetadata {
     let instance_id = right;
 
     // Find the meshlet ID for this cluster within the instance's MeshletMesh
-    let meshlet_id_local = cluster_id - meshlet_instance_meshlet_counts_prefix_sum[left];
+    let meshlet_id_local = cluster_id - meshlet_instance_meshlet_counts_prefix_sum[instance_id];
 
     // Find the overall meshlet ID in the global meshlet buffer
     let meshlet_id = meshlet_id_local + meshlet_instance_meshlet_slice_starts[instance_id];

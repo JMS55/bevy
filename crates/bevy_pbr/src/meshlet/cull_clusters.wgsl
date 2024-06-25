@@ -10,8 +10,10 @@
     should_cull_instance,
     cluster_is_second_pass_candidate,
     meshlets,
-    draw_indirect_args,
-    draw_triangle_buffer,
+    meshlet_hardware_raster_indirect_args,
+    meshlet_hardware_raster_triangles,
+    meshlet_software_raster_indirect_args,
+    meshlet_software_raster_clusters,
 }
 #import bevy_render::maths::affine3_to_square
 
@@ -75,6 +77,11 @@ fn cull_clusters(
     if !lod_is_ok || parent_lod_is_ok { return; }
 #endif
 
+    // Check if the cluster would need depth clipping
+    let intersects_near = dot(view.frustum[4u], culling_bounding_sphere_center) + culling_bounding_sphere_radius > 0.0;
+    let intersects_far = dot(view.frustum[5u], culling_bounding_sphere_center) + culling_bounding_sphere_radius > 0.0;
+    let cluster_needs_depth_clipping = intersects_near || intersects_far;
+
     // Project the culling bounding sphere to view-space for occlusion culling
 #ifdef MESHLET_FIRST_CULLING_PASS
     let previous_world_from_local = affine3_to_square(instance_uniform.previous_world_from_local);
@@ -87,9 +94,9 @@ fn cull_clusters(
     let aabb = project_view_space_sphere_to_screen_space_aabb(culling_bounding_sphere_center_view_space, culling_bounding_sphere_radius);
     // Halve the view-space AABB size as the depth pyramid is half the view size
     let depth_pyramid_size_mip_0 = vec2<f32>(textureDimensions(depth_pyramid, 0)) * 0.5;
-    let width = (aabb.z - aabb.x) * depth_pyramid_size_mip_0.x;
-    let height = (aabb.w - aabb.y) * depth_pyramid_size_mip_0.y;
-    let depth_level = max(0, i32(ceil(log2(max(width, height))))); // TODO: Naga doesn't like this being a u32
+    let aabb_width_pixels = (aabb.z - aabb.x) * depth_pyramid_size_mip_0.x;
+    let aabb_height_pixels = (aabb.w - aabb.y) * depth_pyramid_size_mip_0.y;
+    let depth_level = max(0, i32(ceil(log2(max(aabb_width_pixels, aabb_height_pixels))))); // TODO: Naga doesn't like this being a u32
     let depth_pyramid_size = vec2<f32>(textureDimensions(depth_pyramid, depth_level));
     let aabb_top_left = vec2<u32>(aabb.xy * depth_pyramid_size);
 
@@ -119,13 +126,23 @@ fn cull_clusters(
     }
 #endif
 
-    // Append a list of this cluster's triangles to draw if not culled
-    if cluster_visible {
+    // Cluster would be occluded if drawn, so don't setup a draw for it
+    if !cluster_visible { return; }
+
+    // Check how big the cluster is in screen space
+    let cluster_small = all(vec2(aabb_width_pixels, aabb_height_pixels) < vec2(32.0));
+
+    if cluster_small && !cluster_needs_depth_clipping {
+        // Append this cluster to the list for software rasterization
+        let buffer_slot = atomicAdd(&meshlet_software_raster_indirect_args.x, 1u);
+        meshlet_software_raster_clusters[buffer_slot] = cluster_id;
+    } else {
+        // Append a list of this cluster's triangles for hardware rasterization
         let meshlet_triangle_count = meshlets[meshlet_id].triangle_count;
-        let buffer_start = atomicAdd(&draw_indirect_args.vertex_count, meshlet_triangle_count * 3u) / 3u;
+        let buffer_start = atomicAdd(&meshlet_hardware_raster_indirect_args.vertex_count, meshlet_triangle_count * 3u) / 3u;
         let cluster_id_packed = cluster_id << 6u;
         for (var triangle_id = 0u; triangle_id < meshlet_triangle_count; triangle_id++) {
-            draw_triangle_buffer[buffer_start + triangle_id] = cluster_id_packed | triangle_id;
+            meshlet_hardware_raster_triangles[buffer_start + triangle_id] = cluster_id_packed | triangle_id;
         }
     }
 }

@@ -88,6 +88,7 @@ fn should_cull_instance(instance_id: u32) -> bool {
     return bool(extractBits(packed_visibility, bit_offset, 1u));
 }
 
+// TODO: Load 4x per workgroup instead of once per thread?
 fn cluster_is_second_pass_candidate(cluster_id: u32) -> bool {
     let packed_candidates = meshlet_second_pass_candidates[cluster_id / 32u];
     let bit_offset = cluster_id % 32u;
@@ -112,6 +113,7 @@ fn cluster_is_second_pass_candidate(cluster_id: u32) -> bool {
 @group(0) @binding(9) var<storage, read_write> meshlet_visibility_buffer: array<atomic<u64>>; // Single object shared between all workgroups/meshlets/triangles
 @group(0) @binding(10) var<uniform> view: View;
 
+// TODO: Load only twice, instead of 3x in cases where you load 3 indices per thread?
 fn get_meshlet_index(index_id: u32) -> u32 {
     let packed_index = meshlet_indices[index_id / 4u];
     let bit_offset = (index_id % 4u) * 8u;
@@ -129,6 +131,7 @@ fn get_meshlet_index(index_id: u32) -> u32 {
 @group(1) @binding(6) var<storage, read> meshlet_cluster_instance_ids: array<u32>; // Per cluster
 @group(1) @binding(7) var<storage, read> meshlet_instance_uniforms: array<Mesh>; // Per entity instance
 
+// TODO: Load only twice, instead of 3x in cases where you load 3 indices per thread?
 fn get_meshlet_index(index_id: u32) -> u32 {
     let packed_index = meshlet_indices[index_id / 4u];
     let bit_offset = (index_id % 4u) * 8u;

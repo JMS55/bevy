@@ -27,7 +27,7 @@ fn meshlet_software_raster_clusters(
     @builtin(num_workgroups) num_workgroups: vec3<u32>,
     @builtin(local_invocation_id) local_invocation_id: vec3<u32>,
 ) {
-    // Load 1 vertex per thread
+    // Load and project 1 vertex per thread
     let cluster_id = meshlet_software_raster_clusters[workgroup_id.x];
     let meshlet_id = meshlet_cluster_meshlet_ids[cluster_id];
     let meshlet = meshlets[meshlet_id];
@@ -35,7 +35,7 @@ fn meshlet_software_raster_clusters(
         let vertex_id = meshlet_vertex_ids[meshlet.start_vertex_id + local_invocation_id.x];
         let vertex = unpack_meshlet_vertex(meshlet_vertex_data[vertex_id]);
 
-        // Transform vertex to screen space
+        // Project vertex to screen space
         let instance_id = meshlet_cluster_instance_ids[cluster_id];
         let instance_uniform = meshlet_instance_uniforms[instance_id];
         let world_from_local = affine3_to_square(instance_uniform.world_from_local);
@@ -52,12 +52,10 @@ fn meshlet_software_raster_clusters(
     }
     workgroupBarrier();
 
-    // Load 1 triangle vertex data per thread
+    // Load 1 triangle's worth of vertex data per thread
     if local_invocation_id.x >= meshlet.triangle_count { return; }
     let index_ids = meshlet.start_index_id + (local_invocation_id.x * 3u) + vec3(0u, 1u, 2u);
-    let index_1 = get_meshlet_index(index_ids[0]) - meshlet.start_vertex_id;
-    let index_2 = get_meshlet_index(index_ids[1]) - meshlet.start_vertex_id;
-    let index_3 = get_meshlet_index(index_ids[2]) - meshlet.start_vertex_id;
+    let vertex_ids = vec3(get_meshlet_index(index_ids[0]), get_meshlet_index(index_ids[1]), get_meshlet_index(index_ids[2]));
     let vertex_1 = screen_space_vertices[index_1];
     let vertex_2 = screen_space_vertices[index_2];
     let vertex_3 = screen_space_vertices[index_3];

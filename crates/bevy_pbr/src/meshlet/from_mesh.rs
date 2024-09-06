@@ -1,12 +1,15 @@
+#![allow(unsafe_code)]
+
 use super::asset::{Meshlet, MeshletBoundingSphere, MeshletBoundingSpheres, MeshletMesh};
 use bevy_render::{
     mesh::{Indices, Mesh},
     render_resource::PrimitiveTopology,
 };
-use bevy_utils::HashMap;
+use bevy_utils::{HashMap, HashSet};
 use itertools::Itertools;
 use meshopt::{
-    build_meshlets, compute_cluster_bounds, compute_meshlet_bounds, ffi::meshopt_Bounds, simplify,
+    build_meshlets, compute_cluster_bounds, compute_meshlet_bounds,
+    ffi::{meshopt_Bounds, meshopt_simplifyWithAttributes},
     Meshlets, SimplifyOptions, VertexDataAdapter,
 };
 use metis::Graph;
@@ -32,6 +35,8 @@ impl MeshletMesh {
         let vertex_buffer = mesh.get_vertex_buffer_data();
         let vertex_stride = mesh.get_vertex_size() as usize;
         let vertices = VertexDataAdapter::new(&vertex_buffer, vertex_stride, 0).unwrap();
+        let mut mesh_boundary = vec![false; vertex_buffer.len()];
+        compute_mesh_boundary(&indices, &mut mesh_boundary);
         let mut meshlets = compute_meshlets(&indices, &vertices);
         let mut bounding_spheres = meshlets
             .iter()
@@ -52,6 +57,7 @@ impl MeshletMesh {
 
         // Build further LODs
         let mut simplification_queue = 0..meshlets.len();
+        let mut group_boundary = vec![false; vertex_buffer.len()];
         while simplification_queue.len() > 1 {
             // For each meshlet build a list of connected meshlets (meshlets that share a triangle edge)
             let connected_meshlets_per_meshlet =
@@ -68,9 +74,13 @@ impl MeshletMesh {
 
             for group_meshlets in groups.into_iter().filter(|group| group.len() > 1) {
                 // Simplify the group to ~50% triangle count
-                let Some((simplified_group_indices, mut group_error)) =
-                    simplify_meshlet_group(&group_meshlets, &meshlets, &vertices)
-                else {
+                let Some((simplified_group_indices, mut group_error)) = simplify_meshlet_group(
+                    &group_meshlets,
+                    &meshlets,
+                    &vertices,
+                    &mesh_boundary,
+                    &mut group_boundary,
+                ) else {
                     continue;
                 };
 
@@ -160,6 +170,25 @@ fn validate_input_mesh(mesh: &Mesh) -> Result<Cow<'_, [u32]>, MeshToMeshletMeshC
         Some(Indices::U32(indices)) => Ok(Cow::Borrowed(indices.as_slice())),
         Some(Indices::U16(indices)) => Ok(indices.iter().map(|i| *i as u32).collect()),
         _ => Err(MeshToMeshletMeshConversionError::MeshMissingIndices),
+    }
+}
+
+fn compute_mesh_boundary(indices: &[u32], result: &mut [bool]) {
+    let mut edge_set = HashSet::new();
+    for tri in indices.chunks(3) {
+        for (v0, v1) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[0], tri[2])] {
+            let edge = (v0.min(v1), v0.max(v1));
+            if edge_set.insert(edge) {
+                // We've seen this edge before, so the vertices are definitely not on the boundary
+                result[v0 as usize] = false;
+                result[v1 as usize] = false;
+            } else {
+                // This is the first time we've seen this edge, so both it's vertices are on the
+                // boundary (for now)
+                result[v0 as usize] = true;
+                result[v1 as usize] = true;
+            }
+        }
     }
 }
 
@@ -263,6 +292,8 @@ fn simplify_meshlet_group(
     group_meshlets: &[usize],
     meshlets: &Meshlets,
     vertices: &VertexDataAdapter<'_>,
+    mesh_boundary: &[bool],
+    group_boundary: &mut [bool],
 ) -> Option<(Vec<u32>, f32)> {
     // Build a new index buffer into the mesh vertex data by combining all meshlet data in the group
     let mut group_indices = Vec::new();
@@ -273,17 +304,43 @@ fn simplify_meshlet_group(
         }
     }
 
+    // Compute the boundary of just this group, then unlock any vertices that are also a mesh
+    // boundary, so we only end up locking interior boundaries
+    compute_mesh_boundary(&group_indices, group_boundary);
+    for (group, &mesh) in group_boundary.iter_mut().zip(mesh_boundary) {
+        *group = *group && !mesh;
+    }
+
     // Simplify the group to ~50% triangle count
     // TODO: Simplify using vertex attributes
     let mut error = 0.0;
-    let simplified_group_indices = simplify(
-        &group_indices,
-        vertices,
-        group_indices.len() / 2,
-        f32::MAX,
-        SimplifyOptions::LockBorder | SimplifyOptions::Sparse | SimplifyOptions::ErrorAbsolute, // TODO: Specify manual vertex locks instead of meshopt's overly-strict locks
-        Some(&mut error),
-    );
+    let simplified_group_indices = unsafe {
+        // Use the ffi function directly because `meshopt::simplif_with_locks` doesn't give us the
+        // result error
+        let vertex_data = vertices.reader.get_ref();
+        let vertex_data = vertex_data.as_ptr().cast::<u8>();
+        let positions = vertex_data.add(vertices.position_offset);
+        let mut result: Vec<u32> = vec![0; group_indices.len()];
+        let index_count = meshopt_simplifyWithAttributes(
+            result.as_mut_ptr().cast(),
+            group_indices.as_ptr().cast(),
+            group_indices.len(),
+            positions.cast::<f32>(),
+            vertices.vertex_count,
+            vertices.vertex_stride,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            group_boundary.as_ptr().cast(),
+            group_indices.len() / 2,
+            f32::MAX,
+            (SimplifyOptions::Sparse | SimplifyOptions::ErrorAbsolute).bits(),
+            (&mut error) as *mut _,
+        );
+        result.resize(index_count, 0u32);
+        result
+    };
 
     // Check if we were able to simplify at least a little (95% of the original triangle count)
     if simplified_group_indices.len() as f32 / group_indices.len() as f32 > 0.95 {

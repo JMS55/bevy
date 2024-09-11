@@ -174,21 +174,23 @@ fn validate_input_mesh(mesh: &Mesh) -> Result<Cow<'_, [u32]>, MeshToMeshletMeshC
 }
 
 fn compute_mesh_boundary(indices: &[u32], result: &mut [bool]) {
-    let mut edge_set = HashSet::new();
+    let mut seen_edge_set = HashSet::new();
+    let mut border_edge_set = HashSet::new();
     for tri in indices.chunks(3) {
         for (v0, v1) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[0], tri[2])] {
             let edge = (v0.min(v1), v0.max(v1));
-            if edge_set.insert(edge) {
-                // We've seen this edge before, so the vertices are definitely not on the boundary
-                result[v0 as usize] = false;
-                result[v1 as usize] = false;
+            if seen_edge_set.insert(edge) {
+                // We've never seen this before, so it's possibly on the border
+                border_edge_set.insert(edge);
             } else {
-                // This is the first time we've seen this edge, so both it's vertices are on the
-                // boundary (for now)
-                result[v0 as usize] = true;
-                result[v1 as usize] = true;
+                // We've seen this before, so remove it from the border set
+                border_edge_set.remove(&edge);
             }
         }
+    }
+    for (v0, v1) in border_edge_set {
+        result[v0 as usize] = true;
+        result[v1 as usize] = true;
     }
 }
 

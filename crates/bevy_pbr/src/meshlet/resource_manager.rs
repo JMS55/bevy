@@ -221,7 +221,6 @@ impl ResourceManager {
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
-                        storage_buffer_read_only_sized(false, None),
                     ),
                 ),
             ),
@@ -746,8 +745,7 @@ pub fn prepare_meshlet_view_bind_groups(
                 meshlet_mesh_manager.meshlets.binding(),
                 meshlet_mesh_manager.indices.binding(),
                 meshlet_mesh_manager.vertex_positions.binding(),
-                meshlet_mesh_manager.vertex_normals.binding(),
-                meshlet_mesh_manager.vertex_uvs.binding(),
+                meshlet_mesh_manager.vertex_attributes.binding(),
                 cluster_instance_ids.as_entire_binding(),
                 instance_manager.instance_uniforms.binding().unwrap(),
             ));

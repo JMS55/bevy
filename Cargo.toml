@@ -438,6 +438,8 @@ http-body-util = "0.1"
 anyhow = "1"
 macro_rules_attribute = "0.2"
 
+lz4_flex = { version = "0.11", default-features = false, features = ["frame"] }
+
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 smol = "2"
 smol-macros = "0.1"

@@ -10,8 +10,7 @@
         meshlet_instance_uniforms,
         get_meshlet_vertex_id,
         get_meshlet_vertex_position,
-        get_meshlet_vertex_normal,
-        get_meshlet_vertex_uv,
+        get_meshlet_vertex_normal_and_uv,
     },
     mesh_view_bindings::view,
     mesh_functions::mesh_position_local_to_world,
@@ -188,10 +187,11 @@ struct MeshletVertex {
 }
 
 fn load_vertex(meshlet: ptr<function, Meshlet>, vertex_id: u32) -> MeshletVertex {
+    let normal_and_uv = get_meshlet_vertex_normal_and_uv(meshlet, vertex_id);
     return MeshletVertex(
         get_meshlet_vertex_position(meshlet, vertex_id),
-        get_meshlet_vertex_normal(meshlet, vertex_id),
-        get_meshlet_vertex_uv(meshlet, vertex_id),
+        normal_and_uv.normal,
+        normal_and_uv.uv,
     );
 }
 

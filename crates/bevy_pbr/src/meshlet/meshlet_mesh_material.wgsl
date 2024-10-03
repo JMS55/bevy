@@ -20,7 +20,7 @@ fn fragment(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> 
     let vertex_output = resolve_vertex_output(frag_coord);
     var rng = vertex_output.cluster_id;
     let color = vec3(rand_f(&rng), rand_f(&rng), rand_f(&rng));
-    return vec4(color, 1.0);
+    return vec4((vertex_output.world_normal + 1.0) / 2.0, 1.0);
 }
 
 #ifdef PREPASS_FRAGMENT

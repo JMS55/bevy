@@ -9,7 +9,6 @@ use bevy_ecs::{
     system::{Res, ResMut, Resource},
     world::{FromWorld, World},
 };
-use bevy_math::Vec2;
 use bevy_render::{
     render_resource::BufferAddress,
     renderer::{RenderDevice, RenderQueue},
@@ -20,13 +19,12 @@ use core::ops::Range;
 /// Manages uploading [`MeshletMesh`] asset data to the GPU.
 #[derive(Resource)]
 pub struct MeshletMeshManager {
-    pub vertex_positions: PersistentGpuBuffer<Arc<[u8]>>,
-    pub vertex_normals: PersistentGpuBuffer<Arc<[u32]>>,
-    pub vertex_uvs: PersistentGpuBuffer<Arc<[Vec2]>>,
+    pub vertex_positions: PersistentGpuBuffer<Arc<[u32]>>,
+    pub vertex_attributes: PersistentGpuBuffer<Arc<[u32]>>,
     pub indices: PersistentGpuBuffer<Arc<[u8]>>,
     pub meshlets: PersistentGpuBuffer<Arc<[Meshlet]>>,
     pub meshlet_bounding_spheres: PersistentGpuBuffer<Arc<[MeshletBoundingSpheres]>>,
-    meshlet_mesh_slices: HashMap<AssetId<MeshletMesh>, [Range<BufferAddress>; 6]>,
+    meshlet_mesh_slices: HashMap<AssetId<MeshletMesh>, [Range<BufferAddress>; 5]>,
 }
 
 impl FromWorld for MeshletMeshManager {
@@ -34,8 +32,7 @@ impl FromWorld for MeshletMeshManager {
         let render_device = world.resource::<RenderDevice>();
         Self {
             vertex_positions: PersistentGpuBuffer::new("meshlet_vertex_positions", render_device),
-            vertex_normals: PersistentGpuBuffer::new("meshlet_vertex_normals", render_device),
-            vertex_uvs: PersistentGpuBuffer::new("meshlet_vertex_uvs", render_device),
+            vertex_attributes: PersistentGpuBuffer::new("meshlet_vertex_attributes", render_device),
             indices: PersistentGpuBuffer::new("meshlet_indices", render_device),
             meshlets: PersistentGpuBuffer::new("meshlets", render_device),
             meshlet_bounding_spheres: PersistentGpuBuffer::new(
@@ -61,12 +58,9 @@ impl MeshletMeshManager {
             let vertex_positions_slice = self
                 .vertex_positions
                 .queue_write(Arc::clone(&meshlet_mesh.vertex_positions), ());
-            let vertex_normals_slice = self
-                .vertex_normals
-                .queue_write(Arc::clone(&meshlet_mesh.vertex_normals), ());
-            let vertex_uvs_slice = self
-                .vertex_uvs
-                .queue_write(Arc::clone(&meshlet_mesh.vertex_uvs), ());
+            let vertex_attributes_slice = self
+                .vertex_attributes
+                .queue_write(Arc::clone(&meshlet_mesh.vertex_attributes), ());
             let indices_slice = self
                 .indices
                 .queue_write(Arc::clone(&meshlet_mesh.indices), ());
@@ -74,7 +68,7 @@ impl MeshletMeshManager {
                 Arc::clone(&meshlet_mesh.meshlets),
                 (
                     vertex_positions_slice.start,
-                    vertex_normals_slice.start,
+                    vertex_attributes_slice.start,
                     indices_slice.start,
                 ),
             );
@@ -84,8 +78,7 @@ impl MeshletMeshManager {
 
             [
                 vertex_positions_slice,
-                vertex_normals_slice,
-                vertex_uvs_slice,
+                vertex_attributes_slice,
                 indices_slice,
                 meshlets_slice,
                 meshlet_bounding_spheres_slice,
@@ -93,7 +86,7 @@ impl MeshletMeshManager {
         };
 
         // If the MeshletMesh asset has not been uploaded to the GPU yet, queue it for uploading
-        let [_, _, _, _, meshlets_slice, _] = self
+        let [_, _, _, meshlets_slice, _] = self
             .meshlet_mesh_slices
             .entry(asset_id)
             .or_insert_with_key(queue_meshlet_mesh)
@@ -106,13 +99,13 @@ impl MeshletMeshManager {
 
     pub fn remove(&mut self, asset_id: &AssetId<MeshletMesh>) {
         if let Some(
-            [vertex_positions_slice, vertex_normals_slice, vertex_uvs_slice, indices_slice, meshlets_slice, meshlet_bounding_spheres_slice],
+            [vertex_positions_slice, vertex_attributes_slice, indices_slice, meshlets_slice, meshlet_bounding_spheres_slice],
         ) = self.meshlet_mesh_slices.remove(asset_id)
         {
             self.vertex_positions
                 .mark_slice_unused(vertex_positions_slice);
-            self.vertex_normals.mark_slice_unused(vertex_normals_slice);
-            self.vertex_uvs.mark_slice_unused(vertex_uvs_slice);
+            self.vertex_attributes
+                .mark_slice_unused(vertex_attributes_slice);
             self.indices.mark_slice_unused(indices_slice);
             self.meshlets.mark_slice_unused(meshlets_slice);
             self.meshlet_bounding_spheres
@@ -131,10 +124,7 @@ pub fn perform_pending_meshlet_mesh_writes(
         .vertex_positions
         .perform_writes(&render_queue, &render_device);
     meshlet_mesh_manager
-        .vertex_normals
-        .perform_writes(&render_queue, &render_device);
-    meshlet_mesh_manager
-        .vertex_uvs
+        .vertex_attributes
         .perform_writes(&render_queue, &render_device);
     meshlet_mesh_manager
         .indices

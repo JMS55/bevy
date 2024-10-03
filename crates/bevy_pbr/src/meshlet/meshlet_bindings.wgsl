@@ -7,13 +7,14 @@
 
 struct Meshlet {
     start_vertex_position_bit: u32,
-    start_vertex_attribute_id: u32,
+    start_vertex_attribute_bit: u32,
     start_index_id: u32,
     packed_a: u32,
     packed_b: u32,
     min_vertex_position_channel_x: f32,
     min_vertex_position_channel_y: f32,
     min_vertex_position_channel_z: f32,
+    min_vertex_normal_packed: u32,
 }
 
 fn get_meshlet_vertex_count(meshlet: ptr<function, Meshlet>) -> u32 {
@@ -112,7 +113,8 @@ fn get_meshlet_vertex_id(index_id: u32) -> u32 {
 
 fn get_meshlet_vertex_position(meshlet: ptr<function, Meshlet>, vertex_id: u32) -> vec3<f32> {
     // Get bitstream start for the vertex
-    let bits_per_channel = unpack4xU8((*meshlet).packed_b).xyz;
+    let unpacked = unpack4xU8((*meshlet).packed_b);
+    let bits_per_channel = unpacked.yzw;
     let bits_per_vertex = bits_per_channel.x + bits_per_channel.y + bits_per_channel.z;
     var start_bit = (*meshlet).start_vertex_position_bit + (vertex_id * bits_per_vertex);
 
@@ -137,7 +139,7 @@ fn get_meshlet_vertex_position(meshlet: ptr<function, Meshlet>, vertex_id: u32) 
     );
 
     // Reverse vertex quantization
-    let meshlet_quantization_factor = extractBits((*meshlet).packed_a, 16u, 8u);
+    let meshlet_quantization_factor = unpacked.x;
     vertex_position /= f32(1u << meshlet_quantization_factor) * CENTIMETERS_PER_METER;
 
     return vertex_position;
@@ -150,10 +152,9 @@ fn get_meshlet_vertex_position(meshlet: ptr<function, Meshlet>, vertex_id: u32) 
 @group(1) @binding(2) var<storage, read> meshlets: array<Meshlet>; // Per meshlet
 @group(1) @binding(3) var<storage, read> meshlet_indices: array<u32>; // Many per meshlet
 @group(1) @binding(4) var<storage, read> meshlet_vertex_positions: array<u32>; // Many per meshlet
-@group(1) @binding(5) var<storage, read> meshlet_vertex_normals: array<u32>; // Many per meshlet
-@group(1) @binding(6) var<storage, read> meshlet_vertex_uvs: array<vec2<f32>>; // Many per meshlet
-@group(1) @binding(7) var<storage, read> meshlet_cluster_instance_ids: array<u32>; // Per cluster
-@group(1) @binding(8) var<storage, read> meshlet_instance_uniforms: array<Mesh>; // Per entity instance
+@group(1) @binding(5) var<storage, read> meshlet_vertex_attributes: array<u32>; // Many per meshlet
+@group(1) @binding(6) var<storage, read> meshlet_cluster_instance_ids: array<u32>; // Per cluster
+@group(1) @binding(7) var<storage, read> meshlet_instance_uniforms: array<Mesh>; // Per entity instance
 
 // TODO: Load only twice, instead of 3x in cases where you load 3 indices per thread?
 fn get_meshlet_vertex_id(index_id: u32) -> u32 {
@@ -164,7 +165,8 @@ fn get_meshlet_vertex_id(index_id: u32) -> u32 {
 
 fn get_meshlet_vertex_position(meshlet: ptr<function, Meshlet>, vertex_id: u32) -> vec3<f32> {
     // Get bitstream start for the vertex
-    let bits_per_channel = unpack4xU8((*meshlet).packed_b).xyz;
+    let unpacked = unpack4xU8((*meshlet).packed_b);
+    let bits_per_channel = unpacked.yzw;
     let bits_per_vertex = bits_per_channel.x + bits_per_channel.y + bits_per_channel.z;
     var start_bit = (*meshlet).start_vertex_position_bit + (vertex_id * bits_per_vertex);
 
@@ -189,18 +191,47 @@ fn get_meshlet_vertex_position(meshlet: ptr<function, Meshlet>, vertex_id: u32) 
     );
 
     // Reverse vertex quantization
-    let meshlet_quantization_factor = extractBits((*meshlet).packed_a, 16u, 8u);
+    let meshlet_quantization_factor = unpacked.x;
     vertex_position /= f32(1u << meshlet_quantization_factor) * CENTIMETERS_PER_METER;
 
     return vertex_position;
 }
 
-fn get_meshlet_vertex_normal(meshlet: ptr<function, Meshlet>, vertex_id: u32) -> vec3<f32> {
-    let packed_normal = meshlet_vertex_normals[(*meshlet).start_vertex_attribute_id + vertex_id];
-    return octahedral_decode(unpack2x16unorm(packed_normal));
+struct MeshletVertexNormalAndUv {
+    normal: vec3<f32>,
+    uv: vec2<f32>,
 }
 
-fn get_meshlet_vertex_uv(meshlet: ptr<function, Meshlet>, vertex_id: u32) -> vec2<f32> {
-    return meshlet_vertex_uvs[(*meshlet).start_vertex_attribute_id + vertex_id];
+fn get_meshlet_vertex_normal_and_uv(meshlet: ptr<function, Meshlet>, vertex_id: u32) -> MeshletVertexNormalAndUv {
+    // Get bitstream start for the vertex
+    let unpacked = unpack4xU8((*meshlet).packed_a);
+    let bits_per_channel = vec4(unpacked.zw, 32u, 32u);
+    let bits_per_vertex = bits_per_channel.x + bits_per_channel.y + bits_per_channel.z + bits_per_channel.w;
+    var start_bit = (*meshlet).start_vertex_position_bit + (vertex_id * bits_per_vertex);
+
+    // Read each vertex channel from the bitstream
+    var vertex_attributes_packed = vec4(0u);
+    for (var i = 0u; i < 4u; i++) {
+        let lower_word_index = start_bit / 32u;
+        let lower_word_bit_offset = start_bit & 31u;
+        var next_32_bits = meshlet_vertex_attributes[lower_word_index] >> lower_word_bit_offset;
+        if lower_word_bit_offset + bits_per_channel[i] > 32u {
+            next_32_bits |= meshlet_vertex_attributes[lower_word_index + 1u] << (32u - lower_word_bit_offset);
+        }
+        vertex_attributes_packed[i] = extractBits(next_32_bits, 0u, bits_per_channel[i]);
+        start_bit += bits_per_channel[i];
+    }
+
+    // Remap [0, range_max - range_min] to [range_min, range_max]
+    let vertex_normal_packed = vertex_attributes_packed.xy + vec2(
+        extractBits((*meshlet).min_vertex_normal_packed, 0u, 16u),
+        extractBits((*meshlet).min_vertex_normal_packed, 16u, 32u),
+    );
+
+    // Unpack
+    let vertex_normal = octahedral_decode(unpack2x16unorm(vertex_normal_packed.x << 16u | vertex_normal_packed.y));
+    let vertex_uv = bitcast<vec2<f32>>(vertex_attributes_packed.zw);
+
+    return MeshletVertexNormalAndUv(vertex_normal, vertex_uv);
 }
 #endif

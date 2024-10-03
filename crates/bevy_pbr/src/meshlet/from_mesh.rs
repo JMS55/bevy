@@ -1,13 +1,13 @@
 use super::asset::{Meshlet, MeshletBoundingSphere, MeshletBoundingSpheres, MeshletMesh};
 use alloc::borrow::Cow;
-use bevy_math::{IVec3, Vec2, Vec3, Vec3Swizzles};
+use bevy_math::{IVec3, U16Vec2, Vec2, Vec3, Vec3Swizzles};
 use bevy_render::{
     mesh::{Indices, Mesh},
-    render_resource::{PrimitiveTopology, COPY_BUFFER_ALIGNMENT},
+    render_resource::PrimitiveTopology,
 };
 use bevy_utils::HashMap;
 use bitvec::{order::Lsb0, vec::BitVec, view::BitView};
-use core::{iter, ops::Range};
+use core::ops::Range;
 use itertools::Itertools;
 use meshopt::{
     build_meshlets, compute_cluster_bounds, compute_meshlet_bounds,
@@ -131,35 +131,25 @@ impl MeshletMesh {
         }
 
         // Copy vertex attributes per meshlet and compress
-        let mut quantized_positions = Vec::new();
-        let mut vertex_positions = BitVec::<u8, Lsb0>::new();
-        let mut vertex_normals = Vec::new();
-        let mut vertex_uvs = Vec::new();
+        let mut vertex_positions = BitVec::new();
+        let mut vertex_attributes = BitVec::new();
         let mut bevy_meshlets = Vec::with_capacity(meshlets.len());
         for (i, meshlet) in meshlets.meshlets.iter().enumerate() {
             build_and_compress_meshlet_vertex_data(
                 meshlet,
                 meshlets.get(i).vertices,
                 &vertex_buffer,
-                &mut quantized_positions,
                 &mut vertex_positions,
-                &mut vertex_normals,
-                &mut vertex_uvs,
+                &mut vertex_attributes,
                 &mut bevy_meshlets,
             );
         }
-
-        // Pad vertex positions buffer if needed
         vertex_positions.set_uninitialized(false);
-        let mut vertex_positions = vertex_positions.into_vec();
-        let padding = COPY_BUFFER_ALIGNMENT as usize
-            - (vertex_positions.len() % COPY_BUFFER_ALIGNMENT as usize);
-        vertex_positions.extend(iter::repeat(0).take(padding));
+        vertex_attributes.set_uninitialized(false);
 
         Ok(Self {
-            vertex_positions: vertex_positions.into(),
-            vertex_normals: vertex_normals.into(),
-            vertex_uvs: vertex_uvs.into(),
+            vertex_positions: vertex_positions.into_vec().into(),
+            vertex_attributes: vertex_attributes.into_vec().into(),
             indices: meshlets.triangles.into(),
             meshlets: bevy_meshlets.into(),
             meshlet_bounding_spheres: bounding_spheres.into(),
@@ -352,23 +342,26 @@ fn build_and_compress_meshlet_vertex_data(
     meshlet: &meshopt_Meshlet,
     meshlet_vertex_ids: &[u32],
     vertex_buffer: &[u8],
-    quantized_positions: &mut Vec<IVec3>,
-    vertex_positions: &mut BitVec<u8, Lsb0>,
-    vertex_normals: &mut Vec<u32>,
-    vertex_uvs: &mut Vec<Vec2>,
+    vertex_positions: &mut BitVec<u32, Lsb0>,
+    vertex_attributes: &mut BitVec<u32, Lsb0>,
     meshlets: &mut Vec<Meshlet>,
 ) {
     let start_vertex_position_bit = vertex_positions.len() as u32;
-    let start_vertex_attribute_id = vertex_normals.len() as u32;
+    let start_vertex_attribute_bit = vertex_attributes.len() as u32;
 
-    let quantization_factor =
+    let position_quantization_factor =
         (1 << VERTEX_POSITION_QUANTIZATION_FACTOR) as f32 * CENTIMETERS_PER_METER;
 
-    let mut min_quantized_position_channels = IVec3::MAX;
-    let mut max_quantized_position_channels = IVec3::MIN;
+    let mut min_position_channels = IVec3::MAX;
+    let mut max_position_channels = IVec3::MIN;
+    let mut min_normal_channels = U16Vec2::MAX;
+    let mut max_normal_channels = U16Vec2::MIN;
 
     // Lossy vertex compression
-    for vertex_id in meshlet_vertex_ids {
+    let mut positions_temp = [IVec3::ZERO; 255];
+    let mut normals_temp = [U16Vec2::ZERO; 255];
+    let mut uv_temp = [Vec2::ZERO; 255];
+    for (i, vertex_id) in meshlet_vertex_ids.iter().enumerate() {
         // Load source vertex attributes
         let vertex_id_byte = *vertex_id as usize * MESHLET_VERTEX_SIZE_IN_BYTES;
         let vertex_data =
@@ -377,31 +370,36 @@ fn build_and_compress_meshlet_vertex_data(
         let normal = Vec3::from_slice(bytemuck::cast_slice(&vertex_data[12..24]));
         let uv = Vec2::from_slice(bytemuck::cast_slice(&vertex_data[24..32]));
 
-        // Copy uncompressed UV
-        vertex_uvs.push(uv);
-
-        // Compress normal
-        vertex_normals.push(pack2x16unorm(octahedral_encode(normal)));
-
         // Quantize position to a fixed-point IVec3
-        let quantized_position = (position * quantization_factor + 0.5).as_ivec3();
-        quantized_positions.push(quantized_position);
+        let quantized_position = (position * position_quantization_factor + 0.5).as_ivec3();
+        positions_temp[i] = quantized_position;
+        min_position_channels = min_position_channels.min(quantized_position);
+        max_position_channels = max_position_channels.max(quantized_position);
 
-        // Compute per X/Y/Z-channel quantized position min/max for this meshlet
-        min_quantized_position_channels = min_quantized_position_channels.min(quantized_position);
-        max_quantized_position_channels = max_quantized_position_channels.max(quantized_position);
+        // Octahedral-encode normal and pack as 2x16unorm
+        let packed_normal = pack2x16unorm(octahedral_encode(normal));
+        normals_temp[i] = packed_normal;
+        min_normal_channels = min_normal_channels.min(packed_normal);
+        max_normal_channels = max_normal_channels.max(packed_normal);
+
+        // Uncompressed UV (for now)
+        uv_temp[i] = uv;
     }
 
-    // Calculate bits needed to encode each quantized vertex position channel based on the range of each channel
-    let range = max_quantized_position_channels - min_quantized_position_channels + 1;
-    let bits_per_vertex_position_channel_x = range.as_vec3().x.log2().ceil() as u8;
-    let bits_per_vertex_position_channel_y = range.as_vec3().y.log2().ceil() as u8;
-    let bits_per_vertex_position_channel_z = range.as_vec3().z.log2().ceil() as u8;
+    // Calculate bits needed to encode each vertex attribute channel based on the range of each channel
+    let position_range = max_position_channels - min_position_channels + 1;
+    let normal_range = max_normal_channels - min_normal_channels + 1;
+    let bits_per_vertex_position_channel_x = position_range.as_vec3().x.log2().ceil() as u8;
+    let bits_per_vertex_position_channel_y = position_range.as_vec3().y.log2().ceil() as u8;
+    let bits_per_vertex_position_channel_z = position_range.as_vec3().z.log2().ceil() as u8;
+    let bits_per_vertex_normal_a = normal_range.as_vec2().x.log2().ceil() as u8;
+    let bits_per_vertex_normal_b = normal_range.as_vec2().y.log2().ceil() as u8;
 
-    // Lossless encoding of vertex positions in the minimum number of bits per channel
-    for position in quantized_positions.drain(..) {
+    // Lossless encoding of vertex attributes stored in the minimum number of bits needed per channel
+    for i in 0..meshlet_vertex_ids.len() {
         // Remap [range_min, range_max] IVec3 to [0, range_max - range_min] UVec3
-        let position = (position - min_quantized_position_channels).as_uvec3();
+        let position = (positions_temp[i] - min_position_channels).as_uvec3();
+        let normal = normals_temp[i] - min_normal_channels;
 
         // Store as a packed bitstream
         vertex_positions.extend_from_bitslice(
@@ -413,23 +411,32 @@ fn build_and_compress_meshlet_vertex_data(
         vertex_positions.extend_from_bitslice(
             &position.z.view_bits::<Lsb0>()[..bits_per_vertex_position_channel_z as usize],
         );
+        vertex_attributes.extend_from_bitslice(
+            &normal.x.view_bits::<Lsb0>()[..bits_per_vertex_normal_a as usize],
+        );
+        vertex_attributes.extend_from_bitslice(
+            &normal.y.view_bits::<Lsb0>()[..bits_per_vertex_normal_b as usize],
+        );
+        vertex_attributes.extend_from_raw_slice(bytemuck::cast_slice(&[uv_temp[i]]));
     }
 
     meshlets.push(Meshlet {
         start_vertex_position_bit,
-        start_vertex_attribute_id,
+        start_vertex_attribute_bit,
         start_index_id: meshlet.triangle_offset,
         vertex_count: meshlet.vertex_count as u8,
         triangle_count: meshlet.triangle_count as u8,
-        quantization_factor: VERTEX_POSITION_QUANTIZATION_FACTOR,
-        padding1: 0,
+        bits_per_vertex_normal_a,
+        bits_per_vertex_normal_b,
+        position_quantization_factor: VERTEX_POSITION_QUANTIZATION_FACTOR,
         bits_per_vertex_position_channel_x,
         bits_per_vertex_position_channel_y,
         bits_per_vertex_position_channel_z,
-        padding2: 0,
-        min_vertex_position_channel_x: min_quantized_position_channels.x as f32,
-        min_vertex_position_channel_y: min_quantized_position_channels.y as f32,
-        min_vertex_position_channel_z: min_quantized_position_channels.z as f32,
+        min_vertex_position_channel_x: min_position_channels.x as f32,
+        min_vertex_position_channel_y: min_position_channels.y as f32,
+        min_vertex_position_channel_z: min_position_channels.z as f32,
+        min_vertex_normal_a: min_normal_channels.x,
+        min_vertex_normal_b: min_normal_channels.y,
     });
 }
 
@@ -453,11 +460,10 @@ fn octahedral_encode(v: Vec3) -> Vec2 {
 }
 
 // https://www.w3.org/TR/WGSL/#pack2x16unorm-builtin
-fn pack2x16unorm(v: Vec2) -> u32 {
-    let v = (v.clamp(Vec2::ZERO, Vec2::ONE) * 65535.0)
+fn pack2x16unorm(v: Vec2) -> U16Vec2 {
+    (v.clamp(Vec2::ZERO, Vec2::ONE) * 65535.0)
         .round()
-        .as_u16vec2();
-    bytemuck::cast([v.y, v.x])
+        .as_u16vec2()
 }
 
 /// An error produced by [`MeshletMesh::from_mesh`].

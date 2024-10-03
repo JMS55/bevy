@@ -188,6 +188,8 @@ fn compute_mesh_boundary(indices: &[u32], result: &mut [bool]) {
             }
         }
     }
+
+    result.fill(false);
     for (v0, v1) in border_edge_set {
         result[v0 as usize] = true;
         result[v1 as usize] = true;

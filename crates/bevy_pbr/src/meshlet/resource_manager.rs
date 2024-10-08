@@ -623,7 +623,7 @@ pub fn prepare_meshlet_view_bind_groups(
 
         let entries = BindGroupEntries::sequential((
             cluster_meshlet_ids.as_entire_binding(),
-            meshlet_mesh_manager.meshlet_bounding_spheres.binding(),
+            meshlet_mesh_manager.culling_data.binding(),
             cluster_instance_ids.as_entire_binding(),
             instance_manager.instance_uniforms.binding().unwrap(),
             view_resources.instance_visibility.as_entire_binding(),
@@ -651,7 +651,7 @@ pub fn prepare_meshlet_view_bind_groups(
 
         let entries = BindGroupEntries::sequential((
             cluster_meshlet_ids.as_entire_binding(),
-            meshlet_mesh_manager.meshlet_bounding_spheres.binding(),
+            meshlet_mesh_manager.culling_data.binding(),
             cluster_instance_ids.as_entire_binding(),
             instance_manager.instance_uniforms.binding().unwrap(),
             view_resources.instance_visibility.as_entire_binding(),

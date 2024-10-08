@@ -48,8 +48,8 @@ pub struct MeshletMesh {
     pub(crate) indices: Arc<[u8]>,
     /// The list of meshlets making up this mesh.
     pub(crate) meshlets: Arc<[Meshlet]>,
-    /// Spherical bounding volumes.
-    pub(crate) meshlet_bounding_spheres: Arc<[MeshletBoundingSpheres]>,
+    /// Culling data for meshlets.
+    pub(crate) culling_data: Arc<[MeshletCullingData]>,
 }
 
 /// A single meshlet within a [`MeshletMesh`].
@@ -85,16 +85,22 @@ pub struct Meshlet {
     pub min_vertex_position_channel_z: f32,
 }
 
-/// Bounding spheres used for culling and choosing level of detail for a [`Meshlet`].
+/// Bounding spheres and simplification error used for culling and choosing level of detail for a [`Meshlet`].
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
-pub struct MeshletBoundingSpheres {
-    /// The bounding sphere used for frustum and occlusion culling for this meshlet.
-    pub self_culling: MeshletBoundingSphere,
-    /// The bounding sphere used for determining if this meshlet is at the correct level of detail for a given view.
-    pub self_lod: MeshletBoundingSphere,
-    /// The bounding sphere used for determining if this meshlet's parent is at the correct level of detail for a given view.
-    pub parent_lod: MeshletBoundingSphere,
+pub struct MeshletCullingData {
+    /// Gounding sphere used for frustum and occlusion culling for this meshlet.
+    pub culling_sphere: MeshletBoundingSphere,
+    /// Gounding sphere used for determining if this meshlet's group is at the correct level of detail for a given view.
+    pub group_lod_sphere: MeshletBoundingSphere,
+    /// Gounding sphere used for determining if this meshlet's parent group is at the correct level of detail for a given view.
+    pub parent_group_lod_sphere: MeshletBoundingSphere,
+    /// Simplification error used for determining if this meshlet's group is at the correct level of detail for a given view.
+    pub group_error: f32,
+    /// Simplification error used for determining if this meshlet's parent group is at the correct level of detail for a given view.
+    pub parent_group_error: f32,
+
+    // TODO: Error needs to be it's own struct for alignment reasons?
 }
 
 /// A spherical bounding volume used for a [`Meshlet`].
@@ -137,7 +143,7 @@ impl AssetSaver for MeshletMeshSaver {
         write_slice(&asset.vertex_uvs, &mut writer)?;
         write_slice(&asset.indices, &mut writer)?;
         write_slice(&asset.meshlets, &mut writer)?;
-        write_slice(&asset.meshlet_bounding_spheres, &mut writer)?;
+        write_slice(&asset.culling_data, &mut writer)?;
         writer.finish()?;
 
         Ok(())
@@ -177,7 +183,7 @@ impl AssetLoader for MeshletMeshLoader {
         let vertex_uvs = read_slice(reader)?;
         let indices = read_slice(reader)?;
         let meshlets = read_slice(reader)?;
-        let meshlet_bounding_spheres = read_slice(reader)?;
+        let culling_data = read_slice(reader)?;
 
         Ok(MeshletMesh {
             vertex_positions,
@@ -185,7 +191,7 @@ impl AssetLoader for MeshletMeshLoader {
             vertex_uvs,
             indices,
             meshlets,
-            meshlet_bounding_spheres,
+            culling_data,
         })
     }
 

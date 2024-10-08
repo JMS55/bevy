@@ -1,5 +1,5 @@
 use super::{
-    asset::{Meshlet, MeshletBoundingSpheres},
+    asset::{Meshlet, MeshletCullingData},
     persistent_buffer::PersistentGpuBuffer,
     MeshletMesh,
 };
@@ -25,7 +25,7 @@ pub struct MeshletMeshManager {
     pub vertex_uvs: PersistentGpuBuffer<Arc<[Vec2]>>,
     pub indices: PersistentGpuBuffer<Arc<[u8]>>,
     pub meshlets: PersistentGpuBuffer<Arc<[Meshlet]>>,
-    pub meshlet_bounding_spheres: PersistentGpuBuffer<Arc<[MeshletBoundingSpheres]>>,
+    pub culling_data: PersistentGpuBuffer<Arc<[MeshletCullingData]>>,
     meshlet_mesh_slices: HashMap<AssetId<MeshletMesh>, [Range<BufferAddress>; 6]>,
 }
 
@@ -38,10 +38,7 @@ impl FromWorld for MeshletMeshManager {
             vertex_uvs: PersistentGpuBuffer::new("meshlet_vertex_uvs", render_device),
             indices: PersistentGpuBuffer::new("meshlet_indices", render_device),
             meshlets: PersistentGpuBuffer::new("meshlets", render_device),
-            meshlet_bounding_spheres: PersistentGpuBuffer::new(
-                "meshlet_bounding_spheres",
-                render_device,
-            ),
+            culling_data: PersistentGpuBuffer::new("meshlet_culling_data", render_device),
             meshlet_mesh_slices: HashMap::new(),
         }
     }
@@ -78,9 +75,9 @@ impl MeshletMeshManager {
                     indices_slice.start,
                 ),
             );
-            let meshlet_bounding_spheres_slice = self
-                .meshlet_bounding_spheres
-                .queue_write(Arc::clone(&meshlet_mesh.meshlet_bounding_spheres), ());
+            let culling_data_slice = self
+                .culling_data
+                .queue_write(Arc::clone(&meshlet_mesh.culling_data), ());
 
             [
                 vertex_positions_slice,
@@ -88,7 +85,7 @@ impl MeshletMeshManager {
                 vertex_uvs_slice,
                 indices_slice,
                 meshlets_slice,
-                meshlet_bounding_spheres_slice,
+                culling_data_slice,
             ]
         };
 
@@ -106,7 +103,7 @@ impl MeshletMeshManager {
 
     pub fn remove(&mut self, asset_id: &AssetId<MeshletMesh>) {
         if let Some(
-            [vertex_positions_slice, vertex_normals_slice, vertex_uvs_slice, indices_slice, meshlets_slice, meshlet_bounding_spheres_slice],
+            [vertex_positions_slice, vertex_normals_slice, vertex_uvs_slice, indices_slice, meshlets_slice, culling_data_slice],
         ) = self.meshlet_mesh_slices.remove(asset_id)
         {
             self.vertex_positions
@@ -115,8 +112,7 @@ impl MeshletMeshManager {
             self.vertex_uvs.mark_slice_unused(vertex_uvs_slice);
             self.indices.mark_slice_unused(indices_slice);
             self.meshlets.mark_slice_unused(meshlets_slice);
-            self.meshlet_bounding_spheres
-                .mark_slice_unused(meshlet_bounding_spheres_slice);
+            self.culling_data.mark_slice_unused(culling_data_slice);
         }
     }
 }
@@ -143,6 +139,6 @@ pub fn perform_pending_meshlet_mesh_writes(
         .meshlets
         .perform_writes(&render_queue, &render_device);
     meshlet_mesh_manager
-        .meshlet_bounding_spheres
+        .culling_data
         .perform_writes(&render_queue, &render_device);
 }

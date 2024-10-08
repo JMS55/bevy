@@ -28,6 +28,8 @@ struct MeshletBoundingSpheres {
     self_culling: MeshletBoundingSphere,
     self_lod: MeshletBoundingSphere,
     parent_lod: MeshletBoundingSphere,
+    self_erorr: f32,
+    parent_error: f32,
 }
 
 struct MeshletBoundingSphere {

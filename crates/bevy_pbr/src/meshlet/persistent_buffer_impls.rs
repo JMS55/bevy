@@ -1,5 +1,5 @@
 use super::{
-    asset::{Meshlet, MeshletBoundingSpheres},
+    asset::{Meshlet, MeshletCullingData},
     persistent_buffer::PersistentGpuBufferable,
 };
 use alloc::sync::Arc;
@@ -73,11 +73,11 @@ impl PersistentGpuBufferable for Arc<[Meshlet]> {
     }
 }
 
-impl PersistentGpuBufferable for Arc<[MeshletBoundingSpheres]> {
+impl PersistentGpuBufferable for Arc<[MeshletCullingData]> {
     type Metadata = ();
 
     fn size_in_bytes(&self) -> usize {
-        self.len() * size_of::<MeshletBoundingSpheres>()
+        self.len() * size_of::<MeshletCullingData>()
     }
 
     fn write_bytes_le(&self, _: Self::Metadata, buffer_slice: &mut [u8]) {

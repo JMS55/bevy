@@ -10,7 +10,8 @@ use encase::{
     UniformBuffer as UniformBufferWrapper,
 };
 use wgpu::{
-    util::BufferInitDescriptor, BindingResource, BufferBinding, BufferDescriptor, BufferUsages,
+    util::BufferInitDescriptor, BindingResource, BufferBinding, BufferDescriptor, BufferSize,
+    BufferUsages,
 };
 
 use super::IntoBinding;
@@ -43,6 +44,7 @@ pub struct UniformBuffer<T: ShaderType> {
     label: Option<String>,
     changed: bool,
     buffer_usage: BufferUsages,
+    last_written_size: Option<BufferSize>,
 }
 
 impl<T: ShaderType> From<T> for UniformBuffer<T> {
@@ -54,6 +56,7 @@ impl<T: ShaderType> From<T> for UniformBuffer<T> {
             label: None,
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            last_written_size: None,
         }
     }
 }
@@ -67,6 +70,7 @@ impl<T: ShaderType + Default> Default for UniformBuffer<T> {
             label: None,
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            last_written_size: None,
         }
     }
 }
@@ -79,9 +83,11 @@ impl<T: ShaderType + WriteInto> UniformBuffer<T> {
 
     #[inline]
     pub fn binding(&self) -> Option<BindingResource> {
-        Some(BindingResource::Buffer(
-            self.buffer()?.as_entire_buffer_binding(),
-        ))
+        Some(BindingResource::Buffer(BufferBinding {
+            buffer: self.buffer()?,
+            offset: 0,
+            size: self.last_written_size,
+        }))
     }
 
     /// Set the data the buffer stores.
@@ -139,16 +145,15 @@ impl<T: ShaderType + WriteInto> UniformBuffer<T> {
         } else if let Some(buffer) = &self.buffer {
             queue.write_buffer(buffer, 0, self.scratch.as_ref());
         }
+
+        self.last_written_size = BufferSize::new(size);
     }
 }
 
 impl<'a, T: ShaderType + WriteInto> IntoBinding<'a> for &'a UniformBuffer<T> {
     #[inline]
     fn into_binding(self) -> BindingResource<'a> {
-        self.buffer()
-            .expect("Failed to get buffer")
-            .as_entire_buffer_binding()
-            .into_binding()
+        self.binding().expect("Failed to get buffer")
     }
 }
 
@@ -180,6 +185,7 @@ pub struct DynamicUniformBuffer<T: ShaderType> {
     label: Option<String>,
     changed: bool,
     buffer_usage: BufferUsages,
+    last_written_size: Option<BufferSize>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -191,6 +197,7 @@ impl<T: ShaderType> Default for DynamicUniformBuffer<T> {
             label: None,
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            last_written_size: None,
             _marker: PhantomData,
         }
     }
@@ -204,6 +211,7 @@ impl<T: ShaderType + WriteInto> DynamicUniformBuffer<T> {
             label: None,
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            last_written_size: None,
             _marker: PhantomData,
         }
     }
@@ -218,7 +226,7 @@ impl<T: ShaderType + WriteInto> DynamicUniformBuffer<T> {
         Some(BindingResource::Buffer(BufferBinding {
             buffer: self.buffer()?,
             offset: 0,
-            size: Some(T::min_size()),
+            size: self.last_written_size,
         }))
     }
 
@@ -346,6 +354,8 @@ impl<T: ShaderType + WriteInto> DynamicUniformBuffer<T> {
         } else if let Some(buffer) = &self.buffer {
             queue.write_buffer(buffer, 0, self.scratch.as_ref());
         }
+
+        self.last_written_size = BufferSize::new(size);
     }
 
     #[inline]
@@ -398,6 +408,6 @@ impl<'a> BufferMut for QueueWriteBufferViewWrapper<'a> {
 impl<'a, T: ShaderType + WriteInto> IntoBinding<'a> for &'a DynamicUniformBuffer<T> {
     #[inline]
     fn into_binding(self) -> BindingResource<'a> {
-        self.binding().unwrap()
+        self.binding().expect("Failed to get buffer")
     }
 }

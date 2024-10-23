@@ -70,7 +70,7 @@ impl<T: NoUninit> RawBufferVec<T> {
     #[inline]
     pub fn binding(&self) -> Option<BindingResource> {
         Some(BindingResource::Buffer(
-            self.buffer()?.as_entire_buffer_binding(),
+            self.buffer()?.as_entire_buffer_binding(), // TODO
         ))
     }
 
@@ -405,7 +405,7 @@ where
     #[inline]
     pub fn binding(&self) -> Option<BindingResource> {
         Some(BindingResource::Buffer(
-            self.buffer()?.as_entire_buffer_binding(),
+            self.buffer()?.as_entire_buffer_binding(), // TODO
         ))
     }
 

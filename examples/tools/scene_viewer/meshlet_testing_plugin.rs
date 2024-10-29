@@ -10,7 +10,8 @@ use bevy::{
     log::info,
     pbr::{
         experimental::meshlet::{
-            MeshletMesh, MeshletMesh3d, MeshletPlugin, DEFAULT_VERTEX_POSITION_QUANTIZATION_FACTOR,
+            MeshletMesh, MeshletMesh3d, MeshletPlugin,
+            MESHLET_DEFAULT_VERTEX_POSITION_QUANTIZATION_FACTOR,
         },
         Material, MaterialPlugin, MeshMaterial3d, StandardMaterial,
     },
@@ -57,7 +58,7 @@ fn swap_meshes_to_meshlet_meshes(
         mesh.remove_attribute(Mesh::ATTRIBUTE_TANGENT.id);
 
         let Ok(meshlet_mesh) =
-            MeshletMesh::from_mesh(mesh, DEFAULT_VERTEX_POSITION_QUANTIZATION_FACTOR)
+            MeshletMesh::from_mesh(mesh, MESHLET_DEFAULT_VERTEX_POSITION_QUANTIZATION_FACTOR)
         else {
             info!("glTF mesh was not valid to convert to MeshletMesh, skipping");
             continue;

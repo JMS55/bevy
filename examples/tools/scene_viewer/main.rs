@@ -18,6 +18,8 @@ mod camera_controller;
 
 #[cfg(feature = "animation")]
 mod animation_plugin;
+#[cfg(feature = "meshlet_processor")]
+mod meshlet_testing_plugin;
 mod morph_viewer_plugin;
 mod scene_viewer_plugin;
 
@@ -49,6 +51,9 @@ fn main() {
 
     #[cfg(feature = "animation")]
     app.add_plugins(animation_plugin::AnimationManipulationPlugin);
+
+    #[cfg(feature = "meshlet_processor")]
+    app.add_plugins(meshlet_testing_plugin::MeshletTestingPlugin);
 
     app.run();
 }

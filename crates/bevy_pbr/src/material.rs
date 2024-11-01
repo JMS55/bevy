@@ -4,7 +4,7 @@ use crate::meshlet::{
     prepare_material_meshlet_meshes_main_opaque_pass, queue_material_meshlet_meshes,
     InstanceManager,
 };
-use crate::*;
+use crate::{decal::queue_forward_decals, *};
 use bevy_asset::{Asset, AssetId, AssetServer};
 use bevy_core_pipeline::{
     core_3d::{
@@ -189,6 +189,13 @@ pub trait Material: Asset + AsBindGroup + Clone + Sized {
         ShaderRef::Default
     }
 
+    /// Returns this material's forward decal fragment shader. If [`ShaderRef::Default`] is returned, the default forward decal fragment shader
+    /// will be used.
+    #[allow(unused_variables)]
+    fn forward_decal_fragment_shader() -> ShaderRef {
+        ShaderRef::Default
+    }
+
     /// Returns this material's [`crate::meshlet::MeshletMesh`] fragment shader. If [`ShaderRef::Default`] is returned,
     /// the default meshlet mesh fragment shader will be used.
     ///
@@ -285,7 +292,7 @@ where
                 .add_systems(ExtractSchedule, extract_mesh_materials::<M>)
                 .add_systems(
                     Render,
-                    queue_material_meshes::<M>
+                    (queue_material_meshes::<M>, queue_forward_decals::<M>)
                         .in_set(RenderSet::QueueMeshes)
                         .after(prepare_assets::<PreparedMaterial<M>>),
                 );

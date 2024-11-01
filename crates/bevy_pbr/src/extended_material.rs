@@ -67,6 +67,13 @@ pub trait MaterialExtension: Asset + AsBindGroup + Clone + Sized {
         ShaderRef::Default
     }
 
+    /// Returns this material's forward decal fragment shader. If [`ShaderRef::Default`] is returned, the default forward decal fragment shader
+    /// will be used.
+    #[allow(unused_variables)]
+    fn forward_decal_fragment_shader() -> ShaderRef {
+        ShaderRef::Default
+    }
+
     /// Returns this material's [`crate::meshlet::MeshletMesh`] fragment shader. If [`ShaderRef::Default`] is returned,
     /// the default meshlet mesh fragment shader will be used.
     #[allow(unused_variables)]
@@ -239,6 +246,13 @@ impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {
     fn deferred_fragment_shader() -> ShaderRef {
         match E::deferred_fragment_shader() {
             ShaderRef::Default => B::deferred_fragment_shader(),
+            specified => specified,
+        }
+    }
+
+    fn forward_decal_fragment_shader() -> ShaderRef {
+        match E::forward_decal_fragment_shader() {
+            ShaderRef::Default => B::forward_decal_fragment_shader(),
             specified => specified,
         }
     }

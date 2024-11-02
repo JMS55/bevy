@@ -17,7 +17,7 @@ use bevy_render::{
     render_resource::*,
     view::ExtractedView,
 };
-use bevy_utils::{HashMap, HashSet};
+use bevy_utils::{tracing::error, HashMap, HashSet};
 use core::hash::Hash;
 
 /// A list of `(Material ID, Pipeline, BindGroup)` for a view for use in [`super::MeshletMainOpaquePass3dNode`].
@@ -153,15 +153,20 @@ pub fn prepare_material_meshlet_meshes_main_opaque_pass<M: Material>(
                 continue;
             }
 
-            let Ok(material_pipeline_descriptor) = material_pipeline.specialize(
+            let material_pipeline_descriptor = match material_pipeline.specialize(
                 MaterialPipelineKey {
                     mesh_key: view_key,
                     bind_group_data: material.key.clone(),
                 },
                 fake_vertex_buffer_layout,
-            ) else {
-                continue;
+            ) {
+                Ok(material_pipeline_descriptor) => material_pipeline_descriptor,
+                Err(err) => {
+                    error!("{}", err);
+                    continue;
+                }
             };
+
             let material_fragment = material_pipeline_descriptor.fragment.unwrap();
 
             let mut shader_defs = material_fragment.shader_defs;
@@ -289,15 +294,20 @@ pub fn prepare_material_meshlet_meshes_prepass<M: Material>(
                 continue;
             }
 
-            let Ok(material_pipeline_descriptor) = prepass_pipeline.specialize(
+            let material_pipeline_descriptor = match material_pipeline.specialize(
                 MaterialPipelineKey {
                     mesh_key: view_key,
                     bind_group_data: material.key.clone(),
                 },
                 fake_vertex_buffer_layout,
-            ) else {
-                continue;
+            ) {
+                Ok(material_pipeline_descriptor) => material_pipeline_descriptor,
+                Err(err) => {
+                    error!("{}", err);
+                    continue;
+                }
             };
+
             let material_fragment = material_pipeline_descriptor.fragment.unwrap();
 
             let mut shader_defs = material_fragment.shader_defs;

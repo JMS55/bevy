@@ -268,7 +268,7 @@ pub fn queue_forward_decals<M: Material>(
                 pipeline_descriptor.fragment.as_mut().unwrap(),
             );
 
-            pipeline_descriptor.layout.remove(1); // Remove mesh bind group
+            pipeline_descriptor.layout.remove(1); // Remove mesh bind group, TODO: need to replace slot 1 with None, not remove
             depth_stencil.depth_compare = CompareFunction::Always;
             fragment.shader = match M::forward_decal_fragment_shader() {
                 ShaderRef::Default => todo!(),

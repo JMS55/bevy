@@ -1,4 +1,6 @@
+use crate::{environment_map::EnvironmentMapLight, irradiance_volume::IrradianceVolume, *};
 use bevy_app::{App, Plugin, PostUpdate};
+use bevy_asset::AssetServer;
 use bevy_core_pipeline::{
     core_3d::{Camera3d, Transparent3d},
     oit::OrderIndependentTransparencySettings,
@@ -14,32 +16,31 @@ use bevy_ecs::{
 };
 use bevy_reflect::Reflect;
 use bevy_render::{
+    alpha::AlphaMode,
     camera::{Projection, TemporalJitter},
     extract_component::ExtractComponent,
-    render_asset::{prepare_assets, RenderAssets},
-    render_phase::{
-        BinnedRenderPhaseType, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
-        RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
+    mesh::{
+        MeshVertexBufferLayout, MeshVertexBufferLayoutRef, MeshVertexBufferLayouts,
+        VertexBufferLayout,
     },
-    render_resource::{PipelineCache, SpecializedRenderPipelines},
+    render_asset::RenderAssets,
+    render_phase::{
+        DrawFunctions, PhaseItemExtraIndex, RenderCommand, RenderCommandResult, SetItemPipeline,
+        TrackedRenderPass, ViewSortedRenderPhases,
+    },
+    render_resource::{
+        CompareFunction, PipelineCache, ShaderRef, SpecializedMeshPipeline, VertexState,
+        VertexStepMode,
+    },
     sync_component::SyncComponentPlugin,
     view::{
         check_visibility, ExtractedView, Msaa, RenderVisibilityRanges, RenderVisibleEntities,
         Visibility, VisibilitySystems,
     },
-    Render, RenderApp, RenderSet,
 };
 use bevy_transform::components::Transform;
 use bevy_utils::tracing::error;
-
-use crate::{
-    alpha_mode_pipeline_key, irradiance_volume::IrradianceVolume, prelude::EnvironmentMapLight,
-    screen_space_specular_transmission_pipeline_key, tonemapping_pipeline_key, Material,
-    MaterialPipeline, MaterialPipelineKey, MeshPipelineKey, PreparedMaterial, RenderLightmaps,
-    RenderMaterialInstances, RenderMeshInstanceFlags, RenderMeshInstances, RenderViewLightProbes,
-    ScreenSpaceAmbientOcclusion, SetMaterialBindGroup, SetMeshBindGroup, SetMeshViewBindGroup,
-    ShadowFilteringMethod,
-};
+use core::hash::Hash;
 
 /// TODO: Docs, used with MeshMaterial3d
 #[derive(Component, ExtractComponent, Reflect, Clone, Copy, Default)]
@@ -81,7 +82,7 @@ impl RenderCommand<Transparent3d> for DrawForwardDecalQuad {
 type DrawForwardDecal<M> = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
-    SetMeshBindGroup<1>,
+    // TODO: Need to _unset_ MeshBindGroup at group 1
     SetMaterialBindGroup<M, 2>,
     DrawForwardDecalQuad,
 );
@@ -90,14 +91,14 @@ type DrawForwardDecal<M> = (
 pub fn queue_forward_decals<M: Material>(
     transparent_draw_functions: Res<DrawFunctions<Transparent3d>>,
     material_pipeline: Res<MaterialPipeline<M>>,
-    mut pipelines: ResMut<SpecializedRenderPipelines<MaterialPipeline<M>>>,
     pipeline_cache: Res<PipelineCache>,
     render_materials: Res<RenderAssets<PreparedMaterial<M>>>,
-    render_mesh_instances: Res<RenderMeshInstances>,
     render_material_instances: Res<RenderMaterialInstances<M>>,
     render_lightmaps: Res<RenderLightmaps>,
     render_visibility_ranges: Res<RenderVisibilityRanges>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+    asset_server: Res<AssetServer>,
+    mut mesh_vertex_buffer_layouts: ResMut<MeshVertexBufferLayouts>,
     views: Query<(
         Entity,
         &ExtractedView,
@@ -125,6 +126,8 @@ pub fn queue_forward_decals<M: Material>(
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
 {
+    let fake_vertex_buffer_layout = &fake_vertex_buffer_layout(&mut mesh_vertex_buffer_layouts);
+
     for (
         view_entity,
         view,
@@ -222,13 +225,8 @@ pub fn queue_forward_decals<M: Material>(
             );
         }
 
-        let rangefinder = view.rangefinder3d();
         for (render_entity, visible_entity) in visible_entities.iter::<With<ForwardDecal>>() {
             let Some(material_asset_id) = render_material_instances.get(visible_entity) else {
-                continue;
-            };
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
-            else {
                 continue;
             };
             let Some(material) = render_materials.get(*material_asset_id) else {
@@ -236,13 +234,8 @@ pub fn queue_forward_decals<M: Material>(
             };
 
             let mut mesh_pipeline_key_bits = material.properties.mesh_pipeline_key_bits;
-            mesh_pipeline_key_bits.insert(alpha_mode_pipeline_key(
-                material.properties.alpha_mode,
-                msaa,
-            ));
-            let mut mesh_key = view_key
-                | MeshPipelineKey::from_bits_retain(mesh.key_bits.bits())
-                | mesh_pipeline_key_bits;
+            mesh_pipeline_key_bits.insert(alpha_mode_pipeline_key(AlphaMode::Blend, msaa));
+            let mut mesh_key = view_key | mesh_pipeline_key_bits;
 
             let lightmap_image = render_lightmaps
                 .render_lightmaps
@@ -256,47 +249,45 @@ pub fn queue_forward_decals<M: Material>(
                 mesh_key |= MeshPipelineKey::VISIBILITY_RANGE_DITHER;
             }
 
-            if motion_vector_prepass {
-                // If the previous frame have skins or morph targets, note that.
-                if mesh_instance
-                    .flags
-                    .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_SKIN)
-                {
-                    mesh_key |= MeshPipelineKey::HAS_PREVIOUS_SKIN;
-                }
-                if mesh_instance
-                    .flags
-                    .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_MORPH)
-                {
-                    mesh_key |= MeshPipelineKey::HAS_PREVIOUS_MORPH;
-                }
-            }
-
-            let pipeline_id = pipelines.specialize(
-                &pipeline_cache,
-                &material_pipeline,
+            let mut pipeline_descriptor = match material_pipeline.specialize(
                 MaterialPipelineKey {
                     mesh_key,
                     bind_group_data: material.key.clone(),
                 },
-                &mesh.layout,
-            );
-            let pipeline_id = match pipeline_id {
-                Ok(id) => id,
+                fake_vertex_buffer_layout,
+            ) {
+                Ok(pipeline_descriptor) => pipeline_descriptor,
                 Err(err) => {
                     error!("{}", err);
                     continue;
                 }
             };
 
-            mesh_instance
-                .material_bind_group_id
-                .set(material.get_bind_group_id());
+            let (depth_stencil, fragment) = (
+                pipeline_descriptor.depth_stencil.as_mut().unwrap(),
+                pipeline_descriptor.fragment.as_mut().unwrap(),
+            );
+
+            pipeline_descriptor.layout.remove(1); // Remove mesh bind group
+            depth_stencil.depth_compare = CompareFunction::Always;
+            fragment.shader = match M::forward_decal_fragment_shader() {
+                ShaderRef::Default => todo!(),
+                ShaderRef::Handle(handle) => handle,
+                ShaderRef::Path(path) => asset_server.load(path),
+            };
+            pipeline_descriptor.vertex = VertexState {
+                shader: todo!(),
+                shader_defs: pipeline_descriptor.vertex.shader_defs,
+                entry_point: todo!(),
+                buffers: Vec::new(),
+            };
+
+            let pipeline = pipeline_cache.queue_render_pipeline(pipeline_descriptor);
 
             transparent_phase.add(Transparent3d {
                 entity: (*render_entity, *visible_entity),
                 draw_function: draw_transparent_pbr,
-                pipeline: pipeline_id,
+                pipeline,
                 // Transparent items are rendered back to front, so force forward decals to render first,
                 // so that they're correctly visible through transparent objects
                 distance: f32::MAX,
@@ -305,4 +296,16 @@ pub fn queue_forward_decals<M: Material>(
             });
         }
     }
+}
+
+// Forward decal materials don't use a traditional vertex buffer, but the material specialization requires one.
+fn fake_vertex_buffer_layout(layouts: &mut MeshVertexBufferLayouts) -> MeshVertexBufferLayoutRef {
+    layouts.insert(MeshVertexBufferLayout::new(
+        vec![],
+        VertexBufferLayout {
+            array_stride: 0,
+            step_mode: VertexStepMode::Vertex,
+            attributes: vec![],
+        },
+    ))
 }

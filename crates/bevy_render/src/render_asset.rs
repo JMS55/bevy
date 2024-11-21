@@ -328,8 +328,8 @@ pub fn prepare_assets<A: RenderAsset>(
         }
     }
 
-    for removed in extracted_assets.removed.drain() {
-        render_assets.remove(removed);
+    for removed in &extracted_assets.removed {
+        render_assets.remove(*removed);
     }
 
     for (id, extracted_asset) in extracted_assets.extracted.drain(..) {

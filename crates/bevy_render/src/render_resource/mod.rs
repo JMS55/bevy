@@ -38,7 +38,7 @@ pub use wgpu::{
     },
     AdapterInfo as WgpuAdapterInfo, AddressMode, AstcBlock, AstcChannel, BindGroupDescriptor,
     BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
-    BlendComponent, BlendFactor, BlendOperation, BlendState, BufferAddress, BufferAsyncError,
+    Blas, BlendComponent, BlendFactor, BlendOperation, BlendState, BufferAddress, BufferAsyncError,
     BufferBinding, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages, ColorTargetState,
     ColorWrites, CommandEncoder, CommandEncoderDescriptor, CompareFunction, ComputePass,
     ComputePassDescriptor, ComputePipelineDescriptor as RawComputePipelineDescriptor,
@@ -53,7 +53,7 @@ pub use wgpu::{
     ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StencilFaceState,
     StencilOperation, StencilState, StorageTextureAccess, StoreOp, TextureAspect,
     TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureViewDescriptor, TextureViewDimension, VertexAttribute,
+    TextureViewDescriptor, TextureViewDimension, Tlas, VertexAttribute,
     VertexBufferLayout as RawVertexBufferLayout, VertexFormat, VertexState as RawVertexState,
     VertexStepMode, COPY_BUFFER_ALIGNMENT,
 };

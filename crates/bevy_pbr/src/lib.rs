@@ -39,6 +39,7 @@ mod parallax;
 mod pbr_material;
 mod prepass;
 mod render;
+pub mod solari;
 mod ssao;
 mod ssr;
 mod volumetric_fog;

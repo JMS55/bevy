@@ -456,6 +456,11 @@ ghost_nodes = ["bevy_internal/ghost_nodes"]
 [dependencies]
 bevy_internal = { path = "crates/bevy_internal", version = "0.15.0-dev", default-features = false }
 
+[patch.crates-io]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "79a6f2cd3158ff1ae16b94fcf260cf52744c73fc" }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "79a6f2cd3158ff1ae16b94fcf260cf52744c73fc" }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "79a6f2cd3158ff1ae16b94fcf260cf52744c73fc" }
+
 # Wasm does not support dynamic linking.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 bevy_dylib = { path = "crates/bevy_dylib", version = "0.15.0-dev", default-features = false, optional = true }

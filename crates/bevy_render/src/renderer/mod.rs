@@ -223,8 +223,8 @@ pub async fn initialize_renderer(
         // <https://github.com/gfx-rs/wgpu/issues/5488>
         // WGPU also currently doesn't actually support these features yet, so we should disable
         // them until they are safe to enable.
-        features -= wgpu::Features::RAY_QUERY;
-        features -= wgpu::Features::RAY_TRACING_ACCELERATION_STRUCTURE;
+        features -= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        features -= wgpu::Features::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE;
 
         limits = adapter.limits();
     }

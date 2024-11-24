@@ -7,7 +7,8 @@ use bevy_ecs::{
 };
 use bevy_render::{
     extract_resource::{ExtractResource, ExtractResourcePlugin},
-    mesh::allocator::allocate_and_free_meshes,
+    mesh::{allocator::allocate_and_free_meshes, RenderMesh},
+    render_asset::prepare_assets,
     renderer::RenderDevice,
     settings::WgpuFeatures,
     Render, RenderApp, RenderSet,
@@ -36,6 +37,7 @@ impl Plugin for SolariPlugin {
             update_blas
                 .in_set(RenderSet::PrepareAssets)
                 .after(allocate_and_free_meshes)
+                .before(prepare_assets::<RenderMesh>)
                 .run_if(resource_exists::<SolariEnabled>),
         );
 

@@ -4,7 +4,10 @@
 mod camera_controller;
 
 use bevy::{
-    core_pipeline::experimental::taa::{TemporalAntiAliasPlugin, TemporalAntiAliasing},
+    core_pipeline::{
+        experimental::taa::{TemporalAntiAliasPlugin, TemporalAntiAliasing},
+        prepass::DeferredPrepass,
+    },
     pbr::{
         experimental::solari::{Solari, SolariEnabled, SolariPlugin, SolariSupported},
         DefaultOpaqueRendererMethod,
@@ -72,6 +75,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         Transform::from_xyz(-278.0, 273.0, 800.0),
         TemporalAntiAliasing::default(),
         Msaa::Off,
+        DeferredPrepass,
         CameraController::default(),
     ));
 }

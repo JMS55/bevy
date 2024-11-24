@@ -20,7 +20,7 @@ use bevy_utils::{
 };
 use offset_allocator::{Allocation, Allocator};
 use wgpu::{
-    BufferDescriptor, BufferSize, BufferUsages, CommandEncoderDescriptor, DownlevelFlags,
+    BufferDescriptor, BufferSize, BufferUsages, CommandEncoderDescriptor, DownlevelFlags, Features,
     COPY_BUFFER_ALIGNMENT,
 };
 
@@ -521,7 +521,7 @@ impl MeshAllocator {
         mesh_id: &AssetId<Mesh>,
         len: usize,
         fill_data: impl Fn(&mut [u8]),
-        buffer_usages: BufferUsages,
+        mut buffer_usages: BufferUsages,
         slab_id: SlabId,
         render_device: &RenderDevice,
         render_queue: &RenderQueue,
@@ -562,6 +562,15 @@ impl MeshAllocator {
 
             Slab::LargeObject(ref mut large_object_slab) => {
                 debug_assert!(large_object_slab.buffer.is_none());
+
+                // If the user intends to use ray tracing (the feature is not enabled by default), enable these buffer usages.
+                // Probably(?) has little cost on RT-capable hardware if they end up going unused.
+                if render_device
+                    .features()
+                    .contains(Features::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE)
+                {
+                    buffer_usages |= BufferUsages::BLAS_INPUT | BufferUsages::STORAGE;
+                }
 
                 // Create the buffer and its data in one go.
                 let buffer = render_device.create_buffer(&BufferDescriptor {
@@ -785,6 +794,15 @@ impl MeshAllocator {
             ElementClass::Vertex => buffer_usages |= BufferUsages::VERTEX,
             ElementClass::Index => buffer_usages |= BufferUsages::INDEX,
         };
+
+        // If the user intends to use ray tracing (the feature is not enabled by default), enable these buffer usages.
+        // Probably(?) has little cost on RT-capable hardware if they end up going unused.
+        if render_device
+            .features()
+            .contains(Features::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE)
+        {
+            buffer_usages |= BufferUsages::BLAS_INPUT | BufferUsages::STORAGE;
+        }
 
         // Create the buffer.
         let new_buffer = render_device.create_buffer(&BufferDescriptor {

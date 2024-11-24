@@ -23,6 +23,10 @@ pub mod experimental {
     pub mod meshlet {
         pub use crate::meshlet::*;
     }
+
+    pub mod solari {
+        pub use crate::solari::*;
+    }
 }
 
 mod bundle;
@@ -39,7 +43,7 @@ mod parallax;
 mod pbr_material;
 mod prepass;
 mod render;
-pub mod solari;
+mod solari;
 mod ssao;
 mod ssr;
 mod volumetric_fog;

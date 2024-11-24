@@ -1125,6 +1125,17 @@ category = "3D Rendering"
 wasm = true
 
 [[example]]
+name = "solari"
+path = "examples/3d/solari.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.solari]
+name = "Solari"
+description = "Ray traced lighting"
+category = "3D Rendering"
+wasm = false
+
+[[example]]
 name = "texture"
 path = "examples/3d/texture.rs"
 doc-scrape-examples = true

@@ -46,9 +46,12 @@ pub fn update_blas(
         .map(|(asset_id, _)| {
             let index_slice = mesh_allocator.mesh_index_slice(asset_id).unwrap();
             let vertex_slice = mesh_allocator.mesh_vertex_slice(asset_id).unwrap();
+            
             let (blas, blas_size) =
                 create_blas(&index_slice, &vertex_slice, asset_id, &render_device);
+
             blas_manager.insert(*asset_id, blas);
+
             (*asset_id, index_slice, vertex_slice, blas_size)
         })
         .collect::<Vec<_>>();
@@ -73,6 +76,7 @@ pub fn update_blas(
             }
         })
         .collect::<Vec<_>>();
+
     let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("build_blas_command_encoder"),
     });

@@ -1,9 +1,10 @@
+use super::util::is_mesh_solari_compatible;
 use bevy_asset::AssetId;
 use bevy_ecs::system::{Res, ResMut, Resource};
 use bevy_render::{
     mesh::{
         allocator::{MeshAllocator, MeshBufferSlice},
-        Indices, Mesh, PrimitiveTopology, RenderMesh,
+        Mesh, RenderMesh,
     },
     render_asset::ExtractedAssets,
     render_resource::*,
@@ -44,22 +45,22 @@ pub fn update_blas(
         .iter()
         .filter(|(_, mesh)| is_mesh_solari_compatible(mesh))
         .map(|(asset_id, _)| {
-            let index_slice = mesh_allocator.mesh_index_slice(asset_id).unwrap();
             let vertex_slice = mesh_allocator.mesh_vertex_slice(asset_id).unwrap();
-            
+            let index_slice = mesh_allocator.mesh_index_slice(asset_id).unwrap();
+
             let (blas, blas_size) =
-                create_blas(&index_slice, &vertex_slice, asset_id, &render_device);
+                create_blas(&vertex_slice, &index_slice, asset_id, &render_device);
 
             blas_manager.insert(*asset_id, blas);
 
-            (*asset_id, index_slice, vertex_slice, blas_size)
+            (*asset_id, vertex_slice, index_slice, blas_size)
         })
         .collect::<Vec<_>>();
 
     // Build geometry into each BLAS
     let build_entries = blas_resources
         .iter()
-        .map(|(asset_id, index_slice, vertex_slice, blas_size)| {
+        .map(|(asset_id, vertex_slice, index_slice, blas_size)| {
             let geometry = BlasTriangleGeometry {
                 size: blas_size,
                 vertex_buffer: vertex_slice.buffer,
@@ -84,21 +85,9 @@ pub fn update_blas(
     render_queue.submit([command_encoder.finish()]);
 }
 
-fn is_mesh_solari_compatible(mesh: &Mesh) -> bool {
-    let triangle_list = mesh.primitive_topology() == PrimitiveTopology::TriangleList;
-    let vertex_attributes = mesh.attributes().map(|(attribute, _)| attribute.id).eq([
-        Mesh::ATTRIBUTE_POSITION.id,
-        Mesh::ATTRIBUTE_NORMAL.id,
-        Mesh::ATTRIBUTE_UV_0.id,
-        Mesh::ATTRIBUTE_TANGENT.id,
-    ]);
-    let indexed_32 = matches!(mesh.indices(), Some(Indices::U32(..)));
-    mesh.ray_tracing_support && triangle_list && vertex_attributes && indexed_32
-}
-
 fn create_blas(
-    index_slice: &MeshBufferSlice,
     vertex_slice: &MeshBufferSlice,
+    index_slice: &MeshBufferSlice,
     asset_id: &AssetId<Mesh>,
     render_device: &RenderDevice,
 ) -> (Blas, BlasTriangleGeometrySizeDescriptor) {

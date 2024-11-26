@@ -1,10 +1,14 @@
+mod asset_binder;
 mod blas;
+mod util;
 
+use self::asset_binder::{copy_extracted_image_ids, prepare_asset_binding_arrays, AssetBindings};
 use self::blas::{update_blas, BlasManager};
 use bevy_app::{App, Plugin};
 use bevy_ecs::{
     component::Component, prelude::resource_exists, schedule::IntoSystemConfigs, system::Resource,
 };
+use bevy_render::texture::GpuImage;
 use bevy_render::{
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     mesh::{allocator::allocate_and_free_meshes, RenderMesh},
@@ -32,14 +36,34 @@ impl Plugin for SolariPlugin {
             _ => return,
         }
 
-        render_app.init_resource::<BlasManager>().add_systems(
-            Render,
-            update_blas
-                .in_set(RenderSet::PrepareAssets)
-                .after(allocate_and_free_meshes)
-                .before(prepare_assets::<RenderMesh>)
-                .run_if(resource_exists::<SolariEnabled>),
-        );
+        render_app
+            .init_resource::<AssetBindings>()
+            .init_resource::<BlasManager>()
+            .add_systems(
+                Render,
+                copy_extracted_image_ids
+                    .in_set(RenderSet::PrepareAssets)
+                    .before(prepare_assets::<GpuImage>)
+                    .run_if(resource_exists::<SolariEnabled>),
+            )
+            .add_systems(
+                Render,
+                prepare_asset_binding_arrays
+                    .in_set(RenderSet::PrepareAssets)
+                    .before(prepare_assets::<RenderMesh>)
+                    .after(prepare_assets::<GpuImage>)
+                    .after(allocate_and_free_meshes)
+                    .after(copy_extracted_image_ids)
+                    .run_if(resource_exists::<SolariEnabled>),
+            )
+            .add_systems(
+                Render,
+                update_blas
+                    .in_set(RenderSet::PrepareAssets)
+                    .before(prepare_assets::<RenderMesh>)
+                    .after(allocate_and_free_meshes)
+                    .run_if(resource_exists::<SolariEnabled>),
+            );
 
         app.insert_resource(SolariSupported);
     }

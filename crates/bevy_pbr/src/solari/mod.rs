@@ -49,33 +49,22 @@ impl Plugin for SolariPlugin {
             )
             .add_systems(
                 Render,
-                copy_extracted_image_ids
-                    .in_set(RenderSet::PrepareAssets)
-                    .before(prepare_assets::<GpuImage>)
-                    .run_if(resource_exists::<SolariEnabled>),
-            )
-            .add_systems(
-                Render,
-                prepare_asset_binding_arrays
-                    .in_set(RenderSet::PrepareAssets)
-                    .before(prepare_assets::<RenderMesh>)
-                    .after(prepare_assets::<GpuImage>)
-                    .after(allocate_and_free_meshes)
-                    .after(copy_extracted_image_ids)
-                    .run_if(resource_exists::<SolariEnabled>),
-            )
-            .add_systems(
-                Render,
-                update_blas
-                    .in_set(RenderSet::PrepareAssets)
-                    .before(prepare_assets::<RenderMesh>)
-                    .after(allocate_and_free_meshes)
-                    .run_if(resource_exists::<SolariEnabled>),
-            )
-            .add_systems(
-                Render,
-                prepare_scene_bindings
-                    .in_set(RenderSet::PrepareBindGroups)
+                (
+                    copy_extracted_image_ids
+                        .in_set(RenderSet::PrepareAssets)
+                        .before(prepare_assets::<GpuImage>),
+                    prepare_asset_binding_arrays
+                        .in_set(RenderSet::PrepareAssets)
+                        .before(prepare_assets::<RenderMesh>)
+                        .after(prepare_assets::<GpuImage>)
+                        .after(allocate_and_free_meshes)
+                        .after(copy_extracted_image_ids),
+                    update_blas
+                        .in_set(RenderSet::PrepareAssets)
+                        .before(prepare_assets::<RenderMesh>)
+                        .after(allocate_and_free_meshes),
+                    prepare_scene_bindings.in_set(RenderSet::PrepareBindGroups),
+                )
                     .run_if(resource_exists::<SolariEnabled>),
             );
 

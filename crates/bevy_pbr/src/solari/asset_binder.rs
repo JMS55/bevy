@@ -1,5 +1,5 @@
 use super::util::is_mesh_solari_compatible;
-use bevy_asset::AssetId;
+use bevy_asset::{AssetId, Handle};
 use bevy_ecs::{
     system::{Res, ResMut, Resource},
     world::{FromWorld, World},
@@ -18,10 +18,19 @@ use std::{num::NonZeroU32, ops::Deref};
 #[derive(Resource)]
 pub struct AssetBindings {
     pub bind_group_layout: BindGroupLayout,
-    pub mesh_indices: HashMap<AssetId<Mesh>, (u32, u32)>,
+    pub mesh_indices: HashMap<AssetId<Mesh>, [u32; 4]>,
     pub image_indices: HashMap<AssetId<Image>, u32>,
     pub bind_group: Option<BindGroup>,
     pub extracted_images: Vec<AssetId<Image>>,
+}
+
+impl AssetBindings {
+    pub fn get_image_index(&self, handle: Option<Handle<Image>>) -> u32 {
+        match handle {
+            Some(handle) => *self.image_indices.get(&handle.id()).unwrap_or(&u32::MAX),
+            None => u32::MAX,
+        }
+    }
 }
 
 impl FromWorld for AssetBindings {
@@ -102,9 +111,15 @@ pub fn prepare_asset_binding_arrays(
             }
         };
 
-        asset_bindings
-            .mesh_indices
-            .insert(*asset_id, (vertex_buffer_index, index_buffer_index));
+        asset_bindings.mesh_indices.insert(
+            *asset_id,
+            [
+                vertex_buffer_index,
+                vertex_slice.range.start,
+                index_buffer_index,
+                index_slice.range.start,
+            ],
+        );
     }
 
     // Build binding arrays of images and samplers

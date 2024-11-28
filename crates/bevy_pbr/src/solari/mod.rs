@@ -1,14 +1,17 @@
 mod asset_binder;
 mod blas;
+mod scene_binder;
 mod util;
 
 use self::asset_binder::{copy_extracted_image_ids, prepare_asset_binding_arrays, AssetBindings};
 use self::blas::{update_blas, BlasManager};
+use self::scene_binder::{extract_scene, prepare_scene_bindings, SceneBindings};
 use bevy_app::{App, Plugin};
 use bevy_ecs::{
     component::Component, prelude::resource_exists, schedule::IntoSystemConfigs, system::Resource,
 };
 use bevy_render::texture::GpuImage;
+use bevy_render::ExtractSchedule;
 use bevy_render::{
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     mesh::{allocator::allocate_and_free_meshes, RenderMesh},
@@ -38,7 +41,12 @@ impl Plugin for SolariPlugin {
 
         render_app
             .init_resource::<AssetBindings>()
+            .init_resource::<SceneBindings>()
             .init_resource::<BlasManager>()
+            .add_systems(
+                ExtractSchedule,
+                extract_scene.run_if(resource_exists::<SolariEnabled>),
+            )
             .add_systems(
                 Render,
                 copy_extracted_image_ids
@@ -62,6 +70,12 @@ impl Plugin for SolariPlugin {
                     .in_set(RenderSet::PrepareAssets)
                     .before(prepare_assets::<RenderMesh>)
                     .after(allocate_and_free_meshes)
+                    .run_if(resource_exists::<SolariEnabled>),
+            )
+            .add_systems(
+                Render,
+                prepare_scene_bindings
+                    .in_set(RenderSet::PrepareBindGroups)
                     .run_if(resource_exists::<SolariEnabled>),
             );
 

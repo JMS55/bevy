@@ -8,10 +8,7 @@ use bevy::{
         experimental::taa::{TemporalAntiAliasPlugin, TemporalAntiAliasing},
         prepass::DeferredPrepass,
     },
-    pbr::{
-        experimental::solari::{Solari, SolariEnabled, SolariPlugin, SolariSupported},
-        DefaultOpaqueRendererMethod,
-    },
+    pbr::experimental::solari::{Solari, SolariEnabled, SolariPlugin, SolariSupported},
     prelude::*,
     render::{
         settings::{RenderCreation, WgpuFeatures, WgpuSettings},
@@ -38,7 +35,6 @@ fn main() {
             SolariPlugin,
             CameraControllerPlugin,
         ))
-        .insert_resource(DefaultOpaqueRendererMethod::deferred())
         .insert_resource(AmbientLight::NONE)
         .add_systems(
             Startup,
@@ -71,7 +67,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             hdr: true,
             ..default()
         },
-        Solari {},
+        Solari {
+            debug_path_tracer: true,
+        },
         Transform::from_xyz(-278.0, 273.0, 800.0),
         TemporalAntiAliasing::default(),
         Msaa::Off,

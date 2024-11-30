@@ -14,6 +14,7 @@ use bevy::{
         settings::{RenderCreation, WgpuFeatures, WgpuSettings},
         RenderPlugin,
     },
+    scene::SceneInstanceReady,
 };
 use camera_controller::{CameraController, CameraControllerPlugin};
 use std::f32::consts::PI;
@@ -49,9 +50,24 @@ fn main() {
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(SolariEnabled);
 
-    commands.spawn(SceneRoot(asset_server.load(
-        GltfAssetLabel::Scene(0).from_asset("models/CornellBox/CornellBox.glb"),
-    )));
+    commands
+        .spawn(SceneRoot(asset_server.load(
+            GltfAssetLabel::Scene(0).from_asset("models/CornellBox/CornellBox.glb"),
+        )))
+        .observe(
+            |trigger: Trigger<SceneInstanceReady>,
+             children_query: Query<&Children>,
+             mesh_query: Query<&Mesh3d>,
+             mut meshes: ResMut<Assets<Mesh>>| {
+                for descendant in children_query.iter_descendants(trigger.entity()) {
+                    if let Ok(mesh) = mesh_query.get(descendant) {
+                        if let Some(mesh) = meshes.get_mut(mesh) {
+                            mesh.remove_attribute(Mesh::ATTRIBUTE_UV_1);
+                        }
+                    }
+                }
+            },
+        );
 
     commands.spawn((
         DirectionalLight {

@@ -122,6 +122,10 @@ pub fn prepare_asset_binding_arrays(
         );
     }
 
+    if vertex_buffers.is_empty() || index_buffers.is_empty() {
+        return;
+    }
+
     // Build binding arrays of images and samplers
     let device_features = Some(render_device.features());
     let (mut images, mut samplers) = gpu_images

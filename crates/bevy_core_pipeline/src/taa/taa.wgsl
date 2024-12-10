@@ -71,7 +71,7 @@ fn sample_view_target(uv: vec2<f32>) -> vec3<f32> {
 #ifdef TONEMAP
     sample = tonemap(sample);
 #endif
-    return RGB_to_YCoCg(sample);
+    return sample;
 }
 
 @fragment
@@ -85,6 +85,14 @@ fn taa(@location(0) uv: vec2<f32>) -> Output {
 #ifdef TONEMAP
     current_color = tonemap(current_color);
 #endif
+    let s_tl2 = sample_view_target(uv + vec2(-texel_size.x,  texel_size.y));
+    let s_tm2 = sample_view_target(uv + vec2( 0.0,           texel_size.y));
+    let s_tr2 = sample_view_target(uv + vec2( texel_size.x,  texel_size.y));
+    let s_ml2 = sample_view_target(uv + vec2(-texel_size.x,  0.0));
+    let s_mr2 = sample_view_target(uv + vec2( texel_size.x,  0.0));
+    let s_bl2 = sample_view_target(uv + vec2(-texel_size.x, -texel_size.y));
+    let s_bm2 = sample_view_target(uv + vec2( 0.0,          -texel_size.y));
+    let s_br2 = sample_view_target(uv + vec2( texel_size.x, -texel_size.y));
 
 #ifndef RESET
     // Pick the closest motion_vector from 5 samples (reduces aliasing on the edges of moving entities)
@@ -126,6 +134,7 @@ fn taa(@location(0) uv: vec2<f32>) -> Output {
     let sample_position = history_uv * texture_size;
     let texel_center = floor(sample_position - 0.5) + 0.5;
     let f = sample_position - texel_center;
+
     let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
     let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
     let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
@@ -134,24 +143,38 @@ fn taa(@location(0) uv: vec2<f32>) -> Output {
     let texel_position_0 = (texel_center - 1.0) * texel_size;
     let texel_position_3 = (texel_center + 2.0) * texel_size;
     let texel_position_12 = (texel_center + (w2 / w12)) * texel_size;
-    var history_color = sample_history(texel_position_12.x, texel_position_0.y) * w12.x * w0.y;
-    history_color += sample_history(texel_position_0.x, texel_position_12.y) * w0.x * w12.y;
-    history_color += sample_history(texel_position_12.x, texel_position_12.y) * w12.x * w12.y;
-    history_color += sample_history(texel_position_3.x, texel_position_12.y) * w3.x * w12.y;
-    history_color += sample_history(texel_position_12.x, texel_position_3.y) * w12.x * w3.y;
+
+    let hm = sample_history(texel_position_12.x, texel_position_12.y);
+    let ht = hm + (s_tm2 - current_color);
+    let hl = hm + (s_ml2 - current_color);
+    let hr = hm + (s_mr2 - current_color);
+    let hb = hm + (s_bm2 - current_color);
+
+    var history_color = ht * w12.x * w0.y;
+    history_color += hl * w0.x * w12.y;
+    history_color += hm * w12.x * w12.y;
+    history_color += hr * w3.x * w12.y;
+    history_color += hb * w12.x * w3.y;
+
+    // let m03 = f * (0.8 * f - 0.8);
+    // let lr = mix(hl, hr, m03.x);
+    // let tb = mix(ht, hb, m03.y);
+    // let clr = (m03.x * lr + hm) / (m03.x + 1.0);
+    // let ctb = (m03.y * tb + hm) / (m03.y + 1.0);
+    // history_color = clr + ctb;
 
     // Constrain past sample with 3x3 YCoCg variance clipping (reduces ghosting)
     // YCoCg: https://advances.realtimerendering.com/s2014/index.html#_HIGH-QUALITY_TEMPORAL_SUPERSAMPLING, slide 33
     // Variance clipping: https://developer.download.nvidia.com/gameworks/events/GDC2016/msalvi_temporal_supersampling.pdf
-    let s_tl = sample_view_target(uv + vec2(-texel_size.x,  texel_size.y));
-    let s_tm = sample_view_target(uv + vec2( 0.0,           texel_size.y));
-    let s_tr = sample_view_target(uv + vec2( texel_size.x,  texel_size.y));
-    let s_ml = sample_view_target(uv + vec2(-texel_size.x,  0.0));
+    let s_tl = RGB_to_YCoCg(s_tl2);
+    let s_tm = RGB_to_YCoCg(s_tm2);
+    let s_tr = RGB_to_YCoCg(s_tr2);
+    let s_ml = RGB_to_YCoCg(s_ml2);
     let s_mm = RGB_to_YCoCg(current_color);
-    let s_mr = sample_view_target(uv + vec2( texel_size.x,  0.0));
-    let s_bl = sample_view_target(uv + vec2(-texel_size.x, -texel_size.y));
-    let s_bm = sample_view_target(uv + vec2( 0.0,          -texel_size.y));
-    let s_br = sample_view_target(uv + vec2( texel_size.x, -texel_size.y));
+    let s_mr = RGB_to_YCoCg(s_mr2);
+    let s_bl = RGB_to_YCoCg(s_bl2);
+    let s_bm = RGB_to_YCoCg(s_bm2);
+    let s_br = RGB_to_YCoCg(s_br2);
     let moment_1 = s_tl + s_tm + s_tr + s_ml + s_mm + s_mr + s_bl + s_bm + s_br;
     let moment_2 = (s_tl * s_tl) + (s_tm * s_tm) + (s_tr * s_tr) + (s_ml * s_ml) + (s_mm * s_mm) + (s_mr * s_mr) + (s_bl * s_bl) + (s_bm * s_bm) + (s_br * s_br);
     let mean = moment_1 / 9.0;

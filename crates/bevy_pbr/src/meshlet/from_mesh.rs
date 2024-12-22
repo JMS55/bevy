@@ -109,11 +109,13 @@ impl MeshletMesh {
         })
         .take(meshlets.len())
         .collect::<Vec<_>>();
+        let mut group = vec![0; meshlets.len()];
 
         let mut vertex_locks = vec![false; vertices.vertex_count];
 
         // Build further LODs
         let mut simplification_queue = 0..meshlets.len();
+        let mut i = 1;
         while simplification_queue.len() > 1 {
             // For each meshlet build a list of connected meshlets (meshlets that share a vertex)
             let connected_meshlets_per_meshlet = find_connected_meshlets(
@@ -195,6 +197,8 @@ impl MeshletMesh {
                     })
                     .take(new_meshlet_ids.len()),
                 );
+                group.extend(iter::repeat(i).take(new_meshlet_ids.len()));
+                i += 1;
             }
 
             // Set simplification queue to the list of newly created meshlets
@@ -218,6 +222,7 @@ impl MeshletMesh {
                 &mut bevy_meshlets,
                 vertex_position_quantization_factor,
             );
+            bevy_meshlets[i].padding = group[i];
         }
         vertex_positions.set_uninitialized(false);
 
@@ -336,8 +341,24 @@ fn compute_meshlets(
         vertices: Vec::new(),
         triangles: Vec::new(),
     };
+    let mut x = 0;
+    let mut y = 0;
+    let mut z = 0;
+    let mut w = 0;
     for meshlet_indices in &indices_per_meshlet {
         let meshlet = build_meshlets(meshlet_indices, vertices, 255, 128, 0.0); // Meshoptimizer won't currently let us do 256 vertices
+        if meshlet_indices.len() / 3 > 128 {
+            x += 1;
+        }
+        if meshlet.triangles.len() / 3 > 128 {
+            y += 1;
+        }
+        if meshlet.len() > 1 {
+            z += 1;
+        }
+        if meshlet.triangles.len() / 3 == 126 {
+            w += 1;
+        }
         let vertex_offset = meshlets.vertices.len() as u32;
         let triangle_offset = meshlets.triangles.len() as u32;
         meshlets.vertices.extend_from_slice(&meshlet.vertices);
@@ -350,6 +371,7 @@ fn compute_meshlets(
                 meshlet
             }));
     }
+    println!("{x}, {y}, {z}, {w}/{}", meshlets.len());
     meshlets
 }
 

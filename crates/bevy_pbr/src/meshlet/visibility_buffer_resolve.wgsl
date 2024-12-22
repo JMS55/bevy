@@ -12,6 +12,7 @@
         get_meshlet_vertex_position,
         get_meshlet_vertex_normal,
         get_meshlet_vertex_uv,
+        get_meshlet_group,
     },
     mesh_view_bindings::view,
     mesh_functions::mesh_position_local_to_world,

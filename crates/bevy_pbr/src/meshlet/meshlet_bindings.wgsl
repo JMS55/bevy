@@ -24,6 +24,10 @@ fn get_meshlet_triangle_count(meshlet: ptr<function, Meshlet>) -> u32 {
     return extractBits((*meshlet).packed_a, 8u, 8u);
 }
 
+fn get_meshlet_group(meshlet: ptr<function, Meshlet>) -> u32 {
+    return extractBits((*meshlet).packed_a, 16u, 16u);
+}
+
 struct MeshletBoundingSpheres {
     culling_sphere: MeshletBoundingSphere,
     lod_group_sphere: MeshletBoundingSphere,

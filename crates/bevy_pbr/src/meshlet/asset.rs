@@ -41,19 +41,19 @@ pub const MESHLET_MESH_ASSET_VERSION: u64 = 1;
 #[derive(Asset, TypePath, Clone)]
 pub struct MeshletMesh {
     /// Quantized and bitstream-packed vertex positions for meshlet vertices.
-    pub(crate) vertex_positions: Arc<[u32]>,
+    pub vertex_positions: Arc<[u32]>,
     /// Octahedral-encoded and 2x16snorm packed normals for meshlet vertices.
-    pub(crate) vertex_normals: Arc<[u32]>,
+    pub vertex_normals: Arc<[u32]>,
     /// Uncompressed vertex texture coordinates for meshlet vertices.
-    pub(crate) vertex_uvs: Arc<[Vec2]>,
+    pub vertex_uvs: Arc<[Vec2]>,
     /// Triangle indices for meshlets.
-    pub(crate) indices: Arc<[u8]>,
+    pub indices: Arc<[u8]>,
     /// The list of meshlets making up this mesh.
-    pub(crate) meshlets: Arc<[Meshlet]>,
+    pub meshlets: Arc<[Meshlet]>,
     /// Spherical bounding volumes.
-    pub(crate) meshlet_bounding_spheres: Arc<[MeshletBoundingSpheres]>,
+    pub meshlet_bounding_spheres: Arc<[MeshletBoundingSpheres]>,
     /// Meshlet group and parent group simplification errors.
-    pub(crate) meshlet_simplification_errors: Arc<[MeshletSimplificationError]>,
+    pub meshlet_simplification_errors: Arc<[MeshletSimplificationError]>,
 }
 
 /// A single meshlet within a [`MeshletMesh`].

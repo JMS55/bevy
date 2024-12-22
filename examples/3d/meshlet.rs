@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         .add_plugins((
             DefaultPlugins,
             MeshletPlugin {
-                cluster_buffer_slots: 8192,
+                cluster_buffer_slots: 8000_192,
             },
             MaterialPlugin::<MeshletDebugMaterial>::default(),
             CameraControllerPlugin,

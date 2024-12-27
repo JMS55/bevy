@@ -27,6 +27,7 @@ meshlet_processor = [
   "dep:metis",
   "dep:itertools",
   "dep:bitvec",
+  "dep:obvhs",
 ]
 
 [dependencies]
@@ -64,6 +65,7 @@ meshopt = { version = "0.4.1", optional = true }
 metis = { version = "0.2", optional = true }
 itertools = { version = "0.13", optional = true }
 bitvec = { version = "1", optional = true }
+obvhs = { version = "0.2", optional = true }
 # direct dependency required for derive macro
 bytemuck = { version = "1", features = ["derive", "must_cast"] }
 radsort = "0.1"

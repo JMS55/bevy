@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["bevy"]
 
 [features]
-default = ["coupled_naga"]
+default = []
 
 # Bevy users should _always_ leave this feature on.
 #

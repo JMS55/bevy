@@ -4218,3 +4218,9 @@ name = "Occlusion Culling"
 description = "Demonstration of Occlusion Culling"
 category = "3D Rendering"
 wasm = false
+
+[patch.crates-io]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "2764e7a39920e23928d300e8856a672f1952da63" }
+wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "2764e7a39920e23928d300e8856a672f1952da63" }
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "2764e7a39920e23928d300e8856a672f1952da63" }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "2764e7a39920e23928d300e8856a672f1952da63" }

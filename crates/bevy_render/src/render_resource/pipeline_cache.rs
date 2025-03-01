@@ -764,8 +764,8 @@ impl PipelineCache {
 
                 // TODO: Expose the rest of this somehow
                 let compilation_options = PipelineCompilationOptions {
-                    constants: &default(),
                     zero_initialize_workgroup_memory: descriptor.zero_initialize_workgroup_memory,
+                    ..Default::default()
                 };
 
                 let descriptor = RawRenderPipelineDescriptor {
@@ -846,9 +846,9 @@ impl PipelineCache {
                     entry_point: Some(&descriptor.entry_point),
                     // TODO: Expose the rest of this somehow
                     compilation_options: PipelineCompilationOptions {
-                        constants: &default(),
                         zero_initialize_workgroup_memory: descriptor
                             .zero_initialize_workgroup_memory,
+                        ..Default::default()
                     },
                     cache: None,
                 };
@@ -1040,10 +1040,6 @@ fn get_capabilities(features: Features, downlevel: DownlevelFlags) -> Capabiliti
     capabilities.set(
         Capabilities::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
         features.contains(Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING),
-    );
-    capabilities.set(
-        Capabilities::UNIFORM_BUFFER_AND_STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING,
-        features.contains(Features::UNIFORM_BUFFER_AND_STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING),
     );
     // TODO: This needs a proper wgpu feature
     capabilities.set(

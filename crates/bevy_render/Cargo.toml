@@ -50,6 +50,8 @@ webgl = ["wgpu/webgl"]
 webgpu = ["wgpu/webgpu"]
 detailed_trace = []
 
+dlss = ["dep:dlss_wgpu"]
+
 [dependencies]
 # bevy
 bevy_app = { path = "../bevy_app", version = "0.16.0-dev" }
@@ -116,6 +118,7 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 indexmap = { version = "2" }
 fixedbitset = { version = "0.5" }
 bitflags = "2"
+dlss_wgpu = { path = "../../../dlss_wgpu", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Omit the `glsl` feature in non-WebAssembly by default.

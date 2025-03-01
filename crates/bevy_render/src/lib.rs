@@ -93,7 +93,7 @@ use crate::{
     mesh::{MeshPlugin, MorphPlugin, RenderMesh},
     render_asset::prepare_assets,
     render_resource::{PipelineCache, Shader, ShaderLoader},
-    renderer::{render_system, RenderInstance, WgpuWrapper},
+    renderer::{render_system, WgpuWrapper},
     settings::RenderCreation,
     storage::StoragePlugin,
     view::{ViewPlugin, WindowRenderPlugin},
@@ -105,7 +105,6 @@ use bevy_ecs::{prelude::*, schedule::ScheduleLabel};
 use bitflags::bitflags;
 use core::ops::{Deref, DerefMut};
 use std::sync::Mutex;
-use tracing::debug;
 
 /// Contains the default Bevy rendering backend based on wgpu.
 ///
@@ -321,6 +320,14 @@ impl Plugin for RenderPlugin {
                         .ok()
                         .cloned();
                     let settings = render_creation.clone();
+
+                    #[cfg(feature = "dlss")]
+                    let dlss_project_id = app
+                        .world()
+                        .get_resource::<DlssProjectId>()
+                        .expect("The `dlss` feature is enabled, but DlssPlugin was not added to the App before DefaultPlugins.")
+                        .0;
+
                     let async_renderer = async move {
                         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
                             backends,
@@ -360,24 +367,16 @@ impl Plugin for RenderPlugin {
                             ..Default::default()
                         };
 
-                        let (device, queue, adapter_info, render_adapter) =
-                            renderer::initialize_renderer(
-                                &instance,
-                                &settings,
-                                &request_adapter_options,
-                            )
-                            .await;
-                        debug!("Configured wgpu adapter Limits: {:#?}", device.limits());
-                        debug!("Configured wgpu adapter Features: {:#?}", device.features());
-                        let mut future_render_resources_inner =
-                            future_render_resources_wrapper.lock().unwrap();
-                        *future_render_resources_inner = Some(RenderResources(
-                            device,
-                            queue,
-                            adapter_info,
-                            render_adapter,
-                            RenderInstance(Arc::new(WgpuWrapper::new(instance))),
-                        ));
+                        let render_resources = renderer::initialize_renderer(
+                            instance,
+                            &settings,
+                            &request_adapter_options,
+                            #[cfg(feature = "dlss")]
+                            dlss_project_id,
+                        )
+                        .await;
+
+                        *future_render_resources_wrapper.lock().unwrap() = Some(render_resources);
                     };
                     // In wasm, spawn a task and detach it for execution
                     #[cfg(target_arch = "wasm32")]
@@ -447,6 +446,16 @@ impl Plugin for RenderPlugin {
         if let Some(future_render_resources) =
             app.world_mut().remove_resource::<FutureRenderResources>()
         {
+            #[cfg(feature = "dlss")]
+            let RenderResources(
+                device,
+                queue,
+                adapter_info,
+                render_adapter,
+                instance,
+                dlss_available,
+            ) = future_render_resources.0.lock().unwrap().take().unwrap();
+            #[cfg(not(feature = "dlss"))]
             let RenderResources(device, queue, adapter_info, render_adapter, instance) =
                 future_render_resources.0.lock().unwrap().take().unwrap();
 
@@ -454,6 +463,11 @@ impl Plugin for RenderPlugin {
                 .insert_resource(queue.clone())
                 .insert_resource(adapter_info.clone())
                 .insert_resource(render_adapter.clone());
+
+            #[cfg(feature = "dlss")]
+            if let Some(dlss_available) = dlss_available {
+                app.insert_resource(dlss_available);
+            }
 
             let render_app = app.sub_app_mut(RenderApp);
 
@@ -583,3 +597,11 @@ pub fn get_adreno_model(adapter: &RenderAdapter) -> Option<u32> {
             .fold(0, |acc, digit| acc * 10 + digit),
     )
 }
+
+#[cfg(feature = "dlss")]
+#[derive(Resource)]
+pub struct DlssProjectId(pub bevy_asset::uuid::Uuid);
+
+#[cfg(feature = "dlss")]
+#[derive(Resource, Clone, Copy)]
+pub struct DlssAvailable;

@@ -20,12 +20,22 @@ use bevy::{
     },
 };
 
+#[cfg(feature = "dlss")]
+use bevy::core_pipeline::dlss::DlssPlugin;
+
 fn main() {
-    App::new()
-        .add_plugins((DefaultPlugins, TemporalAntiAliasPlugin))
+    let mut app = App::new();
+
+    #[cfg(feature = "dlss")]
+    app.add_plugins(DlssPlugin {
+        project_id: bevy_asset::uuid::uuid!("5417916c-0291-4e3f-8f65-326c1858ab96"),
+    });
+
+    app.add_plugins((DefaultPlugins, TemporalAntiAliasPlugin))
         .add_systems(Startup, setup)
-        .add_systems(Update, (modify_aa, modify_sharpening, update_ui))
-        .run();
+        .add_systems(Update, (modify_aa, modify_sharpening, update_ui));
+
+    app.run();
 }
 
 type TaaComponents = (

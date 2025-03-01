@@ -13,6 +13,8 @@ pub mod contrast_adaptive_sharpening;
 pub mod core_2d;
 pub mod core_3d;
 pub mod deferred;
+#[cfg(feature = "dlss")]
+pub mod dlss;
 pub mod dof;
 pub mod experimental;
 pub mod fullscreen_vertex_shader;

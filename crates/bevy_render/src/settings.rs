@@ -145,11 +145,12 @@ impl Default for WgpuSettings {
 
 #[derive(Clone)]
 pub struct RenderResources(
-    pub RenderDevice,
-    pub RenderQueue,
-    pub RenderAdapterInfo,
-    pub RenderAdapter,
-    pub RenderInstance,
+    pub(crate) RenderDevice,
+    pub(crate) RenderQueue,
+    pub(crate) RenderAdapterInfo,
+    pub(crate) RenderAdapter,
+    pub(crate) RenderInstance,
+    #[cfg(feature = "dlss")] pub(crate) Option<crate::DlssAvailable>,
 );
 
 /// An enum describing how the renderer will initialize resources. This is used when creating the [`RenderPlugin`](crate::RenderPlugin).
@@ -169,7 +170,16 @@ impl RenderCreation {
         adapter: RenderAdapter,
         instance: RenderInstance,
     ) -> Self {
-        RenderResources(device, queue, adapter_info, adapter, instance).into()
+        RenderResources(
+            device,
+            queue,
+            adapter_info,
+            adapter,
+            instance,
+            #[cfg(feature = "dlss")]
+            None,
+        )
+        .into()
     }
 }
 

@@ -69,6 +69,9 @@ tonemapping_luts = ["bevy_core_pipeline/tonemapping_luts"]
 # Include SMAA LUT KTX2 Files
 smaa_luts = ["bevy_core_pipeline/smaa_luts"]
 
+# NVIDIA Deep Learning Super Sampling
+dlss = ["bevy_core_pipeline/dlss", "bevy_render/dlss"]
+
 # Audio format support (vorbis is enabled by default)
 flac = ["bevy_audio/flac"]
 mp3 = ["bevy_audio/mp3"]

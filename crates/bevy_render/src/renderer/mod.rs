@@ -401,7 +401,7 @@ pub async fn initialize_renderer(
         RenderInstance(Arc::new(WgpuWrapper::new(instance))),
         #[cfg(feature = "dlss")]
         if dlss_supported {
-            Some(crate::DlssAvailable)
+            Some(crate::DlssSupported)
         } else {
             None
         },

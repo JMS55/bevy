@@ -10,7 +10,7 @@ use bevy_render::{camera::TemporalJitter, renderer::RenderDevice, DlssProjectId,
 use dlss_wgpu::DlssSdk;
 use tracing::info;
 
-pub use bevy_render::DlssAvailable;
+pub use bevy_render::DlssSupported;
 pub use dlss_wgpu::DlssPreset;
 
 pub struct DlssPlugin {
@@ -24,8 +24,8 @@ impl Plugin for DlssPlugin {
     }
 
     fn finish(&self, app: &mut App) {
-        if app.world().get_resource::<DlssAvailable>().is_none() {
-            info!("DLSS not available");
+        if app.world().get_resource::<DlssSupported>().is_none() {
+            info!("DLSS is not supported on this system");
             return;
         }
 
@@ -34,8 +34,8 @@ impl Plugin for DlssPlugin {
 
         let dlss_sdk = DlssSdk::new(self.project_id, render_device.wgpu_device().clone());
         if dlss_sdk.is_err() {
-            app.world_mut().remove_resource::<DlssAvailable>();
-            info!("DLSS not available");
+            app.world_mut().remove_resource::<DlssSupported>();
+            info!("DLSS is not supported on this system");
             return;
         }
 

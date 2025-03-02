@@ -604,4 +604,4 @@ pub struct DlssProjectId(pub bevy_asset::uuid::Uuid);
 
 #[cfg(feature = "dlss")]
 #[derive(Resource, Clone, Copy)]
-pub struct DlssAvailable;
+pub struct DlssSupported;

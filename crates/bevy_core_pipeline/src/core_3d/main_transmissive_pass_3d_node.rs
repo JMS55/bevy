@@ -1,4 +1,4 @@
-use super::{Camera3d, ViewTransmissionTexture};
+use super::{Camera3d, MainPassViewportOverride, ViewTransmissionTexture};
 use crate::core_3d::Transmissive3d;
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_render::{
@@ -27,13 +27,16 @@ impl ViewNode for MainTransmissivePass3dNode {
         &'static ViewTarget,
         Option<&'static ViewTransmissionTexture>,
         &'static ViewDepthTexture,
+        Option<&'static MainPassViewportOverride>,
     );
 
     fn run(
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (camera, view, camera_3d, target, transmission, depth): QueryItem<Self::ViewQuery>,
+        (camera, view, camera_3d, target, transmission, depth, viewport_override): QueryItem<
+            Self::ViewQuery,
+        >,
         world: &World,
     ) -> Result<(), NodeRunError> {
         let view_entity = graph.view_entity();
@@ -95,7 +98,9 @@ impl ViewNode for MainTransmissivePass3dNode {
                     let mut render_pass =
                         render_context.begin_tracked_render_pass(render_pass_descriptor.clone());
 
-                    if let Some(viewport) = camera.viewport.as_ref() {
+                    let viewport =
+                        viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
+                    if let Some(viewport) = viewport {
                         render_pass.set_camera_viewport(viewport);
                     }
 
@@ -110,7 +115,8 @@ impl ViewNode for MainTransmissivePass3dNode {
                 let mut render_pass =
                     render_context.begin_tracked_render_pass(render_pass_descriptor);
 
-                if let Some(viewport) = camera.viewport.as_ref() {
+                let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
+                if let Some(viewport) = viewport {
                     render_pass.set_camera_viewport(viewport);
                 }
 

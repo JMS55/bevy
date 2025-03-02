@@ -1,3 +1,4 @@
+use super::MainPassViewportOverride;
 use crate::core_3d::Transparent3d;
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_render::{
@@ -24,12 +25,13 @@ impl ViewNode for MainTransparentPass3dNode {
         &'static ExtractedView,
         &'static ViewTarget,
         &'static ViewDepthTexture,
+        Option<&'static MainPassViewportOverride>,
     );
     fn run(
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (camera, view, target, depth): QueryItem<Self::ViewQuery>,
+        (camera, view, target, depth, viewport_override): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
         let view_entity = graph.view_entity();
@@ -68,6 +70,7 @@ impl ViewNode for MainTransparentPass3dNode {
 
             let pass_span = diagnostics.pass_span(&mut render_pass, "main_transparent_pass_3d");
 
+            let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
             if let Some(viewport) = camera.viewport.as_ref() {
                 render_pass.set_camera_viewport(viewport);
             }

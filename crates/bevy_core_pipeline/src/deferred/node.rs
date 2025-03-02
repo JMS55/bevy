@@ -15,6 +15,7 @@ use tracing::error;
 #[cfg(feature = "trace")]
 use tracing::info_span;
 
+use crate::core_3d::MainPassViewportOverride;
 use crate::prepass::ViewPrepassTextures;
 
 use super::{AlphaMask3dDeferred, Opaque3dDeferred};
@@ -66,6 +67,7 @@ impl ViewNode for LateDeferredGBufferPrepassNode {
         &'static ExtractedView,
         &'static ViewDepthTexture,
         &'static ViewPrepassTextures,
+        Option<&'static MainPassViewportOverride>,
         Has<OcclusionCulling>,
         Has<NoIndirectDrawing>,
     );
@@ -77,7 +79,7 @@ impl ViewNode for LateDeferredGBufferPrepassNode {
         view_query: QueryItem<'w, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        let (_, _, _, _, occlusion_culling, no_indirect_drawing) = view_query;
+        let (_, _, _, _, _, occlusion_culling, no_indirect_drawing) = view_query;
         if !occlusion_culling || no_indirect_drawing {
             return Ok(());
         }
@@ -105,7 +107,7 @@ impl ViewNode for LateDeferredGBufferPrepassNode {
 fn run_deferred_prepass<'w>(
     graph: &mut RenderGraphContext,
     render_context: &mut RenderContext<'w>,
-    (camera, extracted_view, view_depth_texture, view_prepass_textures, _, _): QueryItem<
+    (camera, extracted_view, view_depth_texture, view_prepass_textures, viewport_override, _, _): QueryItem<
         'w,
         <LateDeferredGBufferPrepassNode as ViewNode>::ViewQuery,
     >,
@@ -218,7 +220,8 @@ fn run_deferred_prepass<'w>(
             occlusion_query_set: None,
         });
         let mut render_pass = TrackedRenderPass::new(&render_device, render_pass);
-        if let Some(viewport) = camera.viewport.as_ref() {
+        let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
+        if let Some(viewport) = viewport {
             render_pass.set_camera_viewport(viewport);
         }
 

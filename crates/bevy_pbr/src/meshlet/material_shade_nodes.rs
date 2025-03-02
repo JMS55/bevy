@@ -10,8 +10,9 @@ use crate::{
     MeshViewBindGroup, PrepassViewBindGroup, ViewEnvironmentMapUniformOffset, ViewFogUniformOffset,
     ViewLightProbesUniformOffset, ViewLightsUniformOffset, ViewScreenSpaceReflectionsUniformOffset,
 };
-use bevy_core_pipeline::prepass::{
-    MotionVectorPrepass, PreviousViewUniformOffset, ViewPrepassTextures,
+use bevy_core_pipeline::{
+    core_3d::MainPassViewportOverride,
+    prepass::{MotionVectorPrepass, PreviousViewUniformOffset, ViewPrepassTextures},
 };
 use bevy_ecs::{
     query::{Has, QueryItem},
@@ -45,6 +46,7 @@ impl ViewNode for MeshletMainOpaquePass3dNode {
         &'static MeshletViewMaterialsMainOpaquePass,
         &'static MeshletViewBindGroups,
         &'static MeshletViewResources,
+        Option<&'static MainPassViewportOverride>,
     );
 
     fn run(
@@ -64,6 +66,7 @@ impl ViewNode for MeshletMainOpaquePass3dNode {
             meshlet_view_materials,
             meshlet_view_bind_groups,
             meshlet_view_resources,
+            viewport_override,
         ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
@@ -100,7 +103,8 @@ impl ViewNode for MeshletMainOpaquePass3dNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        if let Some(viewport) = camera.viewport.as_ref() {
+        let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
+        if let Some(viewport) = viewport {
             render_pass.set_camera_viewport(viewport);
         }
 
@@ -151,6 +155,7 @@ impl ViewNode for MeshletPrepassNode {
         &'static MeshletViewMaterialsPrepass,
         &'static MeshletViewBindGroups,
         &'static MeshletViewResources,
+        Option<&'static MainPassViewportOverride>,
     );
 
     fn run(
@@ -166,6 +171,7 @@ impl ViewNode for MeshletPrepassNode {
             meshlet_view_materials,
             meshlet_view_bind_groups,
             meshlet_view_resources,
+            viewport_override,
         ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
@@ -218,7 +224,8 @@ impl ViewNode for MeshletPrepassNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        if let Some(viewport) = camera.viewport.as_ref() {
+        let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
+        if let Some(viewport) = viewport {
             render_pass.set_camera_viewport(viewport);
         }
 
@@ -274,6 +281,7 @@ impl ViewNode for MeshletDeferredGBufferPrepassNode {
         &'static MeshletViewMaterialsDeferredGBufferPrepass,
         &'static MeshletViewBindGroups,
         &'static MeshletViewResources,
+        Option<&'static MainPassViewportOverride>,
     );
 
     fn run(
@@ -289,6 +297,7 @@ impl ViewNode for MeshletDeferredGBufferPrepassNode {
             meshlet_view_materials,
             meshlet_view_bind_groups,
             meshlet_view_resources,
+            viewport_override,
         ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
@@ -346,7 +355,8 @@ impl ViewNode for MeshletDeferredGBufferPrepassNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        if let Some(viewport) = camera.viewport.as_ref() {
+        let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
+        if let Some(viewport) = viewport {
             render_pass.set_camera_viewport(viewport);
         }
 

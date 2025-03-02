@@ -1,6 +1,6 @@
 use super::Dlss;
 use crate::{
-    core_3d::Camera3d,
+    core_3d::{Camera3d, MainPassViewportOverride},
     prepass::{DepthPrepass, MotionVectorPrepass},
 };
 use bevy_ecs::{
@@ -31,7 +31,7 @@ pub fn extract_dlss(mut commands: Commands, mut main_world: ResMut<MainWorld>) {
             entity_commands.insert(dlss.clone());
             dlss.reset = false;
         } else {
-            entity_commands.remove::<Dlss>();
+            entity_commands.remove::<(Dlss, MainPassViewportOverride)>();
         }
     }
 }

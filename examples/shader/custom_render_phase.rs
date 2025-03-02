@@ -13,7 +13,10 @@
 use std::ops::Range;
 
 use bevy::{
-    core_pipeline::core_3d::graph::{Core3d, Node3d},
+    core_pipeline::core_3d::{
+        graph::{Core3d, Node3d},
+        MainPassViewportOverride,
+    },
     ecs::{
         query::QueryItem,
         system::{lifetimeless::SRes, SystemParamItem},
@@ -582,13 +585,14 @@ impl ViewNode for CustomDrawNode {
         &'static ExtractedCamera,
         &'static ExtractedView,
         &'static ViewTarget,
+        Option<&'static MainPassViewportOverride>,
     );
 
     fn run<'w>(
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (camera, view, target): QueryItem<'w, Self::ViewQuery>,
+        (camera, view, target, viewport_override): QueryItem<'w, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         // First, we need to get our phases resource
@@ -617,7 +621,8 @@ impl ViewNode for CustomDrawNode {
             occlusion_query_set: None,
         });
 
-        if let Some(viewport) = camera.viewport.as_ref() {
+        let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
+        if let Some(viewport) = viewport {
             render_pass.set_camera_viewport(viewport);
         }
 

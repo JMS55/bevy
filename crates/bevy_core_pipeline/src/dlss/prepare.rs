@@ -1,4 +1,5 @@
 use super::{Dlss, DlssResource};
+use crate::core_3d::MainPassViewportOverride;
 use bevy_diagnostic::FrameCount;
 use bevy_ecs::{
     entity::Entity,
@@ -6,7 +7,7 @@ use bevy_ecs::{
 };
 use bevy_math::Vec4Swizzles;
 use bevy_render::{
-    camera::{ExtractedCamera, MipBias, TemporalJitter},
+    camera::{ExtractedCamera, MipBias, TemporalJitter, Viewport},
     renderer::{RenderDevice, RenderQueue},
     view::ExtractedView,
 };
@@ -67,11 +68,13 @@ pub fn prepare_dlss(
         temporal_jitter.offset = dlss_context.suggested_jitter(frame_count.0, render_resolution);
         mip_bias.0 = dlss_context.suggested_mip_bias(render_resolution);
 
-        // commands.entity(entity).insert(ViewportOverride(Viewport {
-        //     physical_position: view.viewport.xy(),
-        //     physical_size: render_resolution,
-        //     depth: camera.viewport.clone().map(|v| v.depth).unwrap_or(0.0..1.0),
-        // }));
+        commands
+            .entity(entity)
+            .insert(MainPassViewportOverride(Viewport {
+                physical_position: view.viewport.xy(),
+                physical_size: render_resolution,
+                depth: camera.viewport.clone().map(|v| v.depth).unwrap_or(0.0..1.0),
+            }));
     }
 
     dlss_resource

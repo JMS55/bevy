@@ -11,7 +11,7 @@ use dlss_wgpu::DlssSdk;
 use tracing::info;
 
 pub use bevy_render::DlssSupported;
-pub use dlss_wgpu::DlssPreset;
+pub use dlss_wgpu::DlssPerfQualityMode;
 
 pub struct DlssPlugin {
     pub project_id: Uuid,
@@ -49,14 +49,14 @@ impl Plugin for DlssPlugin {
 #[reflect(Component, Default)]
 #[require(TemporalJitter, DepthPrepass, MotionVectorPrepass)]
 pub struct Dlss {
-    #[reflect(remote = DlssPresetRemoteReflect)]
-    pub preset: DlssPreset,
+    #[reflect(remote = DlssPerfQualityModeRemoteReflect)]
+    pub perf_quality_mode: DlssPerfQualityMode,
     pub reset: bool,
 }
 
-#[reflect_remote(DlssPreset)]
+#[reflect_remote(DlssPerfQualityMode)]
 #[derive(Default)]
-enum DlssPresetRemoteReflect {
+enum DlssPerfQualityModeRemoteReflect {
     #[default]
     Auto,
     Dlaa,

@@ -13,8 +13,10 @@ use bevy_math::UVec2;
 use bevy_platform_support::collections::HashMap;
 use bevy_reflect::{prelude::ReflectDefault, reflect_remote, Reflect};
 use bevy_render::{
-    camera::TemporalJitter, renderer::RenderDevice, view::prepare_view_uniforms, DlssProjectId,
-    ExtractSchedule, Render, RenderApp, RenderSet,
+    camera::TemporalJitter,
+    renderer::RenderDevice,
+    view::{prepare_view_targets, prepare_view_uniforms},
+    DlssProjectId, ExtractSchedule, Render, RenderApp, RenderSet,
 };
 use dlss_wgpu::{DlssContext, DlssFeatureFlags, DlssSdk};
 use std::{rc::Rc, sync::Mutex};
@@ -60,10 +62,16 @@ impl Plugin for DlssPlugin {
             .add_systems(ExtractSchedule, extract::extract_dlss)
             .add_systems(
                 Render,
+                prepare::configure_dlss_view_targets
+                    .in_set(RenderSet::ManageViews)
+                    .after(prepare_view_targets),
+            )
+            .add_systems(
+                Render,
                 prepare::prepare_dlss
-                    .in_set(RenderSet::Prepare)
+                    .in_set(RenderSet::PrepareResources)
                     .before(prepare_view_uniforms),
-            );
+            )
     }
 }
 

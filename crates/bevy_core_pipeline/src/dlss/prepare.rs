@@ -1,8 +1,9 @@
 use super::{Dlss, DlssResource};
-use crate::core_3d::MainPassViewportOverride;
+use crate::core_3d::{Camera3d, MainPassViewportOverride};
 use bevy_diagnostic::FrameCount;
 use bevy_ecs::{
     entity::Entity,
+    query::With,
     system::{Commands, NonSendMut, Query, Res},
 };
 use bevy_math::Vec4Swizzles;
@@ -80,4 +81,12 @@ pub fn prepare_dlss(
     dlss_resource
         .context_cache
         .retain(|_, (_, in_use)| mem::take(in_use));
+}
+
+pub fn configure_dlss_view_targets(mut view_targets: Query<&mut Camera3d, With<Dlss>>) {
+    for mut camera_3d in view_targets.iter_mut() {
+        let mut depth_texture_usages = TextureUsages::from(camera_3d.depth_texture_usages);
+        depth_texture_usages |= TextureUsages::TEXTURE_BINDING;
+        camera_3d.depth_texture_usages = depth_texture_usages.into();
+    }
 }

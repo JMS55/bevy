@@ -1,13 +1,17 @@
-pub use bevy_render::DlssAvailable;
-pub use dlss_wgpu::DlssPreset;
-
 use crate::{DepthPrepass, MotionVectorPrepass};
 use bevy_app::{App, Plugin};
 use bevy_asset::uuid::Uuid;
-use bevy_ecs::component::{require, Component};
+use bevy_ecs::{
+    component::{require, Component},
+    prelude::ReflectComponent,
+};
+use bevy_reflect::{prelude::ReflectDefault, reflect_remote, Reflect};
 use bevy_render::{camera::TemporalJitter, renderer::RenderDevice, DlssProjectId, RenderApp};
 use dlss_wgpu::DlssSdk;
 use tracing::info;
+
+pub use bevy_render::DlssAvailable;
+pub use dlss_wgpu::DlssPreset;
 
 pub struct DlssPlugin {
     pub project_id: Uuid,
@@ -15,7 +19,8 @@ pub struct DlssPlugin {
 
 impl Plugin for DlssPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(DlssProjectId(self.project_id));
+        app.insert_resource(DlssProjectId(self.project_id))
+            .register_type::<Dlss>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -40,9 +45,24 @@ impl Plugin for DlssPlugin {
     }
 }
 
-#[derive(Component, Clone, Default)]
+#[derive(Component, Reflect, Clone, Default)]
+#[reflect(Component, Default)]
 #[require(TemporalJitter, DepthPrepass, MotionVectorPrepass)]
 pub struct Dlss {
+    #[reflect(remote = DlssPresetRemoteReflect)]
     pub preset: DlssPreset,
     pub reset: bool,
+}
+
+#[reflect_remote(DlssPreset)]
+#[derive(Default)]
+enum DlssPresetRemoteReflect {
+    #[default]
+    Auto,
+    Dlaa,
+    UltraQuality,
+    Quality,
+    Balanced,
+    Performance,
+    UltraPerformance,
 }

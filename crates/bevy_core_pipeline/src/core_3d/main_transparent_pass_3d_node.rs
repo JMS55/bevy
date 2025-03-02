@@ -71,7 +71,7 @@ impl ViewNode for MainTransparentPass3dNode {
             let pass_span = diagnostics.pass_span(&mut render_pass, "main_transparent_pass_3d");
 
             let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
-            if let Some(viewport) = camera.viewport.as_ref() {
+            if let Some(viewport) = viewport {
                 render_pass.set_camera_viewport(viewport);
             }
 

@@ -9,6 +9,7 @@ use bevy_ecs::{
 use bevy_math::Vec4Swizzles;
 use bevy_render::{
     camera::{ExtractedCamera, MipBias, TemporalJitter, Viewport},
+    render_resource::TextureUsages,
     renderer::{RenderDevice, RenderQueue},
     view::ExtractedView,
 };

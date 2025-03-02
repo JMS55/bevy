@@ -71,7 +71,7 @@ impl Plugin for DlssPlugin {
                 prepare::prepare_dlss
                     .in_set(RenderSet::PrepareResources)
                     .before(prepare_view_uniforms),
-            )
+            );
     }
 }
 

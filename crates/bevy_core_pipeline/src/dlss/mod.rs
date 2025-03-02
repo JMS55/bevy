@@ -1,13 +1,23 @@
+mod extract;
+mod prepare;
+
 use crate::{DepthPrepass, MotionVectorPrepass};
 use bevy_app::{App, Plugin};
 use bevy_asset::uuid::Uuid;
 use bevy_ecs::{
     component::{require, Component},
     prelude::ReflectComponent,
+    schedule::IntoSystemConfigs,
 };
+use bevy_math::UVec2;
+use bevy_platform_support::collections::HashMap;
 use bevy_reflect::{prelude::ReflectDefault, reflect_remote, Reflect};
-use bevy_render::{camera::TemporalJitter, renderer::RenderDevice, DlssProjectId, RenderApp};
-use dlss_wgpu::DlssSdk;
+use bevy_render::{
+    camera::TemporalJitter, renderer::RenderDevice, view::prepare_view_uniforms, DlssProjectId,
+    ExtractSchedule, Render, RenderApp, RenderSet,
+};
+use dlss_wgpu::{DlssContext, DlssFeatureFlags, DlssSdk};
+use std::{rc::Rc, sync::Mutex};
 use tracing::info;
 
 pub use bevy_render::DlssSupported;
@@ -41,7 +51,19 @@ impl Plugin for DlssPlugin {
 
         render_app
             .world_mut()
-            .insert_non_send_resource(dlss_sdk.unwrap());
+            .insert_non_send_resource(DlssResource {
+                sdk: dlss_sdk.unwrap(),
+                context_cache: HashMap::default(),
+            });
+
+        render_app
+            .add_systems(ExtractSchedule, extract::extract_dlss)
+            .add_systems(
+                Render,
+                prepare::prepare_dlss
+                    .in_set(RenderSet::Prepare)
+                    .before(prepare_view_uniforms),
+            );
     }
 }
 
@@ -66,3 +88,14 @@ enum DlssPerfQualityModeRemoteReflect {
     Performance,
     UltraPerformance,
 }
+
+struct DlssResource {
+    sdk: Rc<DlssSdk>,
+    context_cache: HashMap<
+        (UpscaledResolution, DlssPerfQualityMode, DlssFeatureFlags),
+        (Mutex<DlssContext>, ContextUsedLastFrame),
+    >,
+}
+
+type UpscaledResolution = UVec2;
+type ContextUsedLastFrame = bool;

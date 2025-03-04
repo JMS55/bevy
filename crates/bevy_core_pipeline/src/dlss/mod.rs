@@ -1,7 +1,11 @@
 mod extract;
+mod node;
 mod prepare;
 
-use crate::{DepthPrepass, MotionVectorPrepass};
+use crate::{
+    core_3d::graph::{Core3d, Node3d},
+    DepthPrepass, MotionVectorPrepass,
+};
 use bevy_app::{App, Plugin};
 use bevy_ecs::{
     component::{require, Component},
@@ -13,15 +17,16 @@ use bevy_platform_support::collections::HashMap;
 use bevy_reflect::{prelude::ReflectDefault, reflect_remote, Reflect};
 use bevy_render::{
     camera::TemporalJitter,
+    render_graph::{RenderGraphApp, ViewNodeRunner},
     renderer::RenderDevice,
     view::{prepare_view_targets, prepare_view_uniforms},
-    DlssProjectId, ExtractSchedule, Render, RenderApp, RenderSet,
+    ExtractSchedule, Render, RenderApp, RenderSet,
 };
 use dlss_wgpu::{DlssContext, DlssFeatureFlags, DlssSdk};
 use std::{rc::Rc, sync::Mutex};
 use tracing::info;
 
-pub use bevy_render::DlssSupported;
+pub use bevy_render::{DlssProjectId, DlssSupported};
 pub use dlss_wgpu::DlssPerfQualityMode;
 
 pub struct DlssPlugin;
@@ -69,6 +74,17 @@ impl Plugin for DlssPlugin {
                 prepare::prepare_dlss
                     .in_set(RenderSet::PrepareResources)
                     .before(prepare_view_uniforms),
+            )
+            .add_render_graph_node::<ViewNodeRunner<node::DlssNode>>(Core3d, Node3d::Dlss)
+            .add_render_graph_edges(
+                Core3d,
+                (
+                    Node3d::EndMainPass,
+                    Node3d::MotionBlur, // Running before DLSS reduces edge artifacts and noise
+                    Node3d::Dlss,
+                    Node3d::Bloom,
+                    Node3d::Tonemapping,
+                ),
             );
     }
 }

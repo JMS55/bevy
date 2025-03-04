@@ -30,6 +30,7 @@ pub mod graph {
         EndMainPass,
         LateDownsampleDepth,
         Taa,
+        Dlss,
         MotionBlur,
         Bloom,
         AutoExposure,

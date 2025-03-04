@@ -21,7 +21,7 @@ use bevy::{
 };
 
 #[cfg(feature = "dlss")]
-use bevy::render::DlssProjectId;
+use bevy::core_pipeline::dlss::{Dlss, DlssPerfQualityMode, DlssProjectId, DlssSupported};
 
 fn main() {
     let mut app = App::new();
@@ -45,9 +45,25 @@ type TaaComponents = (
     MotionVectorPrepass,
 );
 
+#[cfg(feature = "dlss")]
+type DlssComponents = (Dlss, TemporalJitter, DepthPrepass, MotionVectorPrepass);
+#[cfg(not(feature = "dlss"))]
+type DlssComponents = ();
+
 fn modify_aa(
     keys: Res<ButtonInput<KeyCode>>,
-    camera: Single<
+    #[cfg(feature = "dlss")] camera: Single<
+        (
+            Entity,
+            Option<&mut Fxaa>,
+            Option<&mut Smaa>,
+            Option<&TemporalAntiAliasing>,
+            &mut Msaa,
+            Option<&mut Dlss>,
+        ),
+        With<Camera>,
+    >,
+    #[cfg(not(feature = "dlss"))] camera: Single<
         (
             Entity,
             Option<&mut Fxaa>,
@@ -57,8 +73,12 @@ fn modify_aa(
         ),
         With<Camera>,
     >,
+    #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssSupported>>,
     mut commands: Commands,
 ) {
+    #[cfg(feature = "dlss")]
+    let (camera_entity, fxaa, smaa, taa, mut msaa, dlss) = camera.into_inner();
+    #[cfg(not(feature = "dlss"))]
     let (camera_entity, fxaa, smaa, taa, mut msaa) = camera.into_inner();
     let mut camera = commands.entity(camera_entity);
 
@@ -68,7 +88,8 @@ fn modify_aa(
         camera
             .remove::<Fxaa>()
             .remove::<Smaa>()
-            .remove::<TaaComponents>();
+            .remove::<TaaComponents>()
+            .remove::<DlssComponents>();
     }
 
     // MSAA
@@ -76,7 +97,8 @@ fn modify_aa(
         camera
             .remove::<Fxaa>()
             .remove::<Smaa>()
-            .remove::<TaaComponents>();
+            .remove::<TaaComponents>()
+            .remove::<DlssComponents>();
 
         *msaa = Msaa::Sample4;
     }
@@ -100,6 +122,7 @@ fn modify_aa(
         camera
             .remove::<Smaa>()
             .remove::<TaaComponents>()
+            .remove::<DlssComponents>()
             .insert(Fxaa::default());
     }
 
@@ -133,6 +156,7 @@ fn modify_aa(
         camera
             .remove::<Fxaa>()
             .remove::<TaaComponents>()
+            .remove::<DlssComponents>()
             .insert(Smaa::default());
     }
 
@@ -158,7 +182,45 @@ fn modify_aa(
         camera
             .remove::<Fxaa>()
             .remove::<Smaa>()
+            .remove::<DlssComponents>()
             .insert(TemporalAntiAliasing::default());
+    }
+
+    // DLSS
+    #[cfg(feature = "dlss")]
+    if keys.just_pressed(KeyCode::Digit6) && dlss.is_none() && dlss_supported.is_some() {
+        *msaa = Msaa::Off;
+        camera
+            .remove::<Fxaa>()
+            .remove::<Smaa>()
+            .remove::<TaaComponents>()
+            .insert(Dlss::default());
+    }
+
+    // DLSS Settings
+    #[cfg(feature = "dlss")]
+    if let Some(mut dlss) = dlss {
+        if keys.just_pressed(KeyCode::KeyQ) {
+            dlss.perf_quality_mode = DlssPerfQualityMode::Auto;
+        }
+        if keys.just_pressed(KeyCode::KeyW) {
+            dlss.perf_quality_mode = DlssPerfQualityMode::UltraPerformance;
+        }
+        if keys.just_pressed(KeyCode::KeyE) {
+            dlss.perf_quality_mode = DlssPerfQualityMode::Performance;
+        }
+        if keys.just_pressed(KeyCode::KeyR) {
+            dlss.perf_quality_mode = DlssPerfQualityMode::Balanced;
+        }
+        if keys.just_pressed(KeyCode::KeyT) {
+            dlss.perf_quality_mode = DlssPerfQualityMode::Quality;
+        }
+        if keys.just_pressed(KeyCode::KeyY) {
+            dlss.perf_quality_mode = DlssPerfQualityMode::UltraQuality;
+        }
+        if keys.just_pressed(KeyCode::KeyU) {
+            dlss.perf_quality_mode = DlssPerfQualityMode::Dlaa;
+        }
     }
 }
 
@@ -187,7 +249,18 @@ fn modify_sharpening(
 }
 
 fn update_ui(
-    camera: Single<
+    #[cfg(feature = "dlss")] camera: Single<
+        (
+            Option<&Fxaa>,
+            Option<&Smaa>,
+            Option<&TemporalAntiAliasing>,
+            &ContrastAdaptiveSharpening,
+            &Msaa,
+            Option<&Dlss>,
+        ),
+        With<Camera>,
+    >,
+    #[cfg(not(feature = "dlss"))] camera: Single<
         (
             Option<&Fxaa>,
             Option<&Smaa>,
@@ -198,22 +271,35 @@ fn update_ui(
         With<Camera>,
     >,
     mut ui: Single<&mut Text>,
+    #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssSupported>>,
 ) {
+    #[cfg(feature = "dlss")]
+    let (fxaa, smaa, taa, cas, msaa, dlss) = *camera;
+    #[cfg(not(feature = "dlss"))]
     let (fxaa, smaa, taa, cas, msaa) = *camera;
 
     let ui = &mut ui.0;
     *ui = "Antialias Method\n".to_string();
 
+    #[cfg(feature = "dlss")]
+    let dlss_none = dlss.is_none();
+    #[cfg(not(feature = "dlss"))]
+    let dlss_none = true;
+
     draw_selectable_menu_item(
         ui,
         "No AA",
         '1',
-        *msaa == Msaa::Off && fxaa.is_none() && taa.is_none() && smaa.is_none(),
+        *msaa == Msaa::Off && fxaa.is_none() && taa.is_none() && smaa.is_none() && dlss_none,
     );
     draw_selectable_menu_item(ui, "MSAA", '2', *msaa != Msaa::Off);
     draw_selectable_menu_item(ui, "FXAA", '3', fxaa.is_some());
     draw_selectable_menu_item(ui, "SMAA", '4', smaa.is_some());
     draw_selectable_menu_item(ui, "TAA", '5', taa.is_some());
+    #[cfg(feature = "dlss")]
+    if dlss_supported.is_some() {
+        draw_selectable_menu_item(ui, "DLSS", '6', dlss.is_some());
+    }
 
     if *msaa != Msaa::Off {
         ui.push_str("\n----------\n\nSample Count\n");
@@ -247,6 +333,34 @@ fn update_ui(
         draw_selectable_menu_item(ui, "Medium", 'W', smaa.preset == SmaaPreset::Medium);
         draw_selectable_menu_item(ui, "High", 'E', smaa.preset == SmaaPreset::High);
         draw_selectable_menu_item(ui, "Ultra", 'R', smaa.preset == SmaaPreset::Ultra);
+    }
+
+    #[cfg(feature = "dlss")]
+    if let Some(dlss) = dlss {
+        let pqm = dlss.perf_quality_mode;
+        ui.push_str("\n----------\n\nQuality\n");
+        draw_selectable_menu_item(ui, "Auto", 'Q', pqm == DlssPerfQualityMode::Auto);
+        draw_selectable_menu_item(
+            ui,
+            "UltraPerformance",
+            'W',
+            pqm == DlssPerfQualityMode::UltraPerformance,
+        );
+        draw_selectable_menu_item(
+            ui,
+            "Performance",
+            'E',
+            pqm == DlssPerfQualityMode::Performance,
+        );
+        draw_selectable_menu_item(ui, "Balanced", 'R', pqm == DlssPerfQualityMode::Balanced);
+        draw_selectable_menu_item(ui, "Quality", 'T', pqm == DlssPerfQualityMode::Quality);
+        draw_selectable_menu_item(
+            ui,
+            "UltraQuality",
+            'Y',
+            pqm == DlssPerfQualityMode::UltraQuality,
+        );
+        draw_selectable_menu_item(ui, "DLAA", 'U', pqm == DlssPerfQualityMode::Dlaa);
     }
 
     ui.push_str("\n----------\n\n");

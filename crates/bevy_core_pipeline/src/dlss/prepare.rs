@@ -36,8 +36,7 @@ pub fn prepare_dlss(
 
         let mut dlss_feature_flags = DlssFeatureFlags::LowResolutionMotionVectors
             | DlssFeatureFlags::InvertedDepth
-            | DlssFeatureFlags::AutoExposure
-            | DlssFeatureFlags::PartialTextureInputs;
+            | DlssFeatureFlags::AutoExposure; // TODO
         if view.hdr {
             dlss_feature_flags |= DlssFeatureFlags::HighDynamicRange;
         }

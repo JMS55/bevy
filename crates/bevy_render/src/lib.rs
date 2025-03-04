@@ -465,9 +465,7 @@ impl Plugin for RenderPlugin {
                 .insert_resource(render_adapter.clone());
 
             #[cfg(feature = "dlss")]
-            if let Some(dlss_available) = dlss_available {
-                app.insert_resource(dlss_available);
-            }
+            app.insert_resource(dlss_available);
 
             let render_app = app.sub_app_mut(RenderApp);
 

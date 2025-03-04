@@ -21,15 +21,15 @@ use bevy::{
 };
 
 #[cfg(feature = "dlss")]
-use bevy::core_pipeline::dlss::DlssPlugin;
+use bevy::render::DlssProjectId;
 
 fn main() {
     let mut app = App::new();
 
     #[cfg(feature = "dlss")]
-    app.add_plugins(DlssPlugin {
-        project_id: bevy_asset::uuid::uuid!("5417916c-0291-4e3f-8f65-326c1858ab96"),
-    });
+    app.insert_resource(DlssProjectId(bevy_asset::uuid::uuid!(
+        "5417916c-0291-4e3f-8f65-326c1858ab96"
+    )));
 
     app.add_plugins((DefaultPlugins, TemporalAntiAliasPlugin))
         .add_systems(Startup, setup)

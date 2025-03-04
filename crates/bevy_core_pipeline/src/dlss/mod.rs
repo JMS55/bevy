@@ -3,7 +3,6 @@ mod prepare;
 
 use crate::{DepthPrepass, MotionVectorPrepass};
 use bevy_app::{App, Plugin};
-use bevy_asset::uuid::Uuid;
 use bevy_ecs::{
     component::{require, Component},
     prelude::ReflectComponent,
@@ -25,14 +24,11 @@ use tracing::info;
 pub use bevy_render::DlssSupported;
 pub use dlss_wgpu::DlssPerfQualityMode;
 
-pub struct DlssPlugin {
-    pub project_id: Uuid,
-}
+pub struct DlssPlugin;
 
 impl Plugin for DlssPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(DlssProjectId(self.project_id))
-            .register_type::<Dlss>();
+        app.register_type::<Dlss>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -41,10 +37,12 @@ impl Plugin for DlssPlugin {
             return;
         }
 
+        let dlss_project_id = app.world().resource::<DlssProjectId>().0;
+
         let render_app = app.get_sub_app_mut(RenderApp).unwrap();
         let render_device = render_app.world().resource::<RenderDevice>().clone();
 
-        let dlss_sdk = DlssSdk::new(self.project_id, render_device.wgpu_device().clone());
+        let dlss_sdk = DlssSdk::new(dlss_project_id, render_device.wgpu_device().clone());
         if dlss_sdk.is_err() {
             app.world_mut().remove_resource::<DlssSupported>();
             info!("DLSS is not supported on this system");

@@ -325,7 +325,7 @@ impl Plugin for RenderPlugin {
                     let dlss_project_id = app
                         .world()
                         .get_resource::<DlssProjectId>()
-                        .expect("The `dlss` feature is enabled, but DlssPlugin was not added to the App before DefaultPlugins.")
+                        .expect("The `dlss` feature is enabled, but DlssProjectId was not added to the App before DefaultPlugins.")
                         .0;
 
                     let async_renderer = async move {

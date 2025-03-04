@@ -95,6 +95,8 @@ impl Plugin for CorePipelinePlugin {
                 PostProcessingPlugin,
                 OrderIndependentTransparencyPlugin,
                 MipGenerationPlugin,
+                #[cfg(feature = "dlss")]
+                dlss::DlssPlugin,
             ));
     }
 }

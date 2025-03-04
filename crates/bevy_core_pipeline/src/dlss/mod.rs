@@ -35,24 +35,10 @@ impl Plugin for DlssPlugin {
             .register_type::<Dlss>();
     }
 
-    fn ready(&self, app: &App) -> bool {
-        // Inserted by RenderPlugin::finish()
-        app.world()
-            .get_resource::<Option<DlssSupported>>()
-            .is_some()
-    }
-
     fn finish(&self, app: &mut App) {
-        let dlss_available = app
-            .world()
-            .remove_resource::<Option<DlssSupported>>()
-            .unwrap();
-        match dlss_available {
-            Some(_) => app.world_mut().insert_resource(DlssSupported),
-            None => {
-                info!("DLSS is not supported on this system");
-                return;
-            }
+        if app.world().get_resource::<DlssSupported>().is_none() {
+            info!("DLSS is not supported on this system");
+            return;
         }
 
         let render_app = app.get_sub_app_mut(RenderApp).unwrap();

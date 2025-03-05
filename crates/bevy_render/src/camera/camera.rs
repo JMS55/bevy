@@ -1290,7 +1290,13 @@ impl TemporalJitter {
 
 /// Camera component specifying a mip bias to apply when sampling from material textures.
 ///
-/// Often used in conjunction with antialiasing post-process effects to reduce textures blurriness.
-#[derive(Default, Component, Reflect)]
+/// Often used in conjunction with temporal antialiasing post-process effects to reduce textures blurriness.
+#[derive(Component, Reflect)]
 #[reflect(Default, Component)]
 pub struct MipBias(pub f32);
+
+impl Default for MipBias {
+    fn default() -> Self {
+        Self(-1.0)
+    }
+}

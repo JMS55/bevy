@@ -16,7 +16,7 @@ use bevy_math::UVec2;
 use bevy_platform_support::collections::HashMap;
 use bevy_reflect::{prelude::ReflectDefault, reflect_remote, Reflect};
 use bevy_render::{
-    camera::TemporalJitter,
+    camera::{MipBias, TemporalJitter},
     render_graph::{RenderGraphApp, ViewNodeRunner},
     renderer::RenderDevice,
     view::{prepare_view_targets, prepare_view_uniforms},
@@ -91,7 +91,7 @@ impl Plugin for DlssPlugin {
 
 #[derive(Component, Reflect, Clone, Default)]
 #[reflect(Component, Default)]
-#[require(TemporalJitter, DepthPrepass, MotionVectorPrepass)]
+#[require(TemporalJitter, MipBias, DepthPrepass, MotionVectorPrepass)]
 pub struct Dlss {
     #[reflect(remote = DlssPerfQualityModeRemoteReflect)]
     pub perf_quality_mode: DlssPerfQualityMode,

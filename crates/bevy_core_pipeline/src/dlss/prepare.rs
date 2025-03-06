@@ -8,7 +8,7 @@ use bevy_ecs::{
 };
 use bevy_math::Vec4Swizzles;
 use bevy_render::{
-    camera::{ExtractedCamera, MipBias, TemporalJitter, Viewport},
+    camera::{CameraMainTextureUsages, ExtractedCamera, MipBias, TemporalJitter, Viewport},
     render_resource::TextureUsages,
     renderer::{RenderDevice, RenderQueue},
     view::ExtractedView,
@@ -83,8 +83,12 @@ pub fn prepare_dlss(
         .retain(|_, (_, in_use)| mem::take(in_use));
 }
 
-pub fn configure_dlss_view_targets(mut view_targets: Query<&mut Camera3d, With<Dlss>>) {
-    for mut camera_3d in view_targets.iter_mut() {
+pub fn configure_dlss_view_targets(
+    mut view_targets: Query<(&mut Camera3d, &mut CameraMainTextureUsages), With<Dlss>>,
+) {
+    for (mut camera_3d, mut camera_main_texture_usages) in view_targets.iter_mut() {
+        camera_main_texture_usages.0 |= TextureUsages::STORAGE_BINDING;
+
         let mut depth_texture_usages = TextureUsages::from(camera_3d.depth_texture_usages);
         depth_texture_usages |= TextureUsages::TEXTURE_BINDING;
         camera_3d.depth_texture_usages = depth_texture_usages.into();

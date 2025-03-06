@@ -67,7 +67,7 @@ impl Plugin for DlssPlugin {
                 Render,
                 prepare::configure_dlss_view_targets
                     .in_set(RenderSet::ManageViews)
-                    .after(prepare_view_targets),
+                    .before(prepare_view_targets),
             )
             .add_systems(
                 Render,

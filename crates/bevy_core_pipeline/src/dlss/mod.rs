@@ -10,10 +10,9 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::{
     component::{require, Component},
     prelude::ReflectComponent,
+    resource::Resource,
     schedule::IntoSystemConfigs,
 };
-use bevy_math::UVec2;
-use bevy_platform_support::collections::HashMap;
 use bevy_reflect::{prelude::ReflectDefault, reflect_remote, Reflect};
 use bevy_render::{
     camera::{MipBias, TemporalJitter},
@@ -22,8 +21,7 @@ use bevy_render::{
     view::{prepare_view_targets, prepare_view_uniforms},
     ExtractSchedule, Render, RenderApp, RenderSet,
 };
-use dlss_wgpu::{DlssContext, DlssFeatureFlags, DlssSdk};
-use std::{rc::Rc, sync::Mutex};
+use std::sync::{Arc, Mutex};
 use tracing::info;
 
 pub use bevy_render::{DlssProjectId, DlssSupported};
@@ -47,7 +45,8 @@ impl Plugin for DlssPlugin {
         let render_app = app.get_sub_app_mut(RenderApp).unwrap();
         let render_device = render_app.world().resource::<RenderDevice>().clone();
 
-        let dlss_sdk = DlssSdk::new(dlss_project_id, render_device.wgpu_device().clone());
+        let dlss_sdk =
+            dlss_wgpu::DlssSdk::new(dlss_project_id, render_device.wgpu_device().clone());
         if dlss_sdk.is_err() {
             app.world_mut().remove_resource::<DlssSupported>();
             info!("DLSS is not supported on this system");
@@ -55,13 +54,7 @@ impl Plugin for DlssPlugin {
         }
 
         render_app
-            .world_mut()
-            .insert_non_send_resource(DlssResource {
-                sdk: dlss_sdk.unwrap(),
-                context_cache: HashMap::default(),
-            });
-
-        render_app
+            .insert_resource(DlssSdk(dlss_sdk.unwrap()))
             .add_systems(ExtractSchedule, extract::extract_dlss)
             .add_systems(
                 Render,
@@ -111,13 +104,16 @@ enum DlssPerfQualityModeRemoteReflect {
     UltraPerformance,
 }
 
-struct DlssResource {
-    sdk: Rc<DlssSdk>,
-    context_cache: HashMap<
-        (UpscaledResolution, DlssPerfQualityMode, DlssFeatureFlags),
-        (Mutex<DlssContext>, ContextUsedLastFrame),
-    >,
-}
+#[derive(Resource)]
+struct DlssSdk(Arc<Mutex<dlss_wgpu::DlssSdk>>);
 
-type UpscaledResolution = UVec2;
-type ContextUsedLastFrame = bool;
+// struct DlssResource {
+//     sdk: Arc<Mutex<DlssSdk>>,
+//     context_cache: HashMap<
+//         (UpscaledResolution, DlssPerfQualityMode, DlssFeatureFlags),
+//         (Mutex<DlssContext>, ContextUsedLastFrame),
+//     >,
+// }
+
+// type UpscaledResolution = UVec2;
+// type ContextUsedLastFrame = bool;

@@ -1,19 +1,20 @@
-use super::{Dlss, DlssResource};
+use super::{Dlss, DlssSdk};
 use crate::core_3d::{Camera3d, MainPassViewportOverride};
 use bevy_diagnostic::FrameCount;
 use bevy_ecs::{
+    component::Component,
     entity::Entity,
     query::With,
-    system::{Commands, NonSendMut, Query, Res},
+    system::{Commands, Query, Res},
 };
-use bevy_math::Vec4Swizzles;
+use bevy_math::{UVec2, Vec4Swizzles};
 use bevy_render::{
     camera::{CameraMainTextureUsages, ExtractedCamera, MipBias, TemporalJitter, Viewport},
     render_resource::TextureUsages,
     renderer::{RenderDevice, RenderQueue},
     view::ExtractedView,
 };
-use dlss_wgpu::{DlssContext, DlssFeatureFlags};
+use dlss_wgpu::{DlssContext, DlssFeatureFlags, DlssPerfQualityMode};
 use std::{mem, sync::Mutex};
 
 pub fn prepare_dlss(
@@ -24,14 +25,16 @@ pub fn prepare_dlss(
         &Dlss,
         &mut TemporalJitter,
         &mut MipBias,
+        Option<&mut ViewDlssContext>,
     )>,
-    mut dlss_resource: NonSendMut<DlssResource>,
+    dlss_sdk: Res<DlssSdk>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     frame_count: Res<FrameCount>,
     mut commands: Commands,
 ) {
-    for (entity, view, camera, dlss, mut temporal_jitter, mut mip_bias) in &mut query {
+    for (entity, view, camera, dlss, mut temporal_jitter, mut mip_bias, dlss_context) in &mut query
+    {
         let upscaled_resolution = view.viewport.zw();
 
         let mut dlss_feature_flags = DlssFeatureFlags::LowResolutionMotionVectors
@@ -41,31 +44,28 @@ pub fn prepare_dlss(
             dlss_feature_flags |= DlssFeatureFlags::HighDynamicRange;
         }
 
-        let dlss_sdk = dlss_resource.sdk.clone();
-        let (dlss_context, context_used_last_frame) = dlss_resource
-            .context_cache
-            .entry((
+        let changed = match dlss_context {
+            Some(context) => {
+                !(upscaled_resolution == context.context.upscaled_resolution()
+                    && dlss.perf_quality_mode == context.perf_quality_mode
+                    && view.hdr == context.hdr)
+            }
+            None => true,
+        };
+
+        if changed {
+            let dlss_context = DlssContext::new(
                 upscaled_resolution,
                 dlss.perf_quality_mode,
                 dlss_feature_flags,
-            ))
-            .or_insert_with(|| {
-                let dlss_context = DlssContext::new(
-                    upscaled_resolution,
-                    dlss.perf_quality_mode,
-                    dlss_feature_flags,
-                    dlss_sdk,
-                    render_device.wgpu_device(),
-                    &render_queue,
-                )
-                .expect("Failed to create DlssContext");
-                (Mutex::new(dlss_context), true)
-            });
-        *context_used_last_frame = true;
+                dlss_sdk,
+                render_device.wgpu_device(),
+                &render_queue,
+            )
+            .expect("Failed to create DlssContext");
+        }
 
-        let dlss_context = dlss_context.lock().unwrap();
         let render_resolution = dlss_context.render_resolution();
-
         temporal_jitter.offset = dlss_context.suggested_jitter(frame_count.0, render_resolution);
         mip_bias.0 = dlss_context.suggested_mip_bias(render_resolution);
 
@@ -77,10 +77,13 @@ pub fn prepare_dlss(
                 depth: camera.viewport.clone().map(|v| v.depth).unwrap_or(0.0..1.0),
             }));
     }
+}
 
-    dlss_resource
-        .context_cache
-        .retain(|_, (_, in_use)| mem::take(in_use));
+#[derive(Component)]
+pub struct ViewDlssContext {
+    context: DlssContext,
+    perf_quality_mode: DlssPerfQualityMode,
+    hdr: bool,
 }
 
 pub fn configure_dlss_view_targets(

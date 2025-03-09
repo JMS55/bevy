@@ -31,7 +31,7 @@ pub fn extract_dlss(mut commands: Commands, mut main_world: ResMut<MainWorld>) {
             entity_commands.insert(dlss.clone());
             dlss.reset = false;
         } else {
-            entity_commands.remove::<(Dlss, MainPassViewportOverride)>();
+            entity_commands.remove::<(Dlss, ViewDlssContext, MainPassViewportOverride)>();
         }
     }
 }

@@ -1,4 +1,4 @@
-use super::{Dlss, DlssResource};
+use super::Dlss;
 use crate::{core_3d::MainPassViewportOverride, prepass::ViewPrepassTextures};
 use bevy_ecs::{query::QueryItem, world::World};
 use bevy_math::Vec4Swizzles;
@@ -6,7 +6,7 @@ use bevy_render::{
     camera::TemporalJitter,
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     renderer::{RenderAdapter, RenderContext},
-    view::{ExtractedView, ViewTarget},
+    view::ViewTarget,
 };
 use dlss_wgpu::{DlssExposure, DlssFeatureFlags, DlssRenderParameters, DlssTexture};
 
@@ -15,8 +15,8 @@ pub struct DlssNode;
 
 impl ViewNode for DlssNode {
     type ViewQuery = (
-        &'static ExtractedView,
         &'static Dlss,
+        &'static ViewDlssContext,
         &'static MainPassViewportOverride,
         &'static TemporalJitter,
         &'static ViewTarget,
@@ -27,13 +27,17 @@ impl ViewNode for DlssNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view, dlss, viewport_override, temporal_jitter, view_target, prepass_textures): QueryItem<
-            Self::ViewQuery,
-        >,
+        (
+            dlss,
+            dlss_context,
+            viewport_override,
+            temporal_jitter,
+            view_target,
+            prepass_textures,
+        ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
         let adapter = world.resource::<RenderAdapter>();
-        let dlss_resource = world.non_send_resource::<DlssResource>();
         let (Some(prepass_motion_vectors_texture), Some(prepass_depth_texture)) =
             (&prepass_textures.motion_vectors, &prepass_textures.depth)
         else {
@@ -41,25 +45,11 @@ impl ViewNode for DlssNode {
         };
 
         let render_resolution = viewport_override.0.physical_size;
-        let upscaled_resolution = view.viewport.zw();
-        let mut dlss_feature_flags = DlssFeatureFlags::LowResolutionMotionVectors
-            | DlssFeatureFlags::InvertedDepth
-            | DlssFeatureFlags::AutoExposure; // TODO
-        if view.hdr {
-            dlss_feature_flags |= DlssFeatureFlags::HighDynamicRange;
-        }
 
-        let mut dlss_context = dlss_resource.context_cache[&(
-            upscaled_resolution,
-            dlss.perf_quality_mode,
-            dlss_feature_flags,
-        )]
-            .0
-            .lock()
-            .unwrap();
         let view_target = view_target.post_process_write();
 
         dlss_context
+            .context
             .render(
                 DlssRenderParameters {
                     color: DlssTexture {

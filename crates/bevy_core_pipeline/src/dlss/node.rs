@@ -1,8 +1,8 @@
 use super::{prepare::ViewDlssContext, Dlss};
-use crate::{core_3d::MainPassViewportOverride, prepass::ViewPrepassTextures};
+use crate::prepass::ViewPrepassTextures;
 use bevy_ecs::{query::QueryItem, world::World};
 use bevy_render::{
-    camera::TemporalJitter,
+    camera::{MainPassViewportOverride, TemporalJitter},
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     renderer::{RenderAdapter, RenderContext},
     view::ViewTarget,

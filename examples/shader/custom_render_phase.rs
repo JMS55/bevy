@@ -13,10 +13,7 @@
 use std::ops::Range;
 
 use bevy::{
-    core_pipeline::core_3d::{
-        graph::{Core3d, Node3d},
-        MainPassViewportOverride,
-    },
+    core_pipeline::core_3d::graph::{Core3d, Node3d},
     ecs::{
         query::QueryItem,
         system::{lifetimeless::SRes, SystemParamItem},
@@ -36,7 +33,7 @@ use bevy::{
             },
             GetBatchData, GetFullBatchData,
         },
-        camera::ExtractedCamera,
+        camera::{ExtractedCamera, MainPassViewportOverride},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         mesh::{allocator::MeshAllocator, MeshVertexBufferLayoutRef, RenderMesh},
         render_asset::RenderAssets,

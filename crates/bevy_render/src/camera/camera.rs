@@ -1317,3 +1317,6 @@ impl Default for MipBias {
         Self(-1.0)
     }
 }
+
+#[derive(Component)]
+pub struct MainPassViewportOverride(pub Viewport);

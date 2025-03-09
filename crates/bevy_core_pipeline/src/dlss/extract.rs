@@ -1,6 +1,6 @@
 use super::{prepare::ViewDlssContext, Dlss};
 use crate::{
-    core_3d::{Camera3d, MainPassViewportOverride},
+    core_3d::Camera3d,
     prepass::{DepthPrepass, MotionVectorPrepass},
 };
 use bevy_ecs::{
@@ -8,14 +8,14 @@ use bevy_ecs::{
     system::{Commands, ResMut},
 };
 use bevy_render::{
-    camera::{Camera, Projection, TemporalJitter},
+    camera::{Camera, MainPassViewportOverride, Projection, TemporalJitter},
     sync_world::RenderEntity,
     MainWorld,
 };
 
 pub fn extract_dlss(mut commands: Commands, mut main_world: ResMut<MainWorld>) {
     let mut cameras_3d = main_world
-        .query_filtered::<(RenderEntity, &Camera, &Projection, &mut Dlss), (
+        .query_filtered::<(RenderEntity, &Camera, &Projection, Option<&mut Dlss>), (
             With<Camera3d>,
             With<TemporalJitter>,
             With<DepthPrepass>,
@@ -27,9 +27,9 @@ pub fn extract_dlss(mut commands: Commands, mut main_world: ResMut<MainWorld>) {
         let mut entity_commands = commands
             .get_entity(entity)
             .expect("Camera entity wasn't synced.");
-        if camera.is_active && has_perspective_projection {
-            entity_commands.insert(dlss.clone());
-            dlss.reset = false;
+        if dlss.is_some() && camera.is_active && has_perspective_projection {
+            entity_commands.insert(dlss.as_deref().unwrap().clone());
+            dlss.as_mut().unwrap().reset = false;
         } else {
             entity_commands.remove::<(Dlss, ViewDlssContext, MainPassViewportOverride)>();
         }

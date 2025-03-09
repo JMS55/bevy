@@ -10,16 +10,15 @@ use crate::{
     MeshViewBindGroup, PrepassViewBindGroup, ViewEnvironmentMapUniformOffset, ViewFogUniformOffset,
     ViewLightProbesUniformOffset, ViewLightsUniformOffset, ViewScreenSpaceReflectionsUniformOffset,
 };
-use bevy_core_pipeline::{
-    core_3d::MainPassViewportOverride,
-    prepass::{MotionVectorPrepass, PreviousViewUniformOffset, ViewPrepassTextures},
+use bevy_core_pipeline::prepass::{
+    MotionVectorPrepass, PreviousViewUniformOffset, ViewPrepassTextures,
 };
 use bevy_ecs::{
     query::{Has, QueryItem},
     world::World,
 };
 use bevy_render::{
-    camera::ExtractedCamera,
+    camera::{ExtractedCamera, MainPassViewportOverride},
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_resource::{
         LoadOp, Operations, PipelineCache, RenderPassDepthStencilAttachment, RenderPassDescriptor,

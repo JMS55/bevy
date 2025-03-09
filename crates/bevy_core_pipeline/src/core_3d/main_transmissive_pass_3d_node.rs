@@ -1,8 +1,8 @@
-use super::{Camera3d, MainPassViewportOverride, ViewTransmissionTexture};
+use super::{Camera3d, ViewTransmissionTexture};
 use crate::core_3d::Transmissive3d;
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_render::{
-    camera::ExtractedCamera,
+    camera::{ExtractedCamera, MainPassViewportOverride},
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_phase::ViewSortedRenderPhases,
     render_resource::{Extent3d, RenderPassDescriptor, StoreOp},

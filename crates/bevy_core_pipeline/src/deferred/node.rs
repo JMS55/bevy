@@ -1,4 +1,5 @@
 use bevy_ecs::{prelude::*, query::QueryItem};
+use bevy_render::camera::MainPassViewportOverride;
 use bevy_render::experimental::occlusion_culling::OcclusionCulling;
 use bevy_render::render_graph::ViewNode;
 
@@ -15,7 +16,6 @@ use tracing::error;
 #[cfg(feature = "trace")]
 use tracing::info_span;
 
-use crate::core_3d::MainPassViewportOverride;
 use crate::prepass::ViewPrepassTextures;
 
 use super::{AlphaMask3dDeferred, Opaque3dDeferred};

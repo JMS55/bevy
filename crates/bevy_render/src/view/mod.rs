@@ -9,7 +9,8 @@ pub use window::*;
 use crate::{
     camera::{
         CameraMainTextureUsages, ClearColor, ClearColorConfig, Exposure, ExtractedCamera,
-        ManualTextureViews, MipBias, NormalizedRenderTarget, TemporalJitter,
+        MainPassViewportOverride, ManualTextureViews, MipBias, NormalizedRenderTarget,
+        TemporalJitter,
     },
     experimental::occlusion_culling::OcclusionCulling,
     extract_component::ExtractComponentPlugin,
@@ -896,6 +897,7 @@ pub fn prepare_view_uniforms(
         Option<&Frustum>,
         Option<&TemporalJitter>,
         Option<&MipBias>,
+        Option<&MainPassViewportOverride>,
     )>,
     frame_count: Res<FrameCount>,
 ) {
@@ -908,13 +910,24 @@ pub fn prepare_view_uniforms(
     else {
         return;
     };
-    for (entity, extracted_camera, extracted_view, frustum, temporal_jitter, mip_bias) in &views {
+    for (
+        entity,
+        extracted_camera,
+        extracted_view,
+        frustum,
+        temporal_jitter,
+        mip_bias,
+        viewport_override,
+    ) in &views
+    {
         let viewport = extracted_view.viewport.as_vec4();
         let unjittered_projection = extracted_view.clip_from_view;
         let mut clip_from_view = unjittered_projection;
 
         if let Some(temporal_jitter) = temporal_jitter {
-            temporal_jitter.jitter_projection(&mut clip_from_view, viewport.zw());
+            let jitter_view_size =
+                viewport_override.map_or(viewport.zw(), |v| v.0.physical_size.as_vec2());
+            temporal_jitter.jitter_projection(&mut clip_from_view, jitter_view_size);
         }
 
         let view_from_clip = clip_from_view.inverse();

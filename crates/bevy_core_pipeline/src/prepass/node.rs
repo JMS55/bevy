@@ -1,6 +1,6 @@
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_render::{
-    camera::ExtractedCamera,
+    camera::{ExtractedCamera, MainPassViewportOverride},
     diagnostic::RecordDiagnostics,
     experimental::occlusion_culling::OcclusionCulling,
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
@@ -13,10 +13,7 @@ use tracing::error;
 #[cfg(feature = "trace")]
 use tracing::info_span;
 
-use crate::{
-    core_3d::MainPassViewportOverride,
-    skybox::prepass::{RenderSkyboxPrepassPipeline, SkyboxPrepassBindGroup},
-};
+use crate::skybox::prepass::{RenderSkyboxPrepassPipeline, SkyboxPrepassBindGroup};
 
 use super::{
     AlphaMask3dPrepass, DeferredPrepass, Opaque3dPrepass, PreviousViewUniformOffset,

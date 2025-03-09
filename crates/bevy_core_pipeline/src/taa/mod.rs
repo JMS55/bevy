@@ -347,7 +347,7 @@ fn extract_taa_settings(mut commands: Commands, mut main_world: ResMut<MainWorld
         RenderEntity,
         &Camera,
         &Projection,
-        &mut TemporalAntiAliasing,
+        Option<&mut TemporalAntiAliasing>,
     ), (
         With<Camera3d>,
         With<TemporalJitter>,
@@ -362,14 +362,12 @@ fn extract_taa_settings(mut commands: Commands, mut main_world: ResMut<MainWorld
         let mut entity_commands = commands
             .get_entity(entity)
             .expect("Camera entity wasn't synced.");
-        if camera.is_active && has_perspective_projection {
-            entity_commands.insert(taa_settings.clone());
-            taa_settings.reset = false;
+        if taa_settings.is_some() && camera.is_active && has_perspective_projection {
+            entity_commands.insert(taa_settings.as_deref().unwrap().clone());
+            taa_settings.as_mut().unwrap().reset = false;
         } else {
-            // TODO: needs better strategy for cleaning up
             entity_commands.remove::<(
                 TemporalAntiAliasing,
-                // components added in prepare systems (because `TemporalAntiAliasNode` does not query extracted components)
                 TemporalAntiAliasHistoryTextures,
                 TemporalAntiAliasPipelineId,
             )>();

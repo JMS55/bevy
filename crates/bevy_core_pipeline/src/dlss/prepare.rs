@@ -1,5 +1,5 @@
 use super::{Dlss, DlssSdk};
-use crate::core_3d::{Camera3d, MainPassViewportOverride};
+use crate::core_3d::Camera3d;
 use bevy_diagnostic::FrameCount;
 use bevy_ecs::{
     component::Component,
@@ -9,7 +9,10 @@ use bevy_ecs::{
 };
 use bevy_math::Vec4Swizzles;
 use bevy_render::{
-    camera::{CameraMainTextureUsages, ExtractedCamera, MipBias, TemporalJitter, Viewport},
+    camera::{
+        CameraMainTextureUsages, ExtractedCamera, MainPassViewportOverride, MipBias,
+        TemporalJitter, Viewport,
+    },
     render_resource::TextureUsages,
     renderer::{RenderDevice, RenderQueue},
     view::ExtractedView,

@@ -72,7 +72,6 @@ use core::ops::Range;
 
 use bevy_render::{
     batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport},
-    camera::Viewport,
     experimental::occlusion_culling::OcclusionCulling,
     mesh::allocator::SlabId,
     render_phase::PhaseItemBatchSetKey,
@@ -1157,6 +1156,3 @@ pub fn prepare_prepass_textures(
         });
     }
 }
-
-#[derive(Component)]
-pub struct MainPassViewportOverride(pub Viewport);

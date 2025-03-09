@@ -87,7 +87,7 @@ pub fn configure_dlss_view_targets(
     mut view_targets: Query<(&mut Camera3d, &mut CameraMainTextureUsages), With<Dlss>>,
 ) {
     for (mut camera_3d, mut camera_main_texture_usages) in view_targets.iter_mut() {
-        camera_main_texture_usages.0 |= TextureUsages::STORAGE_BINDING | TextureUsages::COPY_DST;
+        camera_main_texture_usages.0 |= TextureUsages::STORAGE_BINDING;
 
         let mut depth_texture_usages = TextureUsages::from(camera_3d.depth_texture_usages);
         depth_texture_usages |= TextureUsages::TEXTURE_BINDING;

@@ -7,7 +7,7 @@ use bevy_ecs::{
     query::With,
     system::{Commands, Query, Res},
 };
-use bevy_math::{UVec2, Vec4Swizzles};
+use bevy_math::Vec4Swizzles;
 use bevy_render::{
     camera::{CameraMainTextureUsages, ExtractedCamera, MipBias, TemporalJitter, Viewport},
     render_resource::TextureUsages,
@@ -15,7 +15,7 @@ use bevy_render::{
     view::ExtractedView,
 };
 use dlss_wgpu::{DlssContext, DlssFeatureFlags, DlssPerfQualityMode};
-use std::{mem, sync::Mutex};
+use std::sync::{Arc, Mutex};
 
 pub fn prepare_dlss(
     mut query: Query<(
@@ -33,7 +33,8 @@ pub fn prepare_dlss(
     frame_count: Res<FrameCount>,
     mut commands: Commands,
 ) {
-    for (entity, view, camera, dlss, mut temporal_jitter, mut mip_bias, dlss_context) in &mut query
+    for (entity, view, camera, dlss, mut temporal_jitter, mut mip_bias, mut dlss_context) in
+        &mut query
     {
         let upscaled_resolution = view.viewport.zw();
 
@@ -44,46 +45,55 @@ pub fn prepare_dlss(
             dlss_feature_flags |= DlssFeatureFlags::HighDynamicRange;
         }
 
-        let changed = match dlss_context {
-            Some(context) => {
-                !(upscaled_resolution == context.context.upscaled_resolution()
-                    && dlss.perf_quality_mode == context.perf_quality_mode
-                    && view.hdr == context.hdr)
+        match dlss_context.as_deref_mut() {
+            Some(dlss_context)
+                if upscaled_resolution
+                    == dlss_context.context.lock().unwrap().upscaled_resolution()
+                    && dlss.perf_quality_mode == dlss_context.perf_quality_mode
+                    && dlss_feature_flags == dlss_context.feature_flags =>
+            {
+                let dlss_context = dlss_context.context.lock().unwrap();
+                temporal_jitter.offset =
+                    dlss_context.suggested_jitter(frame_count.0, dlss_context.render_resolution());
             }
-            None => true,
-        };
+            _ => {
+                let dlss_context = DlssContext::new(
+                    upscaled_resolution,
+                    dlss.perf_quality_mode,
+                    dlss_feature_flags,
+                    Arc::clone(&dlss_sdk.0),
+                    render_device.wgpu_device(),
+                    &render_queue,
+                )
+                .expect("Failed to create DlssContext");
 
-        if changed {
-            let dlss_context = DlssContext::new(
-                upscaled_resolution,
-                dlss.perf_quality_mode,
-                dlss_feature_flags,
-                dlss_sdk,
-                render_device.wgpu_device(),
-                &render_queue,
-            )
-            .expect("Failed to create DlssContext");
+                let render_resolution = dlss_context.render_resolution();
+                temporal_jitter.offset =
+                    dlss_context.suggested_jitter(frame_count.0, render_resolution);
+                mip_bias.0 = dlss_context.suggested_mip_bias(render_resolution);
+
+                commands.entity(entity).insert((
+                    ViewDlssContext {
+                        context: Mutex::new(dlss_context),
+                        perf_quality_mode: dlss.perf_quality_mode,
+                        feature_flags: dlss_feature_flags,
+                    },
+                    MainPassViewportOverride(Viewport {
+                        physical_position: view.viewport.xy(),
+                        physical_size: render_resolution,
+                        depth: camera.viewport.clone().map(|v| v.depth).unwrap_or(0.0..1.0),
+                    }),
+                ));
+            }
         }
-
-        let render_resolution = dlss_context.render_resolution();
-        temporal_jitter.offset = dlss_context.suggested_jitter(frame_count.0, render_resolution);
-        mip_bias.0 = dlss_context.suggested_mip_bias(render_resolution);
-
-        commands
-            .entity(entity)
-            .insert(MainPassViewportOverride(Viewport {
-                physical_position: view.viewport.xy(),
-                physical_size: render_resolution,
-                depth: camera.viewport.clone().map(|v| v.depth).unwrap_or(0.0..1.0),
-            }));
     }
 }
 
 #[derive(Component)]
 pub struct ViewDlssContext {
-    context: DlssContext,
-    perf_quality_mode: DlssPerfQualityMode,
-    hdr: bool,
+    pub context: Mutex<DlssContext>,
+    pub perf_quality_mode: DlssPerfQualityMode,
+    pub feature_flags: DlssFeatureFlags,
 }
 
 pub fn configure_dlss_view_targets(

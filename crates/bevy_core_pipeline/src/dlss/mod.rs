@@ -106,14 +106,3 @@ enum DlssPerfQualityModeRemoteReflect {
 
 #[derive(Resource)]
 struct DlssSdk(Arc<Mutex<dlss_wgpu::DlssSdk>>);
-
-// struct DlssResource {
-//     sdk: Arc<Mutex<DlssSdk>>,
-//     context_cache: HashMap<
-//         (UpscaledResolution, DlssPerfQualityMode, DlssFeatureFlags),
-//         (Mutex<DlssContext>, ContextUsedLastFrame),
-//     >,
-// }
-
-// type UpscaledResolution = UVec2;
-// type ContextUsedLastFrame = bool;

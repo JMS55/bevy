@@ -1,14 +1,13 @@
-use super::Dlss;
+use super::{prepare::ViewDlssContext, Dlss};
 use crate::{core_3d::MainPassViewportOverride, prepass::ViewPrepassTextures};
 use bevy_ecs::{query::QueryItem, world::World};
-use bevy_math::Vec4Swizzles;
 use bevy_render::{
     camera::TemporalJitter,
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     renderer::{RenderAdapter, RenderContext},
     view::ViewTarget,
 };
-use dlss_wgpu::{DlssExposure, DlssFeatureFlags, DlssRenderParameters, DlssTexture};
+use dlss_wgpu::{DlssExposure, DlssRenderParameters, DlssTexture};
 
 #[derive(Default)]
 pub struct DlssNode;
@@ -44,38 +43,39 @@ impl ViewNode for DlssNode {
             return Ok(());
         };
 
-        let render_resolution = viewport_override.0.physical_size;
-
         let view_target = view_target.post_process_write();
 
+        let render_resolution = viewport_override.0.physical_size;
+        let render_parameters = DlssRenderParameters {
+            color: DlssTexture {
+                texture: &view_target.source_texture,
+                view: &view_target.source,
+            },
+            depth: DlssTexture {
+                texture: &prepass_depth_texture.texture.texture,
+                view: &prepass_depth_texture.texture.default_view,
+            },
+            motion_vectors: DlssTexture {
+                texture: &prepass_motion_vectors_texture.texture.texture,
+                view: &prepass_motion_vectors_texture.texture.default_view,
+            },
+            exposure: DlssExposure::Automatic, // TODO
+            transparency_mask: None,           // TODO
+            bias: None,                        // TODO
+            dlss_output: DlssTexture {
+                texture: &view_target.destination_texture,
+                view: &view_target.destination,
+            },
+            reset: dlss.reset,
+            jitter_offset: temporal_jitter.offset,
+            partial_texture_size: Some(render_resolution),
+            motion_vector_scale: Some(-render_resolution.as_vec2()),
+        };
+
+        let mut dlss_context = dlss_context.context.lock().unwrap();
         dlss_context
-            .context
             .render(
-                DlssRenderParameters {
-                    color: DlssTexture {
-                        texture: &view_target.source_texture,
-                        view: &view_target.source,
-                    },
-                    depth: DlssTexture {
-                        texture: &prepass_depth_texture.texture.texture,
-                        view: &prepass_depth_texture.texture.default_view,
-                    },
-                    motion_vectors: DlssTexture {
-                        texture: &prepass_motion_vectors_texture.texture.texture,
-                        view: &prepass_motion_vectors_texture.texture.default_view,
-                    },
-                    exposure: DlssExposure::Automatic, // TODO
-                    transparency_mask: None,           // TODO
-                    bias: None,                        // TODO
-                    dlss_output: DlssTexture {
-                        texture: &view_target.destination_texture,
-                        view: &view_target.destination,
-                    },
-                    reset: dlss.reset,
-                    jitter_offset: temporal_jitter.offset,
-                    partial_texture_size: Some(render_resolution),
-                    motion_vector_scale: Some(-render_resolution.as_vec2()),
-                },
+                render_parameters,
                 render_context.command_encoder(),
                 &adapter,
             )

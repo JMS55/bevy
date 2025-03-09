@@ -1,4 +1,4 @@
-use super::Dlss;
+use super::{prepare::ViewDlssContext, Dlss};
 use crate::{
     core_3d::{Camera3d, MainPassViewportOverride},
     prepass::{DepthPrepass, MotionVectorPrepass},

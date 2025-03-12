@@ -72,14 +72,14 @@ impl ViewNode for DlssNode {
             motion_vector_scale: Some(-render_resolution.as_vec2()),
         };
 
+        let command_encoder = render_context.command_encoder();
         let mut dlss_context = dlss_context.context.lock().unwrap();
+
+        command_encoder.push_debug_group("dlss");
         dlss_context
-            .render(
-                render_parameters,
-                render_context.command_encoder(),
-                &adapter,
-            )
+            .render(render_parameters, command_encoder, &adapter)
             .expect("Failed to render DLSS");
+        command_encoder.pop_debug_group();
 
         Ok(())
     }

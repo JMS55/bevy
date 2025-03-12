@@ -223,9 +223,6 @@ fn modify_aa(
             dlss.perf_quality_mode = DlssPerfQualityMode::Quality;
         }
         if keys.just_pressed(KeyCode::KeyN) {
-            dlss.perf_quality_mode = DlssPerfQualityMode::UltraQuality;
-        }
-        if keys.just_pressed(KeyCode::KeyM) {
             dlss.perf_quality_mode = DlssPerfQualityMode::Dlaa;
         }
     }
@@ -361,13 +358,7 @@ fn update_ui(
         );
         draw_selectable_menu_item(ui, "Balanced", 'V', pqm == DlssPerfQualityMode::Balanced);
         draw_selectable_menu_item(ui, "Quality", 'B', pqm == DlssPerfQualityMode::Quality);
-        draw_selectable_menu_item(
-            ui,
-            "UltraQuality",
-            'N',
-            pqm == DlssPerfQualityMode::UltraQuality,
-        );
-        draw_selectable_menu_item(ui, "DLAA", 'M', pqm == DlssPerfQualityMode::Dlaa);
+        draw_selectable_menu_item(ui, "DLAA", 'N', pqm == DlssPerfQualityMode::Dlaa);
     }
 
     ui.push_str("\n----------\n\n");

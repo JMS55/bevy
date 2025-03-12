@@ -97,7 +97,6 @@ enum DlssPerfQualityModeRemoteReflect {
     #[default]
     Auto,
     Dlaa,
-    UltraQuality,
     Quality,
     Balanced,
     Performance,

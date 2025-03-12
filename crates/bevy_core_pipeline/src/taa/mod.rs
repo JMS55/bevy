@@ -45,6 +45,7 @@ const TAA_SHADER_HANDLE: Handle<Shader> = weak_handle!("fea20d50-86b6-4069-aa32-
 /// Plugin for temporal anti-aliasing.
 ///
 /// See [`TemporalAntiAliasing`] for more details.
+// TODO: Add this by default to the app
 pub struct TemporalAntiAliasPlugin;
 
 impl Plugin for TemporalAntiAliasPlugin {

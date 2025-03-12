@@ -207,25 +207,25 @@ fn modify_aa(
     // DLSS Settings
     #[cfg(feature = "dlss")]
     if let Some(mut dlss) = dlss {
-        if keys.just_pressed(KeyCode::KeyQ) {
+        if keys.just_pressed(KeyCode::KeyZ) {
             dlss.perf_quality_mode = DlssPerfQualityMode::Auto;
         }
-        if keys.just_pressed(KeyCode::KeyW) {
+        if keys.just_pressed(KeyCode::KeyX) {
             dlss.perf_quality_mode = DlssPerfQualityMode::UltraPerformance;
         }
-        if keys.just_pressed(KeyCode::KeyE) {
+        if keys.just_pressed(KeyCode::KeyC) {
             dlss.perf_quality_mode = DlssPerfQualityMode::Performance;
         }
-        if keys.just_pressed(KeyCode::KeyR) {
+        if keys.just_pressed(KeyCode::KeyV) {
             dlss.perf_quality_mode = DlssPerfQualityMode::Balanced;
         }
-        if keys.just_pressed(KeyCode::KeyT) {
+        if keys.just_pressed(KeyCode::KeyB) {
             dlss.perf_quality_mode = DlssPerfQualityMode::Quality;
         }
-        if keys.just_pressed(KeyCode::KeyY) {
+        if keys.just_pressed(KeyCode::KeyN) {
             dlss.perf_quality_mode = DlssPerfQualityMode::UltraQuality;
         }
-        if keys.just_pressed(KeyCode::KeyU) {
+        if keys.just_pressed(KeyCode::KeyM) {
             dlss.perf_quality_mode = DlssPerfQualityMode::Dlaa;
         }
     }
@@ -346,28 +346,28 @@ fn update_ui(
     if let Some(dlss) = dlss {
         let pqm = dlss.perf_quality_mode;
         ui.push_str("\n----------\n\nQuality\n");
-        draw_selectable_menu_item(ui, "Auto", 'Q', pqm == DlssPerfQualityMode::Auto);
+        draw_selectable_menu_item(ui, "Auto", 'Z', pqm == DlssPerfQualityMode::Auto);
         draw_selectable_menu_item(
             ui,
             "UltraPerformance",
-            'W',
+            'X',
             pqm == DlssPerfQualityMode::UltraPerformance,
         );
         draw_selectable_menu_item(
             ui,
             "Performance",
-            'E',
+            'C',
             pqm == DlssPerfQualityMode::Performance,
         );
-        draw_selectable_menu_item(ui, "Balanced", 'R', pqm == DlssPerfQualityMode::Balanced);
-        draw_selectable_menu_item(ui, "Quality", 'T', pqm == DlssPerfQualityMode::Quality);
+        draw_selectable_menu_item(ui, "Balanced", 'V', pqm == DlssPerfQualityMode::Balanced);
+        draw_selectable_menu_item(ui, "Quality", 'B', pqm == DlssPerfQualityMode::Quality);
         draw_selectable_menu_item(
             ui,
             "UltraQuality",
-            'Y',
+            'N',
             pqm == DlssPerfQualityMode::UltraQuality,
         );
-        draw_selectable_menu_item(ui, "DLAA", 'U', pqm == DlssPerfQualityMode::Dlaa);
+        draw_selectable_menu_item(ui, "DLAA", 'M', pqm == DlssPerfQualityMode::Dlaa);
     }
 
     ui.push_str("\n----------\n\n");

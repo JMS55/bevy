@@ -380,8 +380,9 @@ fn prepare_taa_jitter(
     frame_count: Res<FrameCount>,
     mut query: Query<&mut TemporalJitter, With<TemporalAntiAliasing>>,
 ) {
-    // Halton sequence (2, 3) - 0.5, skipping i = 0
+    // Halton sequence (2, 3) - 0.5
     let halton_sequence = [
+        vec2(0.0, 0.0),
         vec2(0.0, -0.16666666),
         vec2(-0.25, 0.16666669),
         vec2(0.25, -0.3888889),
@@ -389,7 +390,6 @@ fn prepare_taa_jitter(
         vec2(0.125, 0.2777778),
         vec2(-0.125, -0.2777778),
         vec2(0.375, 0.055555582),
-        vec2(-0.4375, 0.3888889),
     ];
 
     let offset = halton_sequence[frame_count.0 as usize % halton_sequence.len()];

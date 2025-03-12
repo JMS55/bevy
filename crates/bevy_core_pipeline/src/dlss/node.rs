@@ -67,7 +67,7 @@ impl ViewNode for DlssNode {
                 view: &view_target.destination,
             },
             reset: dlss.reset,
-            jitter_offset: temporal_jitter.offset,
+            jitter_offset: -temporal_jitter.offset,
             partial_texture_size: Some(render_resolution),
             motion_vector_scale: Some(-render_resolution.as_vec2()),
         };

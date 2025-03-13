@@ -60,7 +60,6 @@ impl ViewNode for DlssNode {
                 view: &prepass_motion_vectors_texture.texture.default_view,
             },
             exposure: DlssExposure::Automatic, // TODO
-            transparency_mask: None,           // TODO
             bias: None,                        // TODO
             dlss_output: DlssTexture {
                 texture: &view_target.destination_texture,

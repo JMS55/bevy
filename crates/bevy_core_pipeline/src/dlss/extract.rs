@@ -15,7 +15,7 @@ pub fn extract_dlss(mut commands: Commands, mut main_world: ResMut<MainWorld>) {
         let mut entity_commands = commands
             .get_entity(entity)
             .expect("Camera entity wasn't synced.");
-        if dlss.is_some() && camera.is_active && has_perspective_projection {
+        if dlss.is_some() && camera.is_active && camera.hdr && has_perspective_projection {
             entity_commands.insert(dlss.as_deref().unwrap().clone());
             dlss.as_mut().unwrap().reset = false;
         } else {

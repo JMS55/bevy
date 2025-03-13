@@ -52,12 +52,10 @@ pub fn prepare_dlss(
     {
         let upscaled_resolution = view.viewport.zw();
 
-        let mut dlss_feature_flags = DlssFeatureFlags::LowResolutionMotionVectors
+        let dlss_feature_flags = DlssFeatureFlags::LowResolutionMotionVectors
             | DlssFeatureFlags::InvertedDepth
+            | DlssFeatureFlags::HighDynamicRange
             | DlssFeatureFlags::AutoExposure; // TODO
-        if view.hdr {
-            dlss_feature_flags |= DlssFeatureFlags::HighDynamicRange;
-        }
 
         match dlss_context.as_deref_mut() {
             Some(dlss_context)

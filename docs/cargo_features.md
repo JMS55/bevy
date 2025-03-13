@@ -68,6 +68,7 @@ The default feature set enables most of the expected features of a game engine, 
 |dds|DDS compressed texture support|
 |debug_glam_assert|Enable assertions in debug builds to check the validity of parameters passed to glam|
 |detailed_trace|Enable detailed trace event logging. These trace events are expensive even when off, thus they require compile time opt-in|
+|dlss|NVIDIA Deep Learning Super Sampling|
 |dynamic_linking|Force dynamic linking, which improves iterative compile times|
 |embedded_watcher|Enables watching in memory asset providers for Bevy Asset hot-reloading|
 |experimental_pbr_pcss|Enable support for PCSS, at the risk of blowing past the global, per-shader sampler limit on older/lower-end GPUs|

@@ -35,8 +35,12 @@ use bevy::{
     },
 };
 
+// *Note:* TAA is not _required_ for specular transmission, but
+// it _greatly enhances_ the look of the resulting blur effects.
+// Sadly, it's not available under WebGL.
 #[cfg(not(all(feature = "webgl2", target_arch = "wasm32")))]
-use bevy::core_pipeline::experimental::taa::{TemporalAntiAliasPlugin, TemporalAntiAliasing};
+use bevy::core_pipeline::taa::TemporalAntiAliasing;
+
 use rand::random;
 
 fn main() {
@@ -51,12 +55,6 @@ fn main() {
         })
         .add_systems(Startup, setup)
         .add_systems(Update, (example_control_system, flicker_system));
-
-    // *Note:* TAA is not _required_ for specular transmission, but
-    // it _greatly enhances_ the look of the resulting blur effects.
-    // Sadly, it's not available under WebGL.
-    #[cfg(not(all(feature = "webgl2", target_arch = "wasm32")))]
-    app.add_plugins(TemporalAntiAliasPlugin);
 
     app.run();
 }

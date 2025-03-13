@@ -5,10 +5,10 @@ use std::{f32::consts::PI, fmt::Write};
 use bevy::{
     core_pipeline::{
         contrast_adaptive_sharpening::ContrastAdaptiveSharpening,
-        experimental::taa::{TemporalAntiAliasPlugin, TemporalAntiAliasing},
         fxaa::{Fxaa, Sensitivity},
         prepass::{DepthPrepass, MotionVectorPrepass},
         smaa::{Smaa, SmaaPreset},
+        taa::TemporalAntiAliasing,
     },
     image::{ImageSampler, ImageSamplerDescriptor},
     pbr::CascadeShadowConfigBuilder,
@@ -31,7 +31,7 @@ fn main() {
         "5417916c-0291-4e3f-8f65-326c1858ab96"
     )));
 
-    app.add_plugins((DefaultPlugins, TemporalAntiAliasPlugin))
+    app.add_plugins(DefaultPlugins)
         .add_systems(Startup, setup)
         .add_systems(Update, (modify_aa, modify_sharpening, update_ui));
 

@@ -1,14 +1,7 @@
 use super::{prepare::ViewDlssContext, Dlss};
-use crate::{
-    core_3d::Camera3d,
-    prepass::{DepthPrepass, MotionVectorPrepass},
-};
-use bevy_ecs::{
-    query::With,
-    system::{Commands, ResMut},
-};
+use bevy_ecs::system::{Commands, ResMut};
 use bevy_render::{
-    camera::{Camera, MainPassViewportOverride, Projection, TemporalJitter},
+    camera::{Camera, MainPassViewportOverride, Projection},
     sync_world::RenderEntity,
     MainWorld,
 };

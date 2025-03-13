@@ -1,5 +1,8 @@
 use super::{Dlss, DlssSdk};
-use crate::core_3d::Camera3d;
+use crate::{
+    core_3d::Camera3d,
+    prepass::{DepthPrepass, MotionVectorPrepass},
+};
 use bevy_diagnostic::FrameCount;
 use bevy_ecs::{
     component::Component,
@@ -21,15 +24,23 @@ use dlss_wgpu::{DlssContext, DlssFeatureFlags, DlssPerfQualityMode};
 use std::sync::{Arc, Mutex};
 
 pub fn prepare_dlss(
-    mut query: Query<(
-        Entity,
-        &ExtractedView,
-        &ExtractedCamera,
-        &Dlss,
-        &mut TemporalJitter,
-        &mut MipBias,
-        Option<&mut ViewDlssContext>,
-    )>,
+    mut query: Query<
+        (
+            Entity,
+            &ExtractedView,
+            &ExtractedCamera,
+            &Dlss,
+            &mut TemporalJitter,
+            &mut MipBias,
+            Option<&mut ViewDlssContext>,
+        ),
+        (
+            With<Camera3d>,
+            With<TemporalJitter>,
+            With<DepthPrepass>,
+            With<MotionVectorPrepass>,
+        ),
+    >,
     dlss_sdk: Res<DlssSdk>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,

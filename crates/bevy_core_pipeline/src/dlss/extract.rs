@@ -14,13 +14,8 @@ use bevy_render::{
 };
 
 pub fn extract_dlss(mut commands: Commands, mut main_world: ResMut<MainWorld>) {
-    let mut cameras_3d = main_world
-        .query_filtered::<(RenderEntity, &Camera, &Projection, Option<&mut Dlss>), (
-            With<Camera3d>,
-            With<TemporalJitter>,
-            With<DepthPrepass>,
-            With<MotionVectorPrepass>,
-        )>();
+    let mut cameras_3d =
+        main_world.query::<(RenderEntity, &Camera, &Projection, Option<&mut Dlss>)>();
 
     for (entity, camera, camera_projection, mut dlss) in cameras_3d.iter_mut(&mut main_world) {
         let has_perspective_projection = matches!(camera_projection, Projection::Perspective(_));

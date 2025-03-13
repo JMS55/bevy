@@ -344,16 +344,11 @@ impl SpecializedRenderPipeline for TaaPipeline {
 }
 
 fn extract_taa_settings(mut commands: Commands, mut main_world: ResMut<MainWorld>) {
-    let mut cameras_3d = main_world.query_filtered::<(
+    let mut cameras_3d = main_world.query::<(
         RenderEntity,
         &Camera,
         &Projection,
         Option<&mut TemporalAntiAliasing>,
-    ), (
-        With<Camera3d>,
-        With<TemporalJitter>,
-        With<DepthPrepass>,
-        With<MotionVectorPrepass>,
     )>();
 
     for (entity, camera, camera_projection, mut taa_settings) in
@@ -378,7 +373,16 @@ fn extract_taa_settings(mut commands: Commands, mut main_world: ResMut<MainWorld
 
 fn prepare_taa_jitter(
     frame_count: Res<FrameCount>,
-    mut query: Query<&mut TemporalJitter, With<TemporalAntiAliasing>>,
+    mut query: Query<
+        &mut TemporalJitter,
+        (
+            With<TemporalAntiAliasing>,
+            With<Camera3d>,
+            With<TemporalJitter>,
+            With<DepthPrepass>,
+            With<MotionVectorPrepass>,
+        ),
+    >,
 ) {
     // Halton sequence (2, 3) - 0.5
     let halton_sequence = [

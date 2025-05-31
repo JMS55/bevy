@@ -1,0 +1,188 @@
+// https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf
+
+#import bevy_core_pipeline::tonemapping::tonemapping_luminance
+#import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
+#import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
+#import bevy_pbr::utils::{rand_f, octahedral_decode}
+#import bevy_render::maths::PI
+#import bevy_render::view::View
+#import bevy_solari::reservoir::{Reservoir, empty_reservoir, NULL_RESERVOIR_SAMPLE}
+#import bevy_solari::sampling::{generate_random_light_sample, calculate_light_contribution, trace_light_visibility, sample_disk}
+
+@group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(1) var<storage, read> previous_reservoirs: array<Reservoir>;
+@group(1) @binding(2) var<storage, read_write> reservoirs: array<Reservoir>;
+@group(1) @binding(3) var gbuffer: texture_2d<u32>;
+@group(1) @binding(4) var depth_buffer: texture_depth_2d;
+@group(1) @binding(5) var motion_vectors: texture_2d<f32>;
+@group(1) @binding(6) var<uniform> view: View;
+var<push_constant> frame_index: u32;
+
+const INITIAL_SAMPLES = 4u;
+const SPATIAL_REUSE_SAMPLES = 5u;
+const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
+
+@compute @workgroup_size(8, 8, 1)
+fn initial_samples(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
+
+    let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
+    var rng = pixel_index + frame_index;
+
+    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    let world_position = reconstruct_world_position(global_id.xy, depth);
+    let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
+
+    var reservoir = empty_reservoir();
+    var reservoir_target_function = 0.0;
+    for (var i = 0u; i < INITIAL_SAMPLES; i++) {
+        let light_sample = generate_random_light_sample(&rng);
+
+        let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
+        let light_contribution = calculate_light_contribution(light_sample, world_position, world_normal);
+        let target_function = tonemapping_luminance(light_contribution.radiance);
+        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+
+        reservoir.weight_sum += resampling_weight;
+        if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
+            reservoir.sample = light_sample;
+            reservoir_target_function = target_function;
+        }
+    }
+
+    if reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE {
+        reservoir.unbiased_contribution_weight = reservoir.weight_sum / reservoir_target_function;
+        reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
+    }
+
+    // TODO: Also write to view output here, and average with the spatial reuse sample
+
+    reservoirs[pixel_index] = reservoir;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
+
+    // let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
+    // var rng = pixel_index + frame_index;
+
+    // let gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    // let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    // let world_position = reconstruct_world_position(global_id.xy, depth);
+    // let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
+
+    // let motion_vector = textureLoad(motion_vectors, global_id.xy, 0).xy;
+    // let previous_pixel_id = round(vec2<f32>(global_id.xy) - (motion_vector * view.viewport.zw));
+
+    // // Validate previous pixel
+
+    // let previous_pixel_index = u32(previous_pixel_id.x) + u32(previous_pixel_id.y) * u32(view.viewport.z);
+    // let previous_reservoir = previous_reservoirs[previous_pixel_index];
+    // var reservoir = reservoirs[pixel_index];
+
+    // let light_contribution = calculate_light_contribution(previous_reservoir.sample, world_position, world_normal);
+    // let target_function = tonemapping_luminance(light_contribution.radiance);
+    // let resampling_weight = target_function * previous_reservoir.unbiased_contribution_weight;
+
+    // reservoir.weight_sum += resampling_weight;
+    // if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
+    //     reservoir.sample = previous_reservoir.sample;
+    // }
+
+    // let light_contribution2 = calculate_light_contribution(reservoir.sample, world_position, world_normal);
+    // reservoir.unbiased_contribution_weight = reservoir.weight_sum / tonemapping_luminance(light_contribution2.radiance);
+
+    // reservoirs[pixel_index] = reservoir;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
+
+    let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
+    var rng = pixel_index + frame_index;
+
+    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    let world_position = reconstruct_world_position(global_id.xy, depth);
+    let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
+    let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
+    let diffuse_brdf = base_color / PI;
+    let emissive = rgb9e5_to_vec3_(gpixel.g);
+
+    var reservoir = reservoirs[pixel_index];
+    var reservoir_radiance = calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance;
+
+    for (var i = 0u; i < SPATIAL_REUSE_SAMPLES; i++) {
+        let neighbor_pixel_id = get_neighbor_pixel_id(global_id.xy, &rng);
+        let neighbor_pixel_index = neighbor_pixel_id.x + neighbor_pixel_id.y * u32(view.viewport.z);
+
+        let neighbor_depth = textureLoad(depth_buffer, neighbor_pixel_id, 0);
+        let neighbor_gpixel = textureLoad(gbuffer, global_id.xy, 0);
+        let neighbor_world_normal = octahedral_decode(unpack_24bit_normal(neighbor_gpixel.a));
+        if is_neighbor_invalid(depth, neighbor_depth, world_normal, neighbor_world_normal) { continue; }
+
+        let neighbor_reservoir = reservoirs[neighbor_pixel_index];
+
+        let mis_weight = 1.0 / f32(SPATIAL_REUSE_SAMPLES); // TODO: Proper spatial MIS weight and shift mapping
+        let light_contribution = calculate_light_contribution(neighbor_reservoir.sample, world_position, world_normal);
+        let target_function = tonemapping_luminance(light_contribution.radiance);
+        let resampling_weight = mis_weight * (target_function * neighbor_reservoir.unbiased_contribution_weight);
+
+        reservoir.weight_sum += resampling_weight;
+        if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
+            reservoir.sample = neighbor_reservoir.sample;
+            reservoir_radiance = light_contribution.radiance;
+        }
+    }
+
+    if reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE {
+        reservoir.unbiased_contribution_weight = reservoir.weight_sum / tonemapping_luminance(reservoir_radiance);
+        reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
+    }
+
+    var pixel_color = reservoir_radiance * reservoir.unbiased_contribution_weight;
+    pixel_color *= diffuse_brdf;
+    pixel_color *= view.exposure;
+
+    pixel_color += emissive;
+
+    textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+}
+
+fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, rng: ptr<function, u32>) -> vec2<u32> {
+    var neighbor_id = vec2<i32>(center_pixel_id) + vec2<i32>(sample_disk(SPATIAL_REUSE_RADIUS_PIXELS, rng));
+    neighbor_id = clamp(neighbor_id, vec2(0i), vec2<i32>(view.viewport.zw) - 1i);
+    return vec2<u32>(neighbor_id);
+}
+
+fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
+    let uv = (vec2<f32>(pixel_id) + 0.5) / view.viewport.zw;
+    let xy_ndc = (uv - vec2(0.5)) * vec2(2.0, -2.0);
+    let world_pos = view.world_from_clip * vec4(xy_ndc, depth, 1.0);
+    return world_pos.xyz / world_pos.w;
+}
+
+// TODO: Plane distance instead of depth
+// https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s22699-fast-denoising-with-self-stabilizing-recurrent-blurs.pdf#page=45
+fn is_neighbor_invalid(depth: f32, neighbor_depth: f32, normal: vec3<f32>, neighbor_normal: vec3<f32>) -> bool {
+    let linear_depth = -depth_ndc_to_view_z(depth);
+    let linear_neighbor_depth = -depth_ndc_to_view_z(neighbor_depth);
+
+    // Reject if depth difference more than 10% or angle between normals more than 25 degrees
+    return linear_neighbor_depth > 1.1 * linear_depth || linear_neighbor_depth < 0.9 * linear_depth ||
+        dot(normal, neighbor_normal) < 0.906;
+}
+
+fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
+#ifdef VIEW_PROJECTION_PERSPECTIVE
+    return -view.clip_from_view[3][2]() / ndc_depth;
+#else ifdef VIEW_PROJECTION_ORTHOGRAPHIC
+    return -(view.clip_from_view[3][2] - ndc_depth) / view.clip_from_view[2][2];
+#else
+    let view_pos = view.view_from_clip * vec4(0.0, 0.0, ndc_depth, 1.0);
+    return view_pos.z / view_pos.w;
+#endif
+}

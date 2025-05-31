@@ -16,9 +16,10 @@
 @group(1) @binding(4) var depth_buffer: texture_depth_2d;
 @group(1) @binding(5) var motion_vectors: texture_2d<f32>;
 @group(1) @binding(6) var<uniform> view: View;
+@group(1) @binding(7) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
 var<push_constant> frame_index: u32;
 
-const INITIAL_SAMPLES = 4u;
+const INITIAL_SAMPLES = 1u;
 const SPATIAL_REUSE_SAMPLES = 5u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 
@@ -33,11 +34,14 @@ fn initial_samples(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     let world_position = reconstruct_world_position(global_id.xy, depth);
     let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
+    let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
+    let diffuse_brdf = base_color / PI;
+    let emissive = rgb9e5_to_vec3_(gpixel.g);
 
     var reservoir = empty_reservoir();
-    var reservoir_target_function = 0.0;
+    var reservoir_radiance = vec3(1.0);
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
-        let light_sample = generate_random_light_sample(&rng);
+       let light_sample = generate_random_light_sample(&rng);
 
         let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
         let light_contribution = calculate_light_contribution(light_sample, world_position, world_normal);
@@ -47,18 +51,25 @@ fn initial_samples(@builtin(global_invocation_id) global_id: vec3<u32>) {
         reservoir.weight_sum += resampling_weight;
         if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
             reservoir.sample = light_sample;
-            reservoir_target_function = target_function;
+            reservoir_radiance = light_contribution.radiance;
         }
     }
 
     if reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE {
-        reservoir.unbiased_contribution_weight = reservoir.weight_sum / reservoir_target_function;
+        reservoir.unbiased_contribution_weight = reservoir.weight_sum / tonemapping_luminance(reservoir_radiance);
         reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
     }
 
-    // TODO: Also write to view output here, and average with the spatial reuse sample
+    var pixel_color = reservoir_radiance * reservoir.unbiased_contribution_weight;
+    pixel_color *= diffuse_brdf;
+    pixel_color *= view.exposure;
 
-    reservoirs[pixel_index] = reservoir;
+    pixel_color += emissive;
+
+    let old_color = textureLoad(accumulation_texture, global_id.xy);
+    let new_color = mix(old_color.rgb, pixel_color, 1.0 / (old_color.a + 1.0));
+    textureStore(accumulation_texture, global_id.xy, vec4(new_color, old_color.a + 1.0));
+    textureStore(view_output, global_id.xy, vec4(new_color, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -99,57 +110,57 @@ fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
+    // if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
-    let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
-    var rng = pixel_index + frame_index;
+    // let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
+    // var rng = pixel_index + frame_index;
 
-    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
-    let depth = textureLoad(depth_buffer, global_id.xy, 0);
-    let world_position = reconstruct_world_position(global_id.xy, depth);
-    let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
-    let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
-    let diffuse_brdf = base_color / PI;
-    let emissive = rgb9e5_to_vec3_(gpixel.g);
+    // let gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    // let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    // let world_position = reconstruct_world_position(global_id.xy, depth);
+    // let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
+    // let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
+    // let diffuse_brdf = base_color / PI;
+    // let emissive = rgb9e5_to_vec3_(gpixel.g);
 
-    var reservoir = reservoirs[pixel_index];
-    var reservoir_radiance = calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance;
+    // var reservoir = reservoirs[pixel_index];
+    // var reservoir_radiance = calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance;
 
-    for (var i = 0u; i < SPATIAL_REUSE_SAMPLES; i++) {
-        let neighbor_pixel_id = get_neighbor_pixel_id(global_id.xy, &rng);
-        let neighbor_pixel_index = neighbor_pixel_id.x + neighbor_pixel_id.y * u32(view.viewport.z);
+    // for (var i = 0u; i < SPATIAL_REUSE_SAMPLES; i++) {
+    //     let neighbor_pixel_id = get_neighbor_pixel_id(global_id.xy, &rng);
+    //     let neighbor_pixel_index = neighbor_pixel_id.x + neighbor_pixel_id.y * u32(view.viewport.z);
 
-        let neighbor_depth = textureLoad(depth_buffer, neighbor_pixel_id, 0);
-        let neighbor_gpixel = textureLoad(gbuffer, global_id.xy, 0);
-        let neighbor_world_normal = octahedral_decode(unpack_24bit_normal(neighbor_gpixel.a));
-        if is_neighbor_invalid(depth, neighbor_depth, world_normal, neighbor_world_normal) { continue; }
+    //     let neighbor_depth = textureLoad(depth_buffer, neighbor_pixel_id, 0);
+    //     let neighbor_gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    //     let neighbor_world_normal = octahedral_decode(unpack_24bit_normal(neighbor_gpixel.a));
+    //     if is_neighbor_invalid(depth, neighbor_depth, world_normal, neighbor_world_normal) { continue; }
 
-        let neighbor_reservoir = reservoirs[neighbor_pixel_index];
+    //     let neighbor_reservoir = reservoirs[neighbor_pixel_index];
 
-        let mis_weight = 1.0 / f32(SPATIAL_REUSE_SAMPLES); // TODO: Proper spatial MIS weight and shift mapping
-        let light_contribution = calculate_light_contribution(neighbor_reservoir.sample, world_position, world_normal);
-        let target_function = tonemapping_luminance(light_contribution.radiance);
-        let resampling_weight = mis_weight * (target_function * neighbor_reservoir.unbiased_contribution_weight);
+    //     let mis_weight = 1.0 / f32(SPATIAL_REUSE_SAMPLES); // TODO: Proper spatial MIS weight and shift mapping
+    //     let light_contribution = calculate_light_contribution(neighbor_reservoir.sample, world_position, world_normal);
+    //     let target_function = tonemapping_luminance(light_contribution.radiance);
+    //     let resampling_weight = mis_weight * (target_function * neighbor_reservoir.unbiased_contribution_weight);
 
-        reservoir.weight_sum += resampling_weight;
-        if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
-            reservoir.sample = neighbor_reservoir.sample;
-            reservoir_radiance = light_contribution.radiance;
-        }
-    }
+    //     reservoir.weight_sum += resampling_weight;
+    //     if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
+    //         reservoir.sample = neighbor_reservoir.sample;
+    //         reservoir_radiance = light_contribution.radiance;
+    //     }
+    // }
 
-    if reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE {
-        reservoir.unbiased_contribution_weight = reservoir.weight_sum / tonemapping_luminance(reservoir_radiance);
-        reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
-    }
+    // if reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE {
+    //     reservoir.unbiased_contribution_weight = reservoir.weight_sum / tonemapping_luminance(reservoir_radiance);
+    //     reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
+    // }
 
-    var pixel_color = reservoir_radiance * reservoir.unbiased_contribution_weight;
-    pixel_color *= diffuse_brdf;
-    pixel_color *= view.exposure;
+    // var pixel_color = reservoir_radiance * reservoir.unbiased_contribution_weight;
+    // pixel_color *= diffuse_brdf;
+    // pixel_color *= view.exposure;
 
-    pixel_color += emissive;
+    // pixel_color += emissive;
 
-    textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+    // textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 
 fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, rng: ptr<function, u32>) -> vec2<u32> {

@@ -17,7 +17,7 @@ use bevy_render::{
         },
         BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, CachedComputePipelineId,
         ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, PushConstantRange,
-        ShaderStages, StorageTextureAccess, TextureSampleType,
+        ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice},
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
@@ -113,6 +113,7 @@ impl ViewNode for SolariLightingNode {
                 depth_buffer,
                 motion_vectors,
                 view_uniforms,
+                &solari_lighting_resources.accumulation_texture,
             )),
         );
 
@@ -161,6 +162,7 @@ impl FromWorld for SolariLightingNode {
                     texture_depth_2d(),
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     uniform_buffer::<ViewUniform>(true),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                 ),
             ),
         );

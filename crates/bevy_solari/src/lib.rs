@@ -38,6 +38,5 @@ impl SolariPlugin {
             | WgpuFeatures::TEXTURE_BINDING_ARRAY
             | WgpuFeatures::UNIFORM_BUFFER_AND_STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING
             | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-            | WgpuFeatures::PARTIALLY_BOUND_BINDING_ARRAY
     }
 }

@@ -8,7 +8,10 @@ use bevy_ecs::{
 use bevy_math::UVec2;
 use bevy_render::{
     camera::ExtractedCamera,
-    render_resource::{Buffer, BufferDescriptor, BufferUsages},
+    render_resource::{
+        Buffer, BufferDescriptor, BufferUsages, Extent3d, TextureDescriptor, TextureDimension,
+        TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    },
     renderer::RenderDevice,
 };
 
@@ -18,6 +21,7 @@ const RESERVOIR_STRUCT_SIZE: u64 = 24;
 pub struct SolariLightingResources {
     pub reservoirs_a: Buffer,
     pub reservoirs_b: Buffer,
+    pub accumulation_texture: TextureView,
     pub view_size: UVec2,
 }
 
@@ -54,9 +58,27 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let accumulation_texture = render_device
+            .create_texture(&TextureDescriptor {
+                label: Some("solari_lighting_accumulation_texture"),
+                size: Extent3d {
+                    width: view_size.x,
+                    height: view_size.y,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba32Float,
+                usage: TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&TextureViewDescriptor::default());
+
         commands.entity(entity).insert(SolariLightingResources {
             reservoirs_a,
             reservoirs_b,
+            accumulation_texture,
             view_size,
         });
     }

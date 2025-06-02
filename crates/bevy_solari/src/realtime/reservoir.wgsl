@@ -7,9 +7,21 @@ const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 struct Reservoir {
     sample: LightSample,
     weight_sum: f32,
+    confidence_weight: f32,
     unbiased_contribution_weight: f32,
+    _padding: f32,
 }
 
 fn empty_reservoir() -> Reservoir {
-    return Reservoir(LightSample(vec2(NULL_RESERVOIR_SAMPLE, 0u), vec2(0.0)), 0.0, 0.0);
+    return Reservoir(
+        LightSample(vec2(NULL_RESERVOIR_SAMPLE, 0u), vec2(0.0)),
+        0.0,
+        0.0,
+        0.0,
+        0.0
+    );
+}
+
+fn reservoir_valid(reservoir: Reservoir) -> bool {
+    return reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE;
 }

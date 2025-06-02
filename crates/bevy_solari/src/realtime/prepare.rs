@@ -15,7 +15,7 @@ use bevy_render::{
     renderer::RenderDevice,
 };
 
-const RESERVOIR_STRUCT_SIZE: u64 = 24;
+const RESERVOIR_STRUCT_SIZE: u64 = 32;
 
 #[derive(Component)]
 pub struct SolariLightingResources {

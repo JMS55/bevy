@@ -128,7 +128,10 @@ impl ViewNode for SolariLightingNode {
         pass.set_bind_group(1, &bind_group, &[view_uniform_offset.offset]);
 
         pass.set_pipeline(initial_samples_pipeline);
-        pass.set_push_constants(0, &frame_index.to_le_bytes());
+        pass.set_push_constants(
+            0,
+            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        );
         pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
 
         pass.set_pipeline(temporal_reuse_pipeline);
@@ -176,7 +179,7 @@ impl FromWorld for SolariLightingNode {
                 ],
                 push_constant_ranges: vec![PushConstantRange {
                     stages: ShaderStages::COMPUTE,
-                    range: 0..4,
+                    range: 0..8,
                 }],
                 shader: load_embedded_asset!(world, "direct.wgsl"),
                 shader_defs: vec![],
@@ -193,7 +196,7 @@ impl FromWorld for SolariLightingNode {
                 ],
                 push_constant_ranges: vec![PushConstantRange {
                     stages: ShaderStages::COMPUTE,
-                    range: 0..4,
+                    range: 0..8,
                 }],
                 shader: load_embedded_asset!(world, "direct.wgsl"),
                 shader_defs: vec![],
@@ -210,7 +213,7 @@ impl FromWorld for SolariLightingNode {
                 ],
                 push_constant_ranges: vec![PushConstantRange {
                     stages: ShaderStages::COMPUTE,
-                    range: 0..4,
+                    range: 0..8,
                 }],
                 shader: load_embedded_asset!(world, "direct.wgsl"),
                 shader_defs: vec![],

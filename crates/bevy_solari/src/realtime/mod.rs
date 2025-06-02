@@ -64,9 +64,17 @@ impl Plugin for SolariLightingPlugin {
     }
 }
 
-#[derive(Component, Reflect, Default, Clone)]
+#[derive(Component, Reflect, Clone)]
 #[reflect(Component, Default, Clone)]
 #[require(Hdr, DeferredPrepass, DepthPrepass, MotionVectorPrepass)]
 pub struct SolariLighting {
     pub reset: bool,
+}
+
+impl Default for SolariLighting {
+    fn default() -> Self {
+        Self {
+            reset: true, // No temporal history on the first frame
+        }
+    }
 }

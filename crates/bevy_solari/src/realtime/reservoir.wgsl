@@ -1,3 +1,5 @@
+// https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf
+
 #define_import_path bevy_solari::reservoir
 
 #import bevy_solari::sampling::LightSample

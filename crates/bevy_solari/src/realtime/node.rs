@@ -157,7 +157,7 @@ impl FromWorld for SolariLightingNode {
                 (
                     texture_storage_2d(
                         ViewTarget::TEXTURE_FORMAT_HDR,
-                        StorageTextureAccess::WriteOnly,
+                        StorageTextureAccess::ReadWrite,
                     ),
                     storage_buffer_read_only_sized(false, None),
                     storage_buffer_sized(false, None),

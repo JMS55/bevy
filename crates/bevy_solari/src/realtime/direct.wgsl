@@ -62,52 +62,82 @@ fn initial_samples(@builtin(global_invocation_id) global_id: vec3<u32>) {
         reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
     }
 
+    reservoir.confidence_weight = 1.0;
     reservoirs[pixel_index] = reservoir;
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    // if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
+    if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
-    // let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
-    // var rng = pixel_index + constants.frame_index;
+    let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
+    var rng = pixel_index + constants.frame_index;
 
-    // let depth = textureLoad(depth_buffer, global_id.xy, 0);
-    // if depth == 0.0 { return; }
-    // let gpixel = textureLoad(gbuffer, global_id.xy, 0);
-    // let world_position = reconstruct_world_position(global_id.xy, depth);
-    // let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
+    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    if depth == 0.0 { return; }
+    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    let world_position = reconstruct_world_position(global_id.xy, depth);
+    let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
 
-    // let motion_vector = textureLoad(motion_vectors, global_id.xy, 0).xy;
-    // let previous_pixel_id = round(vec2<f32>(global_id.xy) - (motion_vector * view.viewport.zw));
-    // let previous_pixel_index = u32(previous_pixel_id.x) + u32(previous_pixel_id.y) * u32(view.viewport.z);
+    let motion_vector = textureLoad(motion_vectors, global_id.xy, 0).xy;
+    let previous_pixel_id = round(vec2<f32>(global_id.xy) - (motion_vector * view.viewport.zw));
+    let previous_pixel_index = u32(previous_pixel_id.x) + u32(previous_pixel_id.y) * u32(view.viewport.z);
 
-    // // Validate previous pixel (is on screen, is a similiar surface)
+    // Validate previous pixel (is on screen, is a similiar surface)
 
-    // let previous_reservoir = previous_reservoirs[previous_pixel_index];
-    // if !reservoir_valid(previous_reservoir) || bool(constants.reset) { return; }
+    let previous_reservoir = previous_reservoirs[previous_pixel_index];
+    let previous_reservoir_confidence = previous_reservoir.confidence_weight * f32(INITIAL_SAMPLES);
+    if !reservoir_valid(previous_reservoir) || bool(constants.reset) { return; }
 
-    // var reservoir = reservoirs[pixel_index];
+    let input_reservoir = reservoirs[pixel_index];
+    let input_reservoir_confidence = input_reservoir.confidence_weight * f32(INITIAL_SAMPLES);
 
-    // let light_contribution = calculate_light_contribution(previous_reservoir.sample, world_position, world_normal);
-    // let target_function = luminance(light_contribution.radiance);
-    // let resampling_weight = target_function * previous_reservoir.unbiased_contribution_weight;
+    // TODO: May need to map previous reservoir light ID to current frame light ID
 
-    // reservoir.weight_sum += resampling_weight;
-    // reservoir.confidence_weight += previous_reservoir.confidence_weight;
+    var combined_reservoir = empty_reservoir();
 
-    // if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
-    //     reservoir.sample = previous_reservoir.sample;
-    // }
+    {
+        let input_target_function = reservoir_target_function(input_reservoir, world_position, world_normal);
+#ifndef BIASED
+        let mis_weight = input_reservoir_confidence / (input_reservoir_confidence + previous_reservoir_confidence);
+#else
+        // TODO
+#endif
+        let resampling_weight = mis_weight * (input_target_function * input_reservoir.unbiased_contribution_weight);
 
-    // if reservoir_valid(reservoir) {
-    //     let light_contribution2 = calculate_light_contribution(reservoir.sample, world_position, world_normal);
-    //     let target_function2 = luminance(light_contribution2.radiance);
-    //     let inverse_target_function = select(0.0, 1.0 / target_function2, target_function2 > 0.0);
-    //     reservoir.unbiased_contribution_weight = reservoir.weight_sum * inverse_target_function;
-    // }
+        combined_reservoir.weight_sum += resampling_weight;
+        combined_reservoir.confidence_weight += input_reservoir.confidence_weight;
 
-    // reservoirs[pixel_index] = reservoir;
+        if rand_f(&rng) < resampling_weight / combined_reservoir.weight_sum {
+            combined_reservoir.sample = input_reservoir.sample;
+        }
+    }
+
+    {
+        let input_target_function = reservoir_target_function(previous_reservoir, world_position, world_normal);
+#ifndef BIASED
+        let mis_weight = previous_reservoir_confidence / (input_reservoir_confidence + previous_reservoir_confidence);
+#else
+        // TODO
+#endif
+        let resampling_weight = mis_weight * (input_target_function * previous_reservoir.unbiased_contribution_weight);
+
+        combined_reservoir.weight_sum += resampling_weight;
+        combined_reservoir.confidence_weight += previous_reservoir.confidence_weight;
+
+        if rand_f(&rng) < resampling_weight / combined_reservoir.weight_sum {
+            combined_reservoir.sample = previous_reservoir.sample;
+        }
+    }
+
+    if reservoir_valid(combined_reservoir) {
+        let target_function = luminance(calculate_light_contribution(combined_reservoir.sample, world_position, world_normal).radiance);
+        let inverse_target_function = select(0.0, 1.0 / target_function, target_function > 0.0);
+        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+    }
+
+    combined_reservoir.confidence_weight = min(combined_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
+    reservoirs[pixel_index] = combined_reservoir;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -136,44 +166,47 @@ fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let neighbor_world_position = reconstruct_world_position(neighbor_pixel_id, neighbor_depth);
     let neighbor_world_normal = octahedral_decode(unpack_24bit_normal(neighbor_gpixel.a));
     let neighbor_valid = !is_neighbor_invalid(depth, neighbor_depth, world_normal, neighbor_world_normal);
-
-    var combined_reservoir = empty_reservoir();
+    let neighbor_reservoir = reservoirs[neighbor_pixel_index];
+    let neighbor_reservoir_confidence = select(0.0, neighbor_reservoir.confidence_weight * f32(INITIAL_SAMPLES), neighbor_valid);
 
     let input_reservoir = reservoirs[pixel_index];
+    let input_reservoir_confidence = input_reservoir.confidence_weight * f32(INITIAL_SAMPLES);
     let input_reservoir_radiance = select(
         vec3(0.0),
         calculate_light_contribution(input_reservoir.sample, world_position, world_normal).radiance,
         reservoir_valid(input_reservoir),
     );
 
+    var combined_reservoir = empty_reservoir();
+
     let input_target_function = luminance(input_reservoir_radiance);
 #ifdef BIASED
-    let mis_weight = 1.0 / 2.0;
+    let mis_weight = input_reservoir_confidence / (input_reservoir_confidence + neighbor_reservoir_confidence);
 #else
     let neighbor_target_function = select(0.0, reservoir_target_function(input_reservoir, neighbor_world_position, neighbor_world_normal), neighbor_valid);
-    let mis_weight = max(0.0, input_target_function / (input_target_function + neighbor_target_function));
+    let mis_weight = max(0.0, (input_reservoir_confidence * input_target_function) / ((input_reservoir_confidence * input_target_function) + (neighbor_reservoir_confidence * neighbor_target_function)));
 #endif
     let resampling_weight = mis_weight * (input_target_function * input_reservoir.unbiased_contribution_weight);
 
     combined_reservoir.weight_sum += resampling_weight;
+    combined_reservoir.confidence_weight += input_reservoir.confidence_weight;
 
     if rand_f(&rng) < resampling_weight / combined_reservoir.weight_sum {
         combined_reservoir.sample = input_reservoir.sample;
     }
 
     if neighbor_valid {
-        let neighbor_reservoir = reservoirs[neighbor_pixel_index];
-
         let input_target_function = reservoir_target_function(neighbor_reservoir, world_position, world_normal);
 #ifdef BIASED
-        let mis_weight = 1.0 / 2.0;
+        let mis_weight = neighbor_reservoir_confidence / (input_reservoir_confidence + neighbor_reservoir_confidence);
 #else
         let neighbor_target_function = reservoir_target_function(neighbor_reservoir, neighbor_world_position, neighbor_world_normal);
-        let mis_weight = max(0.0, neighbor_target_function / (neighbor_target_function + input_target_function));
+        let mis_weight = max(0.0, (neighbor_reservoir_confidence * neighbor_target_function) / ((input_reservoir_confidence * input_target_function) + (neighbor_reservoir_confidence * neighbor_target_function)));
 #endif
         let resampling_weight = mis_weight * (input_target_function * neighbor_reservoir.unbiased_contribution_weight);
 
         combined_reservoir.weight_sum += resampling_weight;
+        combined_reservoir.confidence_weight += neighbor_reservoir.confidence_weight;
 
         if rand_f(&rng) < resampling_weight / combined_reservoir.weight_sum {
             combined_reservoir.sample = neighbor_reservoir.sample;
@@ -189,14 +222,15 @@ fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
         combined_reservoir.unbiased_contribution_weight *= trace_light_visibility(combined_reservoir.sample, world_position);
     }
 
+    combined_reservoir.confidence_weight = min(combined_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
+    reservoirs[pixel_index] = combined_reservoir;
+
     var pixel_color = input_reservoir_radiance * input_reservoir.unbiased_contribution_weight;
     pixel_color += combined_reservoir_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color *= 0.5;
     pixel_color *= view.exposure;
     pixel_color *= diffuse_brdf;
     pixel_color += emissive;
-
-    reservoirs[pixel_index] = combined_reservoir;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 

@@ -139,7 +139,6 @@ fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var combined_reservoir = empty_reservoir();
 
-
     let input_reservoir = reservoirs[pixel_index];
     let input_reservoir_radiance = select(
         vec3(0.0),

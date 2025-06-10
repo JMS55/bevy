@@ -4,7 +4,7 @@
 #import bevy_pbr::utils::{rand_f, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
-#import bevy_solari::reservoir::{Reservoir, empty_reservoir, empty_reservoir_context, reservoir_add_sample, reservoir_calculate_unbiased_contribution_weight_with_visibility, reservoir_valid}
+#import bevy_solari::reservoir::{Reservoir, empty_reservoir, reservoir_valid}
 #import bevy_solari::sampling::{generate_random_light_sample, calculate_light_contribution, trace_light_visibility, sample_disk}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, write>;
@@ -38,18 +38,32 @@ fn initial_samples(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let world_position = reconstruct_world_position(global_id.xy, depth);
     let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
 
-    var context = empty_reservoir_context();
-    context.reservoir.confidence_weight = 1.0;
+    var reservoir = empty_reservoir();
+    var reservoir_target_function = 0.0;
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
         let light_sample = generate_random_light_sample(&rng);
-        let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
 
-        reservoir_add_sample(&context, light_sample, mis_weight, world_position, world_normal, &rng);
+        let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
+        let light_contribution = calculate_light_contribution(light_sample, world_position, world_normal);
+        let target_function = luminance(light_contribution.radiance);
+        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+
+        reservoir.weight_sum += resampling_weight;
+
+        if rand_f(&rng) < resampling_weight / reservoir.weight_sum {
+            reservoir.sample = light_sample;
+            reservoir_target_function = target_function;
+        }
     }
 
-    reservoir_calculate_unbiased_contribution_weight_with_visibility(&context, world_position);
+    if reservoir_valid(reservoir) {
+        let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
+        reservoir.unbiased_contribution_weight = reservoir.weight_sum * inverse_target_function;
+        reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
+    }
 
-    reservoirs[pixel_index] = context.reservoir;
+    reservoir.confidence_weight = 1.0;
+    reservoirs[pixel_index] = reservoir;
 }
 
 @compute @workgroup_size(8, 8, 1)

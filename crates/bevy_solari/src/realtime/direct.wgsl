@@ -1,5 +1,6 @@
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
+#import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
 #import bevy_pbr::utils::{rand_f, octahedral_decode}
 #import bevy_render::maths::PI
@@ -13,8 +14,11 @@
 @group(1) @binding(3) var gbuffer: texture_2d<u32>;
 @group(1) @binding(4) var depth_buffer: texture_depth_2d;
 @group(1) @binding(5) var motion_vectors: texture_2d<f32>;
-@group(1) @binding(6) var<uniform> view: View;
-@group(1) @binding(7) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
+@group(1) @binding(6) var previous_gbuffer: texture_2d<u32>;
+@group(1) @binding(7) var previous_depth_buffer: texture_depth_2d;
+@group(1) @binding(8) var<uniform> view: View;
+@group(0) @binding(9) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(10) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 

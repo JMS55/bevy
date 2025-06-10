@@ -123,8 +123,8 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// struct Explode;
 ///
 /// world.add_observer(|trigger: Trigger<Explode>, mut commands: Commands| {
-///     println!("Entity {} goes BOOM!", trigger.target());
-///     commands.entity(trigger.target()).despawn();
+///     println!("Entity {} goes BOOM!", trigger.target().unwrap());
+///     commands.entity(trigger.target().unwrap()).despawn();
 /// });
 ///
 /// world.flush();
@@ -157,7 +157,7 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # struct Explode;
 /// world.entity_mut(e1).observe(|trigger: Trigger<Explode>, mut commands: Commands| {
 ///     println!("Boom!");
-///     commands.entity(trigger.target()).despawn();
+///     commands.entity(trigger.target().unwrap()).despawn();
 /// });
 ///
 /// world.entity_mut(e2).observe(|trigger: Trigger<Explode>, mut commands: Commands| {
@@ -366,13 +366,16 @@ fn observer_system_runner<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
     };
 
     // SAFETY:
-    // - `update_archetype_component_access` is called first
     // - there are no outstanding references to world except a private component
     // - system is an `ObserverSystem` so won't mutate world beyond the access of a `DeferredWorld`
     //   and is never exclusive
     // - system is the same type erased system from above
     unsafe {
-        (*system).update_archetype_component_access(world);
+        // Always refresh hotpatch pointers
+        // There's no guarantee that the `HotPatched` event would still be there once the observer is triggered.
+        #[cfg(feature = "hotpatching")]
+        (*system).refresh_hotpatch();
+
         match (*system).validate_param_unsafe(world) {
             Ok(()) => {
                 if let Err(err) = (*system).run_unsafe(trigger, world) {

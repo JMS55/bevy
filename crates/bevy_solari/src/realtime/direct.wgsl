@@ -84,14 +84,13 @@ fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
 
     let motion_vector = textureLoad(motion_vectors, global_id.xy, 0).xy;
-    let previous_pixel_id = vec2<u32>(round(vec2<f32>(global_id.xy) - (motion_vector * view.viewport.zw)));
+    let previous_pixel_id_float = round(vec2<f32>(global_id.xy) - (motion_vector * view.viewport.zw));
+    if any(previous_pixel_id_float < vec2(0.0)) || any(previous_pixel_id_float >= view.viewport.zw) { return; }
+    let previous_pixel_id = vec2<u32>(previous_pixel_id_float);
     let previous_pixel_index = previous_pixel_id.x + previous_pixel_id.y * u32(view.viewport.z);
-    let previous_depth = textureLoad(previous_depth_buffer, previous_pixel_id, 0);
     let previous_gpixel = textureLoad(previous_gbuffer, previous_pixel_id, 0);
-    let previous_world_position = reconstruct_previous_world_position(previous_pixel_id, previous_depth);
     let previous_world_normal = octahedral_decode(unpack_24bit_normal(previous_gpixel.a));
-    // TODO: Validate previous_pixel_id is in view range before casting
-    if is_previous_invalid(depth, previous_depth, world_normal, previous_world_normal) { return; }
+    if is_previous_invalid(world_normal, previous_world_normal) { return; }
 
     let previous_reservoir = previous_reservoirs[previous_pixel_index];
     let previous_reservoir_confidence = previous_reservoir.confidence_weight * f32(INITIAL_SAMPLES);
@@ -278,13 +277,9 @@ fn is_neighbor_invalid(depth: f32, neighbor_depth: f32, normal: vec3<f32>, neigh
         dot(normal, neighbor_normal) < 0.906;
 }
 
-fn is_previous_invalid(depth: f32, previous_depth: f32, normal: vec3<f32>, previous_normal: vec3<f32>) -> bool {
-    let linear_depth = -previous_depth_ndc_to_view_z(depth);
-    let linear_previous_depth = -previous_depth_ndc_to_view_z(previous_depth);
-
-    // Reject if depth difference more than 10% or angle between normals more than 25 degrees
-    return linear_previous_depth > 1.1 * linear_depth || linear_previous_depth < 0.9 * linear_depth ||
-        dot(normal, previous_normal) < 0.906;
+fn is_previous_invalid(normal: vec3<f32>, previous_normal: vec3<f32>) -> bool {
+    // Reject if angle between normals more than 25 degrees
+    return dot(normal, previous_normal) < 0.906;
 }
 
 fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
@@ -294,17 +289,6 @@ fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
     return -(view.clip_from_view[3][2] - ndc_depth) / view.clip_from_view[2][2];
 #else
     let view_pos = view.view_from_clip * vec4(0.0, 0.0, ndc_depth, 1.0);
-    return view_pos.z / view_pos.w;
-#endif
-}
-
-fn previous_depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
-#ifdef VIEW_PROJECTION_PERSPECTIVE
-    return -previous_view.clip_from_view[3][2]() / ndc_depth;
-#else ifdef VIEW_PROJECTION_ORTHOGRAPHIC
-    return -(previous_view.clip_from_view[3][2] - ndc_depth) / previous_view.clip_from_view[2][2];
-#else
-    let view_pos = previous_view.view_from_clip * vec4(0.0, 0.0, ndc_depth, 1.0);
     return view_pos.z / view_pos.w;
 #endif
 }

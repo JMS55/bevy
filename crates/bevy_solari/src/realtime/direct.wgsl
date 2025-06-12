@@ -89,6 +89,11 @@ fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let previous_pixel_id = vec2<u32>(previous_pixel_id_float);
     let previous_pixel_index = previous_pixel_id.x + previous_pixel_id.y * u32(view.viewport.z);
     let previous_gpixel = textureLoad(previous_gbuffer, previous_pixel_id, 0);
+#ifndef BIASED
+    let previous_depth = textureLoad(depth_buffer, previous_pixel_id, 0);
+    let previous_world_position = reconstruct_world_position(previous_pixel_id, previous_depth);
+#endif
+
     let previous_world_normal = octahedral_decode(unpack_24bit_normal(previous_gpixel.a));
     if is_previous_invalid(world_normal, previous_world_normal) { return; }
 
@@ -105,10 +110,11 @@ fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     {
         let input_target_function = reservoir_target_function(input_reservoir, world_position, world_normal);
-#ifndef BIASED
+#ifdef BIASED
         let mis_weight = input_reservoir_confidence / (input_reservoir_confidence + previous_reservoir_confidence);
 #else
-        // TODO
+        let previous_target_function = reservoir_target_function(input_reservoir, previous_world_position, previous_world_normal);
+        let mis_weight = max(0.0, (input_reservoir_confidence * input_target_function) / ((input_reservoir_confidence * input_target_function) + (previous_reservoir_confidence * previous_target_function)));
 #endif
         let resampling_weight = mis_weight * (input_target_function * input_reservoir.unbiased_contribution_weight);
 
@@ -122,10 +128,11 @@ fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     {
         let input_target_function = reservoir_target_function(previous_reservoir, world_position, world_normal);
-#ifndef BIASED
+#ifdef BIASED
         let mis_weight = previous_reservoir_confidence / (input_reservoir_confidence + previous_reservoir_confidence);
 #else
-        // TODO
+        let previous_target_function = reservoir_target_function(previous_reservoir, previous_world_position, previous_world_normal);
+        let mis_weight = max(0.0, (previous_reservoir_confidence * previous_target_function) / ((input_reservoir_confidence * input_target_function) + (previous_reservoir_confidence * previous_target_function)));
 #endif
         let resampling_weight = mis_weight * (input_target_function * previous_reservoir.unbiased_contribution_weight);
 

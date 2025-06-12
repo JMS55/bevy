@@ -90,8 +90,8 @@ fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let previous_pixel_index = previous_pixel_id.x + previous_pixel_id.y * u32(view.viewport.z);
     let previous_gpixel = textureLoad(previous_gbuffer, previous_pixel_id, 0);
 #ifndef BIASED
-    let previous_depth = textureLoad(depth_buffer, previous_pixel_id, 0);
-    let previous_world_position = reconstruct_world_position(previous_pixel_id, previous_depth);
+    let previous_depth = textureLoad(previous_depth_buffer, previous_pixel_id, 0);
+    let previous_world_position = reconstruct_previous_world_position(previous_pixel_id, previous_depth);
 #endif
 
     let previous_world_normal = octahedral_decode(unpack_24bit_normal(previous_gpixel.a));

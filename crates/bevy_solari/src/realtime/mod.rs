@@ -4,12 +4,16 @@ mod prepare;
 
 use crate::SolariPlugin;
 use bevy_app::{App, Plugin};
-use bevy_asset::embedded_asset;
+use bevy_asset::{embedded_asset, Assets, Handle, RenderAssetUsages};
 use bevy_core_pipeline::{
     core_3d::graph::{Core3d, Node3d},
     prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass},
 };
-use bevy_ecs::{component::Component, reflect::ReflectComponent, schedule::IntoScheduleConfigs};
+use bevy_ecs::{
+    component::Component, reflect::ReflectComponent, resource::Resource,
+    schedule::IntoScheduleConfigs,
+};
+use bevy_image::{CompressedImageFormats, Image, ImageFormat, ImageSampler, ImageType};
 use bevy_pbr::DefaultOpaqueRendererMethod;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
@@ -37,7 +41,6 @@ impl Plugin for SolariLightingPlugin {
 
     fn finish(&self, app: &mut App) {
         let render_app = app.sub_app_mut(RenderApp);
-
         let render_device = render_app.world().resource::<RenderDevice>();
         let features = render_device.features();
         if !features.contains(SolariPlugin::required_wgpu_features()) {
@@ -47,7 +50,21 @@ impl Plugin for SolariLightingPlugin {
             );
             return;
         }
-        render_app
+
+        let noise_texture = app.world_mut().resource_mut::<Assets<Image>>().add(
+            Image::from_buffer(
+                include_bytes!("vector2_uniform_box3x3_exp0101_product.ktx2"),
+                ImageType::Format(ImageFormat::Ktx2),
+                CompressedImageFormats::NONE,
+                false,
+                ImageSampler::default(),
+                RenderAssetUsages::RENDER_WORLD,
+            )
+            .unwrap(),
+        );
+
+        app.sub_app_mut(RenderApp)
+            .insert_resource(NoiseTexture(noise_texture))
             .add_systems(ExtractSchedule, extract_solari_lighting)
             .add_systems(
                 Render,
@@ -78,3 +95,6 @@ impl Default for SolariLighting {
         }
     }
 }
+
+#[derive(Resource)]
+pub(crate) struct NoiseTexture(pub Handle<Image>);

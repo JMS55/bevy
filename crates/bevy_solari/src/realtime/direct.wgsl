@@ -2,7 +2,7 @@
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
-#import bevy_pbr::utils::{rand_f, octahedral_decode}
+#import bevy_pbr::utils::{rand_f, rand_vec2f,octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::reservoir::{Reservoir, empty_reservoir, reservoir_valid}
@@ -18,7 +18,8 @@
 @group(1) @binding(7) var previous_depth_buffer: texture_depth_2d;
 @group(1) @binding(8) var<uniform> view: View;
 @group(1) @binding(9) var<uniform> previous_view: PreviousViewUniforms;
-@group(1) @binding(10) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
+@group(1) @binding(10) var noise_texture: texture_2d_array<f32>;
+@group(1) @binding(11) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -31,7 +32,7 @@ fn initial_samples(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
-    var rng = pixel_index + constants.frame_index;
+    var rng = pixel_index + (constants.frame_index * 5782582u);
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
@@ -45,7 +46,8 @@ fn initial_samples(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var reservoir = empty_reservoir();
     var reservoir_target_function = 0.0;
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
-        let light_sample = generate_random_light_sample(&rng);
+        var light_sample = generate_random_light_sample(&rng, rand_vec2f(&rng));
+        // light_sample = generate_random_light_sample(&rng, random_from_noise(global_id.xy, i));
 
         let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
         let light_contribution = calculate_light_contribution(light_sample, world_position, world_normal);
@@ -75,7 +77,7 @@ fn temporal_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
-    var rng = pixel_index + constants.frame_index;
+    var rng = pixel_index + (constants.frame_index * 5782582u);
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 { return; }
@@ -152,7 +154,7 @@ fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
-    var rng = pixel_index + constants.frame_index;
+    var rng = pixel_index + (constants.frame_index * 5782582u);
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
@@ -187,7 +189,7 @@ fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var combined_reservoir = empty_reservoir();
 
     let input_target_function = luminance(input_reservoir_radiance);
-#ifdef BIASED
+#ifndef BIASED
     let mis_weight = input_reservoir_confidence / (input_reservoir_confidence + neighbor_reservoir_confidence);
 #else
     let neighbor_target_function = select(0.0, reservoir_target_function(input_reservoir, neighbor_world_position, neighbor_world_normal), neighbor_valid);
@@ -204,7 +206,7 @@ fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     if neighbor_valid {
         let input_target_function = reservoir_target_function(neighbor_reservoir, world_position, world_normal);
-#ifdef BIASED
+#ifndef BIASED
         let mis_weight = neighbor_reservoir_confidence / (input_reservoir_confidence + neighbor_reservoir_confidence);
 #else
         let neighbor_target_function = reservoir_target_function(neighbor_reservoir, neighbor_world_position, neighbor_world_normal);
@@ -239,6 +241,12 @@ fn spatial_reuse(@builtin(global_invocation_id) global_id: vec3<u32>) {
     pixel_color *= diffuse_brdf;
     pixel_color += emissive;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+    // textureStore(view_output, global_id.xy, vec4(combined_reservoir.sample.random, 0.0, 1.0));
+
+    // let old_color = textureLoad(accumulation_texture, global_id.xy);
+    // let new_color = mix(old_color.rgb, pixel_color, 1.0 / (old_color.a + 1.0));
+    // textureStore(accumulation_texture, global_id.xy, vec4(new_color, old_color.a + 1.0));
+    // textureStore(view_output, global_id.xy, vec4(new_color, 1.0));
 }
 
 fn reservoir_target_function(reservoir: Reservoir, world_position: vec3<f32>, world_normal: vec3<f32>) -> f32 {
@@ -280,6 +288,12 @@ fn is_neighbor_invalid(depth: f32, neighbor_depth: f32, normal: vec3<f32>, neigh
 fn is_previous_invalid(normal: vec3<f32>, previous_normal: vec3<f32>) -> bool {
     // Reject if angle between normals more than 25 degrees
     return dot(normal, previous_normal) < 0.906;
+}
+
+// https://github.com/electronicarts/fastnoise/blob/main/FastNoiseDesign.md#a-more-samples-per-frame
+fn random_from_noise(pixel_id: vec2<u32>, index: u32) -> vec2<f32> {
+    let r2 = vec2<u32>(128.0 * fract(0.5 + f32(index) * vec2<f32>(0.75487766624669276005, 0.5698402909980532659114)));
+    return textureLoad(noise_texture, (pixel_id + r2) % 128u, constants.frame_index % 32u, 0).rg;
 }
 
 fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {

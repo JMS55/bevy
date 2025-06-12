@@ -38,7 +38,7 @@ fn sample_disk(disk_radius: f32, rng: ptr<function, u32>) -> vec2<f32> {
 }
 
 fn sample_random_light(ray_origin: vec3<f32>, origin_world_normal: vec3<f32>, rng: ptr<function, u32>) -> vec3<f32> {
-    let light_sample = generate_random_light_sample(rng);
+    let light_sample = generate_random_light_sample(rng, rand_vec2f(rng));
     let light_contribution = calculate_light_contribution(light_sample, ray_origin, origin_world_normal);
     let visibility = trace_light_visibility(light_sample, ray_origin);
     return light_contribution.radiance * visibility * light_contribution.inverse_pdf;
@@ -54,10 +54,9 @@ struct LightContribution {
     inverse_pdf: f32,
 }
 
-fn generate_random_light_sample(rng: ptr<function, u32>) -> LightSample {
+fn generate_random_light_sample(rng: ptr<function, u32>, random: vec2<f32>) -> LightSample {
     let light_count = arrayLength(&light_sources);
     let light_id = rand_range_u(light_count, rng);
-    let random = rand_vec2f(rng);
 
     let light_source = light_sources[light_id];
     var triangle_id = 0u;

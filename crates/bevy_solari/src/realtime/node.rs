@@ -1,5 +1,5 @@
 use super::{prepare::SolariLightingResources, SolariLighting};
-use crate::scene::RaytracingSceneBindings;
+use crate::{realtime::NoiseTexture, scene::RaytracingSceneBindings};
 use bevy_asset::load_embedded_asset;
 use bevy_core_pipeline::prepass::{
     PreviousViewData, PreviousViewUniformOffset, PreviousViewUniforms, ViewPrepassTextures,
@@ -11,17 +11,19 @@ use bevy_ecs::{
 };
 use bevy_render::{
     camera::ExtractedCamera,
+    render_asset::RenderAssets,
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_resource::{
         binding_types::{
-            storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_depth_2d,
-            texture_storage_2d, uniform_buffer,
+            storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_2d_array,
+            texture_depth_2d, texture_storage_2d, uniform_buffer,
         },
         BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, CachedComputePipelineId,
         ComputePassDescriptor, ComputePipelineDescriptor, Extent3d, PipelineCache,
         PushConstantRange, ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice},
+    texture::GpuImage,
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 
@@ -69,6 +71,8 @@ impl ViewNode for SolariLightingNode {
         let scene_bindings = world.resource::<RaytracingSceneBindings>();
         let view_uniforms = world.resource::<ViewUniforms>();
         let previous_view_uniforms = world.resource::<PreviousViewUniforms>();
+        let gpu_textures = world.resource::<RenderAssets<GpuImage>>();
+        let noise_texture = world.resource::<NoiseTexture>();
         let frame_count = world.resource::<FrameCount>();
         let (
             Some(initial_samples_pipeline),
@@ -81,6 +85,7 @@ impl ViewNode for SolariLightingNode {
             Some(motion_vectors),
             Some(view_uniforms),
             Some(previous_view_uniforms),
+            Some(noise_texture),
         ) = (
             pipeline_cache.get_compute_pipeline(self.initial_samples_pipeline),
             pipeline_cache.get_compute_pipeline(self.temporal_reuse_pipeline),
@@ -92,6 +97,7 @@ impl ViewNode for SolariLightingNode {
             view_prepass_textures.motion_vectors_view(),
             view_uniforms.uniforms.binding(),
             previous_view_uniforms.uniforms.binding(),
+            gpu_textures.get(noise_texture.0.id()),
         )
         else {
             return Ok(());
@@ -123,11 +129,11 @@ impl ViewNode for SolariLightingNode {
                 &solari_lighting_resources.previous_depth.1,
                 view_uniforms,
                 previous_view_uniforms,
+                &noise_texture.texture_view,
                 &solari_lighting_resources.accumulation_texture,
             )),
         );
 
-        let frame_index = frame_count.0.wrapping_mul(5782582);
         let command_encoder = render_context.command_encoder();
 
         let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -147,7 +153,7 @@ impl ViewNode for SolariLightingNode {
         pass.set_pipeline(initial_samples_pipeline);
         pass.set_push_constants(
             0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            bytemuck::cast_slice(&[frame_count.0, solari_lighting.reset as u32]),
         );
         pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
 
@@ -218,6 +224,7 @@ impl FromWorld for SolariLightingNode {
                     texture_depth_2d(),
                     uniform_buffer::<ViewUniform>(true),
                     uniform_buffer::<PreviousViewData>(true),
+                    texture_2d_array(TextureSampleType::Float { filterable: true }),
                     texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                 ),
             ),

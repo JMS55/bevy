@@ -34,9 +34,7 @@ pub mod graph {
 
 pub struct SolariLightingNode {
     bind_group_layout: BindGroupLayout,
-    initial_samples_pipeline: CachedComputePipelineId,
-    temporal_reuse_pipeline: CachedComputePipelineId,
-    spatial_reuse_pipeline: CachedComputePipelineId,
+    pipeline: CachedComputePipelineId,
 }
 
 impl ViewNode for SolariLightingNode {
@@ -71,9 +69,7 @@ impl ViewNode for SolariLightingNode {
         let previous_view_uniforms = world.resource::<PreviousViewUniforms>();
         let frame_count = world.resource::<FrameCount>();
         let (
-            Some(initial_samples_pipeline),
-            Some(temporal_reuse_pipeline),
-            Some(spatial_reuse_pipeline),
+            Some(pipeline),
             Some(scene_bindings),
             Some(viewport),
             Some(gbuffer),
@@ -82,9 +78,7 @@ impl ViewNode for SolariLightingNode {
             Some(view_uniforms),
             Some(previous_view_uniforms),
         ) = (
-            pipeline_cache.get_compute_pipeline(self.initial_samples_pipeline),
-            pipeline_cache.get_compute_pipeline(self.temporal_reuse_pipeline),
-            pipeline_cache.get_compute_pipeline(self.spatial_reuse_pipeline),
+            pipeline_cache.get_compute_pipeline(self.pipeline),
             &scene_bindings.bind_group,
             camera.physical_viewport_size,
             view_prepass_textures.deferred_view(),
@@ -130,33 +124,27 @@ impl ViewNode for SolariLightingNode {
         let frame_index = frame_count.0.wrapping_mul(5782582);
         let command_encoder = render_context.command_encoder();
 
-        let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("solari_lighting"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, scene_bindings, &[]);
-        pass.set_bind_group(
-            1,
-            &bind_group,
-            &[
-                view_uniform_offset.offset,
-                previous_view_uniform_offset.offset,
-            ],
-        );
-
-        pass.set_pipeline(initial_samples_pipeline);
-        pass.set_push_constants(
-            0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-        );
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
-
-        pass.set_pipeline(temporal_reuse_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
-
-        pass.set_pipeline(spatial_reuse_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
-        drop(pass);
+        {
+            let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("solari_lighting"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, scene_bindings, &[]);
+            pass.set_bind_group(
+                1,
+                &bind_group,
+                &[
+                    view_uniform_offset.offset,
+                    previous_view_uniform_offset.offset,
+                ],
+            );
+            pass.set_push_constants(
+                0,
+                bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            );
+            pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
+        }
 
         // TODO: Remove these copies, and double buffer instead
         command_encoder.copy_texture_to_texture(
@@ -223,62 +211,25 @@ impl FromWorld for SolariLightingNode {
             ),
         );
 
-        let initial_samples_pipeline =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("solari_lighting_initial_samples_pipeline".into()),
-                layout: vec![
-                    scene_bindings.bind_group_layout.clone(),
-                    bind_group_layout.clone(),
-                ],
-                push_constant_ranges: vec![PushConstantRange {
-                    stages: ShaderStages::COMPUTE,
-                    range: 0..8,
-                }],
-                shader: load_embedded_asset!(world, "direct.wgsl"),
-                shader_defs: vec![],
-                entry_point: "initial_samples".into(),
-                zero_initialize_workgroup_memory: false,
-            });
-
-        let temporal_reuse_pipeline =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("solari_lighting_temporal_reuse_pipeline".into()),
-                layout: vec![
-                    scene_bindings.bind_group_layout.clone(),
-                    bind_group_layout.clone(),
-                ],
-                push_constant_ranges: vec![PushConstantRange {
-                    stages: ShaderStages::COMPUTE,
-                    range: 0..8,
-                }],
-                shader: load_embedded_asset!(world, "direct.wgsl"),
-                shader_defs: vec![],
-                entry_point: "temporal_reuse".into(),
-                zero_initialize_workgroup_memory: false,
-            });
-
-        let spatial_reuse_pipeline =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("solari_lighting_spatial_reuse_pipeline".into()),
-                layout: vec![
-                    scene_bindings.bind_group_layout.clone(),
-                    bind_group_layout.clone(),
-                ],
-                push_constant_ranges: vec![PushConstantRange {
-                    stages: ShaderStages::COMPUTE,
-                    range: 0..8,
-                }],
-                shader: load_embedded_asset!(world, "direct.wgsl"),
-                shader_defs: vec![],
-                entry_point: "spatial_reuse".into(),
-                zero_initialize_workgroup_memory: false,
-            });
+        let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("solari_lighting_restir_di_pipeline".into()),
+            layout: vec![
+                scene_bindings.bind_group_layout.clone(),
+                bind_group_layout.clone(),
+            ],
+            push_constant_ranges: vec![PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..8,
+            }],
+            shader: load_embedded_asset!(world, "restir_di.wgsl"),
+            shader_defs: vec![],
+            entry_point: "restir_di".into(),
+            zero_initialize_workgroup_memory: false,
+        });
 
         Self {
             bind_group_layout,
-            initial_samples_pipeline,
-            temporal_reuse_pipeline,
-            spatial_reuse_pipeline,
+            pipeline,
         }
     }
 }

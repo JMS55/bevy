@@ -72,17 +72,13 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let emissive = rgb9e5_to_vec3_(gpixel.g);
 
     let input_reservoir = reservoirs_b[pixel_index];
-    let spatial_reservoir = load_spatial_reservoir(global_id.xy, depth, world_normal, &rng);
+    let spatial_reservoir = load_spatial_reservoir(global_id.xy, depth, world_position, world_normal, &rng);
     let merge_result = merge_reservoirs(input_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
-    var combined_reservoir = merge_result.merged_reservoir;
-
-    if reservoir_valid(combined_reservoir) {
-        combined_reservoir.unbiased_contribution_weight *= trace_light_visibility(combined_reservoir.sample, world_position);
-    }
+    let combined_reservoir = merge_result.merged_reservoir;
 
     reservoirs_a[pixel_index] = combined_reservoir;
 
-    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;
+    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * combined_reservoir.visibility;
     pixel_color *= view.exposure;
     pixel_color *= diffuse_brdf;
     pixel_color += emissive;
@@ -111,7 +107,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     if reservoir_valid(reservoir) {
         let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
         reservoir.unbiased_contribution_weight = reservoir.weight_sum * inverse_target_function;
-        reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
+
+        reservoir.visibility = trace_light_visibility(reservoir.sample, world_position);
+        reservoir.unbiased_contribution_weight *= reservoir.visibility;
     }
 
     reservoir.confidence_weight = f32(INITIAL_SAMPLES);
@@ -138,12 +136,12 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, world_normal: vec3<f32>) -> Rese
     // TODO: Translate temporal reservoir sample to current frame
 
     temporal_reservoir.confidence_weight = min(temporal_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
+
     return temporal_reservoir;
 }
 
-fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_normal: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
+fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
     let spatial_pixel_id = get_neighbor_pixel_id(pixel_id, rng);
-    let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.viewport.z);
 
     let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
     let spatial_gpixel = textureLoad(gbuffer, spatial_pixel_id, 0);
@@ -153,7 +151,14 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_normal: vec3<f3
         return empty_reservoir();
     }
 
-    return reservoirs_b[spatial_pixel_index];
+    let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.viewport.z);
+    var spatial_reservoir = reservoirs_b[spatial_pixel_index];
+
+    if reservoir_valid(spatial_reservoir) {
+        spatial_reservoir.visibility = trace_light_visibility(spatial_reservoir.sample, world_position);
+    }
+
+    return spatial_reservoir;
 }
 
 fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {

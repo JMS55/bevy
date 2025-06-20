@@ -13,7 +13,7 @@ struct Reservoir {
     weight_sum: f32,
     confidence_weight: f32,
     unbiased_contribution_weight: f32,
-    _padding: f32,
+    visibility: f32,
 }
 
 fn empty_reservoir() -> Reservoir {
@@ -57,6 +57,10 @@ fn merge_reservoirs(
     var combined_reservoir = empty_reservoir();
     combined_reservoir.weight_sum = canonical_resampling_weight + other_resampling_weight;
     combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
+
+    // https://yusuketokuyoshi.com/papers/2024/Efficient_Visibility_Reuse_for_Real-time_ReSTIR_(Supplementary_Document).pdf
+    combined_reservoir.visibility = max(0.0, (canonical_reservoir.visibility * canonical_resampling_weight
+        + other_reservoir.visibility * other_resampling_weight) / combined_reservoir.weight_sum);
 
     if rand_f(rng) < other_resampling_weight / combined_reservoir.weight_sum {
         combined_reservoir.sample = other_reservoir.sample;

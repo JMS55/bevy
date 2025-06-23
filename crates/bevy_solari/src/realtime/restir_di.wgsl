@@ -45,7 +45,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let diffuse_brdf = base_color / PI;
 
     let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, &rng);
-    let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_normal);
+    let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_position, world_normal);
     let combined_reservoir = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng);
 
     reservoirs_b[pixel_index] = combined_reservoir.merged_reservoir;
@@ -116,7 +116,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     return reservoir;
 }
 
-fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_normal: vec3<f32>) -> Reservoir {
+fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> Reservoir {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.viewport.zw));
     let temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
@@ -126,8 +126,9 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_normal: vec3<f
 
     let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
     let temporal_gpixel = textureLoad(previous_gbuffer, temporal_pixel_id, 0);
+    let temporal_world_position = reconstruct_previous_world_position(temporal_pixel_id, temporal_depth);
     let temporal_world_normal = octahedral_decode(unpack_24bit_normal(temporal_gpixel.a));
-    if is_pixel_dissimilar_temporal(depth, temporal_depth, world_normal, temporal_world_normal) {
+    if is_pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
         return empty_reservoir();
     }
 
@@ -146,8 +147,9 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
 
     let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
     let spatial_gpixel = textureLoad(gbuffer, spatial_pixel_id, 0);
+    let spatial_world_position = reconstruct_world_position(spatial_pixel_id, spatial_depth);
     let spatial_world_normal = octahedral_decode(unpack_24bit_normal(spatial_gpixel.a));
-    if is_pixel_dissimilar_spatial(depth, spatial_depth, world_normal, spatial_world_normal) {
+    if is_pixel_dissimilar(depth, world_position, spatial_world_position, world_normal, spatial_world_normal) {
         return empty_reservoir();
     }
 
@@ -161,6 +163,12 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
     return spatial_reservoir;
 }
 
+fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, rng: ptr<function, u32>) -> vec2<u32> {
+    var spatial_id = vec2<i32>(center_pixel_id) + vec2<i32>(sample_disk(SPATIAL_REUSE_RADIUS_PIXELS, rng));
+    spatial_id = clamp(spatial_id, vec2(0i), vec2<i32>(view.viewport.zw) - 1i);
+    return vec2<u32>(spatial_id);
+}
+
 fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
     let uv = (vec2<f32>(pixel_id) + 0.5) / view.viewport.zw;
     let xy_ndc = (uv - vec2(0.5)) * vec2(2.0, -2.0);
@@ -168,37 +176,20 @@ fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
     return world_pos.xyz / world_pos.w;
 }
 
-// fn reconstruct_previous_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
-//     let uv = (vec2<f32>(pixel_id) + 0.5) / view.viewport.zw;
-//     let xy_ndc = (uv - vec2(0.5)) * vec2(2.0, -2.0);
-//     let world_pos = previous_view.world_from_clip * vec4(xy_ndc, depth, 1.0);
-//     return world_pos.xyz / world_pos.w;
-// }
-
-fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, rng: ptr<function, u32>) -> vec2<u32> {
-    var spatial_id = vec2<i32>(center_pixel_id) + vec2<i32>(sample_disk(SPATIAL_REUSE_RADIUS_PIXELS, rng));
-    spatial_id = clamp(spatial_id, vec2(0i), vec2<i32>(view.viewport.zw) - 1i);
-    return vec2<u32>(spatial_id);
+fn reconstruct_previous_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
+    let uv = (vec2<f32>(pixel_id) + 0.5) / view.viewport.zw;
+    let xy_ndc = (uv - vec2(0.5)) * vec2(2.0, -2.0);
+    let world_pos = previous_view.world_from_clip * vec4(xy_ndc, depth, 1.0);
+    return world_pos.xyz / world_pos.w;
 }
 
-fn is_pixel_dissimilar_temporal(depth: f32, other_depth: f32, normal: vec3<f32>, other_normal: vec3<f32>) -> bool {
-    let linear_depth = -depth_ndc_to_view_z(depth);
-    let linear_other_depth = -previous_depth_ndc_to_view_z(other_depth);
+// Reject if tangent plane difference difference more than 0.3% or angle between normals more than 25 degrees
+fn is_pixel_dissimilar(depth: f32, world_position: vec3<f32>, other_world_position: vec3<f32>, normal: vec3<f32>, other_normal: vec3<f32>) -> bool {
+    // https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s22699-fast-denoising-with-self-stabilizing-recurrent-blurs.pdf#page=45
+    let tangent_plane_distance = abs(dot(normal, other_world_position - world_position));
+    let view_z = -depth_ndc_to_view_z(depth);
 
-    // Reject if depth difference more than 10% or angle between normals more than 25 degrees
-    return linear_other_depth > 1.1 * linear_depth || linear_other_depth < 0.9 * linear_depth ||
-        dot(normal, other_normal) < 0.906;
-}
-
-// TODO: Plane distance instead of depth
-// https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s22699-fast-denoising-with-self-stabilizing-recurrent-blurs.pdf#page=45
-fn is_pixel_dissimilar_spatial(depth: f32, other_depth: f32, normal: vec3<f32>, other_normal: vec3<f32>) -> bool {
-    let linear_depth = -depth_ndc_to_view_z(depth);
-    let linear_other_depth = -depth_ndc_to_view_z(other_depth);
-
-    // Reject if depth difference more than 10% or angle between normals more than 25 degrees
-    return linear_other_depth > 1.1 * linear_depth || linear_other_depth < 0.9 * linear_depth ||
-        dot(normal, other_normal) < 0.906;
+    return tangent_plane_distance / view_z > 0.003 || dot(normal, other_normal) < 0.906;
 }
 
 fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
@@ -208,17 +199,6 @@ fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
     return -(view.clip_from_view[3][2] - ndc_depth) / view.clip_from_view[2][2];
 #else
     let view_pos = view.view_from_clip * vec4(0.0, 0.0, ndc_depth, 1.0);
-    return view_pos.z / view_pos.w;
-#endif
-}
-
-fn previous_depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
-#ifdef VIEW_PROJECTION_PERSPECTIVE
-    return -previous_view.clip_from_view[3][2]() / ndc_depth;
-#else ifdef VIEW_PROJECTION_ORTHOGRAPHIC
-    return -(previous_view.clip_from_view[3][2] - ndc_depth) / previous_view.clip_from_view[2][2];
-#else
-    let view_pos = previous_view.view_from_clip * vec4(0.0, 0.0, ndc_depth, 1.0);
     return view_pos.z / view_pos.w;
 #endif
 }

@@ -19,8 +19,8 @@ use bevy_render::{
 use bevy_transform::components::GlobalTransform;
 use core::{f32::consts::TAU, hash::Hash, num::NonZeroU32, ops::Deref};
 
-const MAX_MESH_SLAB_COUNT: NonZeroU32 = NonZeroU32::new(1).unwrap();
-const MAX_TEXTURE_COUNT: NonZeroU32 = NonZeroU32::new(1).unwrap();
+const MAX_MESH_SLAB_COUNT: NonZeroU32 = NonZeroU32::new(500).unwrap();
+const MAX_TEXTURE_COUNT: NonZeroU32 = NonZeroU32::new(5_000).unwrap();
 
 /// Average angular diameter of the sun as seen from earth.
 /// <https://en.wikipedia.org/wiki/Angular_diameter#Use_in_astronomy>
@@ -143,7 +143,7 @@ pub fn prepare_raytracing_scene_bindings(
             continue;
         };
 
-        let transform = transform.compute_matrix();
+        let transform = transform.to_matrix();
         *tlas.get_mut_single(instance_id).unwrap() = Some(TlasInstance::new(
             blas,
             tlas_transform(&transform),

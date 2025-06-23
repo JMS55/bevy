@@ -26,6 +26,7 @@ use blas::{prepare_raytracing_blas, BlasManager};
 use extract::{extract_raytracing_scene, StandardMaterialAssets};
 use tracing::warn;
 
+/// Creates acceleration structures and binding arrays of resources for raytracing.
 pub struct RaytracingScenePlugin;
 
 impl Plugin for RaytracingScenePlugin {

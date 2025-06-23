@@ -128,7 +128,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     let temporal_gpixel = textureLoad(previous_gbuffer, temporal_pixel_id, 0);
     let temporal_world_position = reconstruct_previous_world_position(temporal_pixel_id, temporal_depth);
     let temporal_world_normal = octahedral_decode(unpack_24bit_normal(temporal_gpixel.a));
-    if is_pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+    if pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
         return empty_reservoir();
     }
 
@@ -149,7 +149,7 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
     let spatial_gpixel = textureLoad(gbuffer, spatial_pixel_id, 0);
     let spatial_world_position = reconstruct_world_position(spatial_pixel_id, spatial_depth);
     let spatial_world_normal = octahedral_decode(unpack_24bit_normal(spatial_gpixel.a));
-    if is_pixel_dissimilar(depth, world_position, spatial_world_position, world_normal, spatial_world_normal) {
+    if pixel_dissimilar(depth, world_position, spatial_world_position, world_normal, spatial_world_normal) {
         return empty_reservoir();
     }
 
@@ -184,7 +184,7 @@ fn reconstruct_previous_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<
 }
 
 // Reject if tangent plane difference difference more than 0.3% or angle between normals more than 25 degrees
-fn is_pixel_dissimilar(depth: f32, world_position: vec3<f32>, other_world_position: vec3<f32>, normal: vec3<f32>, other_normal: vec3<f32>) -> bool {
+fn pixel_dissimilar(depth: f32, world_position: vec3<f32>, other_world_position: vec3<f32>, normal: vec3<f32>, other_normal: vec3<f32>) -> bool {
     // https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s22699-fast-denoising-with-self-stabilizing-recurrent-blurs.pdf#page=45
     let tangent_plane_distance = abs(dot(normal, other_world_position - world_position));
     let view_z = -depth_ndc_to_view_z(depth);

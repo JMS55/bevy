@@ -192,12 +192,6 @@ fn is_pixel_dissimilar(depth: f32, other_depth: f32, normal: vec3<f32>, other_no
         dot(normal, other_normal) < 0.906;
 }
 
-// TODO: Also compare depth
-fn is_temporal_invalid(normal: vec3<f32>, previous_normal: vec3<f32>) -> bool {
-    // Reject if angle between normals more than 25 degrees
-    return dot(normal, previous_normal) < 0.906;
-}
-
 fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
 #ifdef VIEW_PROJECTION_PERSPECTIVE
     return -view.clip_from_view[3][2]() / ndc_depth;

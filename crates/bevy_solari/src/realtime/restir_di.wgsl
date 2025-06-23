@@ -45,7 +45,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let diffuse_brdf = base_color / PI;
 
     let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, &rng);
-    let temporal_reservoir = load_temporal_reservoir(global_id.xy, world_normal);
+    let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_normal);
     let combined_reservoir = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng);
 
     reservoirs_b[pixel_index] = combined_reservoir.merged_reservoir;
@@ -116,7 +116,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     return reservoir;
 }
 
-fn load_temporal_reservoir(pixel_id: vec2<u32>, world_normal: vec3<f32>) -> Reservoir {
+fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_normal: vec3<f32>) -> Reservoir {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.viewport.zw));
     let temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
@@ -124,9 +124,10 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, world_normal: vec3<f32>) -> Rese
         return empty_reservoir();
     }
 
+    let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
     let temporal_gpixel = textureLoad(previous_gbuffer, temporal_pixel_id, 0);
     let temporal_world_normal = octahedral_decode(unpack_24bit_normal(temporal_gpixel.a));
-    if is_temporal_invalid(world_normal, temporal_world_normal) {
+    if is_pixel_dissimilar(depth, temporal_depth, world_normal, temporal_world_normal) {
         return empty_reservoir();
     }
 
@@ -145,9 +146,8 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
 
     let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
     let spatial_gpixel = textureLoad(gbuffer, spatial_pixel_id, 0);
-    let spatial_world_position = reconstruct_world_position(spatial_pixel_id, spatial_depth);
     let spatial_world_normal = octahedral_decode(unpack_24bit_normal(spatial_gpixel.a));
-    if is_neighbor_invalid(depth, spatial_depth, world_normal, spatial_world_normal) {
+    if is_pixel_dissimilar(depth, spatial_depth, world_normal, spatial_world_normal) {
         return empty_reservoir();
     }
 
@@ -183,13 +183,13 @@ fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, rng: ptr<function, u32>) ->
 
 // TODO: Plane distance instead of depth
 // https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s22699-fast-denoising-with-self-stabilizing-recurrent-blurs.pdf#page=45
-fn is_neighbor_invalid(depth: f32, neighbor_depth: f32, normal: vec3<f32>, neighbor_normal: vec3<f32>) -> bool {
+fn is_pixel_dissimilar(depth: f32, other_depth: f32, normal: vec3<f32>, other_normal: vec3<f32>) -> bool {
     let linear_depth = -depth_ndc_to_view_z(depth);
-    let linear_neighbor_depth = -depth_ndc_to_view_z(neighbor_depth);
+    let linear_other_depth = -depth_ndc_to_view_z(other_depth);
 
     // Reject if depth difference more than 10% or angle between normals more than 25 degrees
-    return linear_neighbor_depth > 1.1 * linear_depth || linear_neighbor_depth < 0.9 * linear_depth ||
-        dot(normal, neighbor_normal) < 0.906;
+    return linear_other_depth > 1.1 * linear_depth || linear_other_depth < 0.9 * linear_depth ||
+        dot(normal, other_normal) < 0.906;
 }
 
 // TODO: Also compare depth

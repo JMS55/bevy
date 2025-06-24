@@ -7,6 +7,7 @@
 #import bevy_render::view::View
 #import bevy_solari::reservoir::{Reservoir, empty_reservoir, reservoir_valid, merge_reservoirs}
 #import bevy_solari::sampling::{generate_random_light_sample, calculate_light_contribution, trace_light_visibility, sample_disk}
+#import bevy_solari::scene_bindings::{previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(1) var<storage, read_write> reservoirs_a: array<Reservoir>;
@@ -135,7 +136,10 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.viewport.z);
     var temporal_reservoir = reservoirs_a[temporal_pixel_index];
 
-    // TODO: Translate temporal reservoir sample to current frame
+    temporal_reservoir.sample.light_id.x = previous_frame_light_id_translations[temporal_reservoir.sample.light_id.x];
+    if temporal_reservoir.sample.light_id.x == LIGHT_NOT_PRESENT_THIS_FRAME {
+        return empty_reservoir();
+    }
 
     temporal_reservoir.confidence_weight = min(temporal_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
 

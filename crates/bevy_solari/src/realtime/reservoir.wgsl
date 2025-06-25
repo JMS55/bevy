@@ -8,27 +8,48 @@
 
 const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 
-// Don't adjust the size of this struct without also adjusting RESERVOIR_STRUCT_SIZE.
+const SAMPLE_COUNT_CAP = 20.0;
+
 struct Reservoir {
     sample: LightSample,
-    weight_sum: f32,
-    confidence_weight: f32,
+    sample_count: f32,
     unbiased_contribution_weight: f32,
     visibility: f32,
 }
 
+// Don't adjust the size of this struct without also adjusting PACKED_RESERVOIR_STRUCT_SIZE.
+struct PackedReservoir {
+    sample: LightSample,
+    packed: u32,
+}
+
 fn empty_reservoir() -> Reservoir {
     return Reservoir(
-        LightSample(vec2(NULL_RESERVOIR_SAMPLE, 0u), vec2(0.0)),
-        0.0,
+        LightSample(NULL_RESERVOIR_SAMPLE, 0u),
         0.0,
         0.0,
         0.0
     );
 }
 
+fn pack_reservoir(reservoir: Reservoir) -> PackedReservoir {
+    let packed = (u32(reservoir.sample_count) << 24u) |
+        (u32(saturate(reservoir.visibility) * 255.0 + 0.5) << 16u) |
+        bitcast<u32>(quantizeToF16(reservoir.unbiased_contribution_weight));
+    return PackedReservoir(reservoir.sample, packed);
+}
+
+fn unpack_reservoir(packed_reservoir: PackedReservoir) -> Reservoir {
+    return Reservoir(
+        packed_reservoir.sample,
+        f32(packed_reservoir.packed >> 24u),
+        f32(packed_reservoir.packed & 0xFFFFu),
+        f32((packed_reservoir.packed >> 16u) & 0xFFu) / 255.0,
+    );
+}
+
 fn reservoir_valid(reservoir: Reservoir) -> bool {
-    return reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE;
+    return reservoir.sample.light_id != NULL_RESERVOIR_SAMPLE;
 }
 
 struct ReservoirMergeResult {
@@ -43,38 +64,41 @@ fn merge_reservoirs(
     world_normal: vec3<f32>,
     diffuse_brdf: vec3<f32>,
     rng: ptr<function, u32>,
+    sample_count_weight: f32,
 ) -> ReservoirMergeResult {
     // TODO: Balance heuristic MIS weights
-    let mis_weight_denominator = 1.0 / (canonical_reservoir.confidence_weight + other_reservoir.confidence_weight);
+    let canonical_confidence_weight = canonical_reservoir.sample_count * sample_count_weight;
+    let other_confidence_weight = other_reservoir.sample_count * sample_count_weight;
+    let mis_weight_denominator = 1.0 / (canonical_confidence_weight + other_confidence_weight);
 
-    let canonical_mis_weight = canonical_reservoir.confidence_weight * mis_weight_denominator;
+    let canonical_mis_weight = canonical_confidence_weight * mis_weight_denominator;
     let canonical_target_function = reservoir_target_function(canonical_reservoir, world_position, world_normal, diffuse_brdf);
     let canonical_resampling_weight = canonical_mis_weight * (canonical_target_function.a * canonical_reservoir.unbiased_contribution_weight);
 
-    let other_mis_weight = other_reservoir.confidence_weight * mis_weight_denominator;
+    let other_mis_weight = canonical_confidence_weight * mis_weight_denominator;
     let other_target_function = reservoir_target_function(other_reservoir, world_position, world_normal, diffuse_brdf);
     let other_resampling_weight = other_mis_weight * (other_target_function.a * other_reservoir.unbiased_contribution_weight);
 
     var combined_reservoir = empty_reservoir();
-    combined_reservoir.weight_sum = canonical_resampling_weight + other_resampling_weight;
-    combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
+    var combined_reservoir_weight_sum = canonical_resampling_weight + other_resampling_weight;
+    combined_reservoir.sample_count = min(canonical_reservoir.sample_count + other_reservoir.sample_count, SAMPLE_COUNT_CAP);
 
     // https://yusuketokuyoshi.com/papers/2024/Efficient_Visibility_Reuse_for_Real-time_ReSTIR_(Supplementary_Document).pdf
     combined_reservoir.visibility = max(0.0, (canonical_reservoir.visibility * canonical_resampling_weight
-        + other_reservoir.visibility * other_resampling_weight) / combined_reservoir.weight_sum);
+        + other_reservoir.visibility * other_resampling_weight) / combined_reservoir_weight_sum);
 
-    if rand_f(rng) < other_resampling_weight / combined_reservoir.weight_sum {
+    if rand_f(rng) < other_resampling_weight / combined_reservoir_weight_sum {
         combined_reservoir.sample = other_reservoir.sample;
 
         let inverse_target_function = select(0.0, 1.0 / other_target_function.a, other_target_function.a > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = combined_reservoir_weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, other_target_function.rgb);
     } else {
         combined_reservoir.sample = canonical_reservoir.sample;
 
         let inverse_target_function = select(0.0, 1.0 / canonical_target_function.a, canonical_target_function.a > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = combined_reservoir_weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, canonical_target_function.rgb);
     }

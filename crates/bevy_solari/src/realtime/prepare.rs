@@ -16,8 +16,8 @@ use bevy_render::{
     renderer::RenderDevice,
 };
 
-/// Size of a Reservoir shader struct in bytes.
-const RESERVOIR_STRUCT_SIZE: u64 = 32;
+/// Size of a PackedReservoir shader struct in bytes.
+const PACKED_RESERVOIR_STRUCT_SIZE: u64 = 12;
 
 /// Internal rendering resources used for Solari lighting.
 #[derive(Component)]
@@ -46,7 +46,7 @@ pub fn prepare_solari_lighting_resources(
             continue;
         }
 
-        let size = (view_size.x * view_size.y) as u64 * RESERVOIR_STRUCT_SIZE;
+        let size = (view_size.x * view_size.y) as u64 * PACKED_RESERVOIR_STRUCT_SIZE;
 
         let reservoirs_a = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_reservoirs_a"),

@@ -35,7 +35,7 @@ fn empty_reservoir() -> Reservoir {
 fn pack_reservoir(reservoir: Reservoir) -> PackedReservoir {
     let packed = (u32(reservoir.sample_count) << 24u) |
         (u32(saturate(reservoir.visibility) * 255.0 + 0.5) << 16u) |
-        pack2x16float(vec2(0.0, reservoir.unbiased_contribution_weight));
+        pack2x16float(vec2(reservoir.unbiased_contribution_weight, 0.0));
     return PackedReservoir(reservoir.sample, packed);
 }
 
@@ -43,7 +43,7 @@ fn unpack_reservoir(packed_reservoir: PackedReservoir) -> Reservoir {
     return Reservoir(
         packed_reservoir.sample,
         f32(packed_reservoir.packed >> 24u),
-        unpack2x16float(packed_reservoir.packed).y,
+        unpack2x16float(packed_reservoir.packed).x,
         f32((packed_reservoir.packed >> 16u) & 0xFFu) / 255.0,
     );
 }

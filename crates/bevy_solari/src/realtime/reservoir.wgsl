@@ -12,14 +12,15 @@ const SAMPLE_COUNT_CAP = 20.0;
 
 struct Reservoir {
     sample: LightSample,
-    sample_count: f32,
     unbiased_contribution_weight: f32,
+    sample_count: f32,
     visibility: f32,
 }
 
 // Don't adjust the size of this struct without also adjusting PACKED_RESERVOIR_STRUCT_SIZE.
 struct PackedReservoir {
     sample: LightSample,
+    unbiased_contribution_weight: f32,
     packed: u32,
 }
 
@@ -33,18 +34,16 @@ fn empty_reservoir() -> Reservoir {
 }
 
 fn pack_reservoir(reservoir: Reservoir) -> PackedReservoir {
-    let packed = (u32(reservoir.sample_count) << 24u) |
-        (u32(saturate(reservoir.visibility) * 255.0 + 0.5) << 16u) |
-        pack2x16float(vec2(reservoir.unbiased_contribution_weight, 0.0));
-    return PackedReservoir(reservoir.sample, packed);
+    let packed = (u32(reservoir.sample_count) << 8u) | (u32(saturate(reservoir.visibility) * 255.0 + 0.5));
+    return PackedReservoir(reservoir.sample, reservoir.unbiased_contribution_weight, packed);
 }
 
 fn unpack_reservoir(packed_reservoir: PackedReservoir) -> Reservoir {
     return Reservoir(
         packed_reservoir.sample,
-        f32(packed_reservoir.packed >> 24u),
-        unpack2x16float(packed_reservoir.packed).x,
-        f32((packed_reservoir.packed >> 16u) & 0xFFu) / 255.0,
+        packed_reservoir.unbiased_contribution_weight,
+        f32(packed_reservoir.packed >> 8u),
+        f32(packed_reservoir.packed & 0xFFu) / 255.0,
     );
 }
 

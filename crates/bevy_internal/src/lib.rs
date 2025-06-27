@@ -1,9 +1,10 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![forbid(unsafe_code)]
 #![doc(
-    html_logo_url = "https://bevyengine.org/assets/icon.png",
-    html_favicon_url = "https://bevyengine.org/assets/icon.png"
+    html_logo_url = "https://bevy.org/assets/icon.png",
+    html_favicon_url = "https://bevy.org/assets/icon.png"
 )]
+#![no_std]
 
 //! This module is separated into its own crate to enable simple dynamic linking for Bevy, and should not be used directly
 
@@ -17,6 +18,8 @@ pub use default_plugins::*;
 pub use bevy_a11y as a11y;
 #[cfg(feature = "bevy_animation")]
 pub use bevy_animation as animation;
+#[cfg(feature = "bevy_anti_aliasing")]
+pub use bevy_anti_aliasing as anti_aliasing;
 pub use bevy_app as app;
 #[cfg(feature = "bevy_asset")]
 pub use bevy_asset as asset;
@@ -26,6 +29,8 @@ pub use bevy_audio as audio;
 pub use bevy_color as color;
 #[cfg(feature = "bevy_core_pipeline")]
 pub use bevy_core_pipeline as core_pipeline;
+#[cfg(feature = "bevy_core_widgets")]
+pub use bevy_core_widgets as core_widgets;
 #[cfg(feature = "bevy_dev_tools")]
 pub use bevy_dev_tools as dev_tools;
 pub use bevy_diagnostic as diagnostic;
@@ -39,14 +44,16 @@ pub use bevy_gltf as gltf;
 #[cfg(feature = "bevy_image")]
 pub use bevy_image as image;
 pub use bevy_input as input;
+#[cfg(feature = "bevy_input_focus")]
 pub use bevy_input_focus as input_focus;
+#[cfg(feature = "bevy_log")]
 pub use bevy_log as log;
 pub use bevy_math as math;
 #[cfg(feature = "bevy_pbr")]
 pub use bevy_pbr as pbr;
 #[cfg(feature = "bevy_picking")]
 pub use bevy_picking as picking;
-pub use bevy_platform_support as platform_support;
+pub use bevy_platform as platform;
 pub use bevy_ptr as ptr;
 pub use bevy_reflect as reflect;
 #[cfg(feature = "bevy_remote")]
@@ -55,6 +62,8 @@ pub use bevy_remote as remote;
 pub use bevy_render as render;
 #[cfg(feature = "bevy_scene")]
 pub use bevy_scene as scene;
+#[cfg(feature = "bevy_solari")]
+pub use bevy_solari as solari;
 #[cfg(feature = "bevy_sprite")]
 pub use bevy_sprite as sprite;
 #[cfg(feature = "bevy_state")]

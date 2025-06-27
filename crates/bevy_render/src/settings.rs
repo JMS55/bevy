@@ -2,8 +2,8 @@ use crate::renderer::{
     RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
 };
 use alloc::borrow::Cow;
-use std::path::PathBuf;
 
+use wgpu::DxcShaderModel;
 pub use wgpu::{
     Backends, Dx12Compiler, Features as WgpuFeatures, Gles3MinorVersion, InstanceFlags,
     Limits as WgpuLimits, MemoryHints, PowerPreference,
@@ -53,8 +53,6 @@ pub struct WgpuSettings {
     pub instance_flags: InstanceFlags,
     /// This hints to the WGPU device about the preferred memory allocation strategy.
     pub memory_hints: MemoryHints,
-    /// The path to pass to wgpu for API call tracing. This only has an effect if wgpu's tracing functionality is enabled.
-    pub trace_path: Option<PathBuf>,
 }
 
 impl Default for WgpuSettings {
@@ -114,7 +112,7 @@ impl Default for WgpuSettings {
                     Dx12Compiler::DynamicDxc {
                         dxc_path: String::from(dxc),
                         dxil_path: String::from(dxil),
-                        max_shader_model: wgpu::DxcShaderModel::V6_2,
+                        max_shader_model: DxcShaderModel::V6_7,
                     }
                 } else {
                     Dx12Compiler::Fxc
@@ -138,7 +136,6 @@ impl Default for WgpuSettings {
             gles3_minor_version,
             instance_flags,
             memory_hints: MemoryHints::default(),
-            trace_path: None,
         }
     }
 }
@@ -154,6 +151,10 @@ pub struct RenderResources(
 );
 
 /// An enum describing how the renderer will initialize resources. This is used when creating the [`RenderPlugin`](crate::RenderPlugin).
+#[expect(
+    clippy::large_enum_variant,
+    reason = "See https://github.com/bevyengine/bevy/issues/19220"
+)]
 pub enum RenderCreation {
     /// Allows renderer resource initialization to happen outside of the rendering plugin.
     Manual(RenderResources),

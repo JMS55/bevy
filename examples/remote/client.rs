@@ -44,12 +44,12 @@ fn main() -> AnyhowResult<()> {
 
     // Create the URL. We're going to need it to issue the HTTP request.
     let host_part = format!("{}:{}", args.host, args.port);
-    let url = format!("http://{}/", host_part);
+    let url = format!("http://{host_part}/");
 
     let req = BrpRequest {
         jsonrpc: String::from("2.0"),
         method: String::from(BRP_QUERY_METHOD),
-        id: Some(ureq::json!(1)),
+        id: Some(serde_json::to_value(1)?),
         params: Some(
             serde_json::to_value(BrpQueryParams {
                 data: BrpQuery {
@@ -66,9 +66,10 @@ fn main() -> AnyhowResult<()> {
 
     let res = ureq::post(&url)
         .send_json(req)?
-        .into_json::<serde_json::Value>()?;
+        .body_mut()
+        .read_json::<serde_json::Value>()?;
 
-    println!("{:#}", res);
+    println!("{res:#}");
 
     Ok(())
 }

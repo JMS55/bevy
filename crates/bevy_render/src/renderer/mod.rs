@@ -4,6 +4,7 @@ mod render_device;
 use bevy_derive::{Deref, DerefMut};
 #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
 use bevy_tasks::ComputeTaskPool;
+use bevy_utils::WgpuWrapper;
 pub use graph_runner::*;
 pub use render_device::*;
 use tracing::{debug, error, info, info_span, warn};
@@ -18,11 +19,11 @@ use crate::{
 };
 use alloc::sync::Arc;
 use bevy_ecs::{prelude::*, system::SystemState};
-use bevy_platform_support::time::Instant;
+use bevy_platform::time::Instant;
 use bevy_time::TimeSender;
 use wgpu::{
     Adapter, AdapterInfo, CommandBuffer, CommandEncoder, DeviceType, Instance, Queue,
-    RequestAdapterOptions,
+    RequestAdapterOptions, Trace,
 };
 
 /// Updates the [`RenderGraph`] with all of its nodes and then runs it to render the entire frame.
@@ -120,46 +121,6 @@ pub fn render_system(world: &mut World, state: &mut SystemState<Query<Entity, Wi
     }
 }
 
-/// A wrapper to safely make `wgpu` types Send / Sync on web with atomics enabled.
-///
-/// On web with `atomics` enabled the inner value can only be accessed
-/// or dropped on the `wgpu` thread or else a panic will occur.
-/// On other platforms the wrapper simply contains the wrapped value.
-#[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-#[derive(Debug, Clone, Deref, DerefMut)]
-pub struct WgpuWrapper<T>(T);
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-#[derive(Debug, Clone, Deref, DerefMut)]
-pub struct WgpuWrapper<T>(send_wrapper::SendWrapper<T>);
-
-// SAFETY: SendWrapper is always Send + Sync.
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-unsafe impl<T> Send for WgpuWrapper<T> {}
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-unsafe impl<T> Sync for WgpuWrapper<T> {}
-
-#[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-impl<T> WgpuWrapper<T> {
-    pub fn new(t: T) -> Self {
-        Self(t)
-    }
-
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-impl<T> WgpuWrapper<T> {
-    pub fn new(t: T) -> Self {
-        Self(send_wrapper::SendWrapper::new(t))
-    }
-
-    pub fn into_inner(self) -> T {
-        self.0.take()
-    }
-}
-
 /// This queue is used to enqueue tasks for the GPU to execute asynchronously.
 #[derive(Resource, Clone, Deref, DerefMut)]
 pub struct RenderQueue(pub Arc<WgpuWrapper<Queue>>);
@@ -203,7 +164,7 @@ pub async fn initialize_renderer(
     if adapter_info.device_type == DeviceType::Cpu {
         warn!(
             "The selected adapter is using a driver that only supports software rendering. \
-             This is likely to be very slow. See https://bevyengine.org/learn/errors/b0006/"
+             This is likely to be very slow. See https://bevy.org/learn/errors/b0006/"
         );
     }
 
@@ -223,8 +184,8 @@ pub async fn initialize_renderer(
         // RAY_QUERY and RAY_TRACING_ACCELERATION STRUCTURE will sometimes cause DeviceLost failures on platforms
         // that report them as supported:
         // <https://github.com/gfx-rs/wgpu/issues/5488>
-        features.remove(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-        features.remove(wgpu::Features::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE);
+        features -= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        features -= wgpu::Features::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE;
 
         limits = adapter.limits();
     }
@@ -280,6 +241,12 @@ pub async fn initialize_renderer(
             max_uniform_buffers_per_shader_stage: limits
                 .max_uniform_buffers_per_shader_stage
                 .min(constrained_limits.max_uniform_buffers_per_shader_stage),
+            max_binding_array_elements_per_shader_stage: limits
+                .max_binding_array_elements_per_shader_stage
+                .min(constrained_limits.max_binding_array_elements_per_shader_stage),
+            max_binding_array_sampler_elements_per_shader_stage: limits
+                .max_binding_array_sampler_elements_per_shader_stage
+                .min(constrained_limits.max_binding_array_sampler_elements_per_shader_stage),
             max_uniform_buffer_binding_size: limits
                 .max_uniform_buffer_binding_size
                 .min(constrained_limits.max_uniform_buffer_binding_size),
@@ -346,12 +313,6 @@ pub async fn initialize_renderer(
             max_subgroup_size: limits
                 .max_subgroup_size
                 .min(constrained_limits.max_subgroup_size),
-            max_binding_array_elements_per_shader_stage: limits
-                .max_binding_array_elements_per_shader_stage
-                .min(constrained_limits.max_binding_array_elements_per_shader_stage),
-            max_binding_array_sampler_elements_per_shader_stage: limits
-                .max_binding_array_sampler_elements_per_shader_stage
-                .min(constrained_limits.max_binding_array_sampler_elements_per_shader_stage),
         };
     }
 
@@ -360,33 +321,24 @@ pub async fn initialize_renderer(
         required_features: features,
         required_limits: limits,
         memory_hints: options.memory_hints.clone(),
+        // See https://github.com/gfx-rs/wgpu/issues/5974
+        trace: Trace::Off,
     };
 
     #[cfg(not(feature = "dlss"))]
-    let (device, queue) = adapter
-        .request_device(&device_descriptor, options.trace_path.as_deref())
-        .await
-        .unwrap();
+    let (device, queue) = adapter.request_device(&device_descriptor).await.unwrap();
 
     #[cfg(feature = "dlss")]
     let mut dlss_supported = false;
     #[cfg(feature = "dlss")]
     let (device, queue) = {
-        match dlss_wgpu::request_device(
-            dlss_project_id,
-            &adapter,
-            &device_descriptor,
-            options.trace_path.as_deref(),
-        ) {
+        match dlss_wgpu::request_device(dlss_project_id, &adapter, &device_descriptor) {
             Ok(x) => {
                 dlss_supported = true;
                 x
             }
             // Fallback to standard device request
-            Err(_) => adapter
-                .request_device(&device_descriptor, options.trace_path.as_deref())
-                .await
-                .unwrap(),
+            Err(_) => adapter.request_device(&device_descriptor).await.unwrap(),
         }
     };
 
@@ -429,12 +381,13 @@ impl<'w> RenderContext<'w> {
         adapter_info: AdapterInfo,
         diagnostics_recorder: Option<DiagnosticsRecorder>,
     ) -> Self {
-        // HACK: Parallel command encoding is currently bugged on AMD + Windows + Vulkan with wgpu 0.19.1
-        #[cfg(target_os = "windows")]
+        // HACK: Parallel command encoding is currently bugged on AMD + Windows/Linux + Vulkan
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let force_serial =
             adapter_info.driver.contains("AMD") && adapter_info.backend == wgpu::Backend::Vulkan;
         #[cfg(not(any(
             target_os = "windows",
+            target_os = "linux",
             all(target_arch = "wasm32", target_feature = "atomics")
         )))]
         let force_serial = {
@@ -535,6 +488,10 @@ impl<'w> RenderContext<'w> {
 
         let mut command_buffers = Vec::with_capacity(self.command_buffer_queue.len());
 
+        #[cfg(feature = "trace")]
+        let _command_buffer_generation_tasks_span =
+            info_span!("command_buffer_generation_tasks").entered();
+
         #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         {
             let mut task_based_command_buffers = ComputeTaskPool::get().scope(|task_pool| {
@@ -573,6 +530,9 @@ impl<'w> RenderContext<'w> {
                 }
             }
         }
+
+        #[cfg(feature = "trace")]
+        drop(_command_buffer_generation_tasks_span);
 
         command_buffers.sort_unstable_by_key(|(i, _)| *i);
 

@@ -92,7 +92,8 @@ fn calculate_directional_light_contribution(light_sample: LightSample, direction
 #ifdef DIRECTIONAL_LIGHT_SOFT_SHADOWS
     // Sample a random direction within a cone whose base is the sun approximated as a disk
     // https://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.9.pdf#0004286901.INDD%3ASec30%3A305
-    let random = rand_vec2f(&light_sample.seed);
+    var rng = light_sample.seed;
+    let random = rand_vec2f(&rng);
     let cos_theta = (1.0 - random.x) + random.x * directional_light.cos_theta_max;
     let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
     let phi = random.y * PI_2;
@@ -147,7 +148,8 @@ fn trace_directional_light_visibility(light_sample: LightSample, directional_lig
 #ifdef DIRECTIONAL_LIGHT_SOFT_SHADOWS
     // Sample a random direction within a cone whose base is the sun approximated as a disk
     // https://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.9.pdf#0004286901.INDD%3ASec30%3A305
-    let random = rand_vec2f(&light_sample.seed);
+    var rng = light_sample.seed;
+    let random = rand_vec2f(&rng);
     let cos_theta = (1.0 - random.x) + random.x * directional_light.cos_theta_max;
     let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
     let phi = random.y * PI_2;

@@ -135,10 +135,13 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.viewport.z);
     var temporal_reservoir = reservoirs_a[temporal_pixel_index];
 
-    temporal_reservoir.sample.light_id.x = previous_frame_light_id_translations[temporal_reservoir.sample.light_id.x];
-    if temporal_reservoir.sample.light_id.x == LIGHT_NOT_PRESENT_THIS_FRAME {
+
+    let triangle_id = temporal_reservoir.sample.light_id & 0xFFFFu;
+    let translated_light_id = previous_frame_light_id_translations[temporal_reservoir.sample.light_id >> 16u];
+    if translated_light_id == LIGHT_NOT_PRESENT_THIS_FRAME {
         return empty_reservoir();
     }
+    temporal_reservoir.sample.light_id = translated_light_id << 16u | triangle_id;
 
     temporal_reservoir.confidence_weight = min(temporal_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
 

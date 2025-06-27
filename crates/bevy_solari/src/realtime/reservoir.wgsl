@@ -19,7 +19,7 @@ struct Reservoir {
 
 fn empty_reservoir() -> Reservoir {
     return Reservoir(
-        LightSample(vec2(NULL_RESERVOIR_SAMPLE, 0u), vec2(0.0)),
+        LightSample(NULL_RESERVOIR_SAMPLE, 0u),
         0.0,
         0.0,
         0.0,
@@ -28,7 +28,7 @@ fn empty_reservoir() -> Reservoir {
 }
 
 fn reservoir_valid(reservoir: Reservoir) -> bool {
-    return reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE;
+    return reservoir.sample.light_id != NULL_RESERVOIR_SAMPLE;
 }
 
 struct ReservoirMergeResult {

@@ -11,7 +11,6 @@ const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 // Don't adjust the size of this struct without also adjusting RESERVOIR_STRUCT_SIZE.
 struct Reservoir {
     sample: LightSample,
-    weight_sum: f32,
     confidence_weight: f32,
     unbiased_contribution_weight: f32,
     visibility: f32,
@@ -20,7 +19,6 @@ struct Reservoir {
 fn empty_reservoir() -> Reservoir {
     return Reservoir(
         LightSample(NULL_RESERVOIR_SAMPLE, 0u),
-        0.0,
         0.0,
         0.0,
         0.0
@@ -56,25 +54,25 @@ fn merge_reservoirs(
     let other_resampling_weight = other_mis_weight * (other_target_function.a * other_reservoir.unbiased_contribution_weight);
 
     var combined_reservoir = empty_reservoir();
-    combined_reservoir.weight_sum = canonical_resampling_weight + other_resampling_weight;
+    let combined_reservoir_weight_sum = canonical_resampling_weight + other_resampling_weight;
     combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
 
     // https://yusuketokuyoshi.com/papers/2024/Efficient_Visibility_Reuse_for_Real-time_ReSTIR_(Supplementary_Document).pdf
     combined_reservoir.visibility = max(0.0, (canonical_reservoir.visibility * canonical_resampling_weight
-        + other_reservoir.visibility * other_resampling_weight) / combined_reservoir.weight_sum);
+        + other_reservoir.visibility * other_resampling_weight) / combined_reservoir_weight_sum);
 
-    if rand_f(rng) < other_resampling_weight / combined_reservoir.weight_sum {
+    if rand_f(rng) < other_resampling_weight / combined_reservoir_weight_sum {
         combined_reservoir.sample = other_reservoir.sample;
 
         let inverse_target_function = select(0.0, 1.0 / other_target_function.a, other_target_function.a > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = combined_reservoir_weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, other_target_function.rgb);
     } else {
         combined_reservoir.sample = canonical_reservoir.sample;
 
         let inverse_target_function = select(0.0, 1.0 / canonical_target_function.a, canonical_target_function.a > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = combined_reservoir_weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, canonical_target_function.rgb);
     }

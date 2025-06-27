@@ -88,6 +88,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>) -> Reservoir{
     var reservoir = empty_reservoir();
     var reservoir_target_function = 0.0;
+    var reservoir_weight_sum = 0.0;
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
         let light_sample = generate_random_light_sample(rng);
 
@@ -96,9 +97,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let target_function = luminance(light_contribution.radiance * diffuse_brdf);
         let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
 
-        reservoir.weight_sum += resampling_weight;
+        reservoir_weight_sum += resampling_weight;
 
-        if rand_f(rng) < resampling_weight / reservoir.weight_sum {
+        if rand_f(rng) < resampling_weight / reservoir_weight_sum {
             reservoir.sample = light_sample;
             reservoir_target_function = target_function;
         }
@@ -106,7 +107,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
     if reservoir_valid(reservoir) {
         let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
-        reservoir.unbiased_contribution_weight = reservoir.weight_sum * inverse_target_function;
+        reservoir.unbiased_contribution_weight = reservoir_weight_sum * inverse_target_function;
 
         reservoir.visibility = trace_light_visibility(reservoir.sample, world_position);
         reservoir.unbiased_contribution_weight *= reservoir.visibility;

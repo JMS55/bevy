@@ -57,15 +57,16 @@ struct LightContribution {
 fn generate_random_light_sample(rng: ptr<function, u32>) -> LightSample {
     let light_count = arrayLength(&light_sources);
     let light_id = rand_range_u(light_count, rng);
+    let seed = rand_u(rng);
     let light_source = light_sources[light_id];
 
     var triangle_id = 0u;
     if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
         let triangle_count = light_source.kind >> 1u;
-        triangle_id = rand_range_u(triangle_count, rng);
+        triangle_id = seed % triangle_count;
     }
 
-    return LightSample((light_id << 16u) | triangle_id, rand_u(rng));
+    return LightSample((light_id << 16u) | triangle_id, seed);
 }
 
 fn calculate_light_contribution(light_sample: LightSample, ray_origin: vec3<f32>, origin_world_normal: vec3<f32>) -> LightContribution {

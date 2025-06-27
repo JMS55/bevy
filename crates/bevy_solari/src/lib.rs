@@ -48,5 +48,6 @@ impl SolariPlugin {
             | WgpuFeatures::TEXTURE_BINDING_ARRAY
             | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
             | WgpuFeatures::PARTIALLY_BOUND_BINDING_ARRAY
+            | WgpuFeatures::SHADER_F16
     }
 }

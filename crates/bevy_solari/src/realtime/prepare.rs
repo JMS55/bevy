@@ -18,7 +18,7 @@ use bevy_render::{
 };
 
 /// Size of a Reservoir shader struct in bytes.
-const RESERVOIR_STRUCT_SIZE: u64 = 20;
+const RESERVOIR_STRUCT_SIZE: u64 = 16;
 
 /// Internal rendering resources used for Solari lighting.
 #[derive(Component)]

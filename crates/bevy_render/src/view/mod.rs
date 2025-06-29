@@ -8,8 +8,7 @@ pub use window::*;
 use crate::{
     camera::{
         CameraMainTextureUsages, ClearColor, ClearColorConfig, Exposure, ExtractedCamera,
-        MainPassViewportOverride, ManualTextureViews, MipBias, NormalizedRenderTarget,
-        TemporalJitter,
+        ManualTextureViews, MipBias, NormalizedRenderTarget, TemporalJitter,
     },
     experimental::occlusion_culling::OcclusionCulling,
     extract_component::ExtractComponentPlugin,

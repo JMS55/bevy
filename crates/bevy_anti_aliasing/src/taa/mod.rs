@@ -148,7 +148,7 @@ impl Default for TemporalAntiAliasing {
 
 /// Render [`bevy_render::render_graph::Node`] used by temporal anti-aliasing.
 #[derive(Default)]
-struct TemporalAntiAliasNode;
+pub struct TemporalAntiAliasNode;
 
 impl ViewNode for TemporalAntiAliasNode {
     type ViewQuery = (
@@ -404,7 +404,7 @@ fn prepare_taa_jitter(
 }
 
 #[derive(Component)]
-struct TemporalAntiAliasHistoryTextures {
+pub struct TemporalAntiAliasHistoryTextures {
     write: CachedTexture,
     read: CachedTexture,
 }
@@ -457,7 +457,7 @@ fn prepare_taa_history_textures(
 }
 
 #[derive(Component)]
-struct TemporalAntiAliasPipelineId(CachedRenderPipelineId);
+pub struct TemporalAntiAliasPipelineId(CachedRenderPipelineId);
 
 fn prepare_taa_pipelines(
     mut commands: Commands,

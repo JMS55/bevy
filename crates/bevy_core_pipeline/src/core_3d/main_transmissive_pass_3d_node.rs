@@ -95,9 +95,7 @@ impl ViewNode for MainTransmissivePass3dNode {
                     let mut render_pass =
                         render_context.begin_tracked_render_pass(render_pass_descriptor.clone());
 
-                    let viewport =
-                        viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
-                    if let Some(viewport) = viewport {
+                    if let Some(viewport) = camera.viewport.as_ref() {
                         render_pass.set_camera_viewport(viewport);
                     }
 

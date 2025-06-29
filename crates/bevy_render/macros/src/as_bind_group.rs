@@ -954,7 +954,13 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                         fn bindless_supported(
                             render_device: &#render_path::renderer::RenderDevice
                         ) -> bool {
-                           false
+                            render_device.features().contains(
+                                #render_path::settings::WgpuFeatures::BUFFER_BINDING_ARRAY |
+                                #render_path::settings::WgpuFeatures::TEXTURE_BINDING_ARRAY
+                            ) &&
+                            render_device.limits().max_storage_buffers_per_shader_stage > 0 &&
+                                render_device.limits().max_samplers_per_shader_stage >=
+                                    (#sampler_binding_count * #bindless_count_syntax)
                         }
                 };
                 let actual_bindless_slot_count_declaration = quote! {

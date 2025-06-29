@@ -770,5 +770,13 @@ pub(crate) fn binding_arrays_are_usable(
     render_device: &RenderDevice,
     render_adapter: &RenderAdapter,
 ) -> bool {
-    false
+    !cfg!(feature = "shader_format_glsl")
+        && bevy_render::get_adreno_model(render_adapter).is_none_or(|model| model > 610)
+        && render_device.limits().max_storage_textures_per_shader_stage
+            >= (STANDARD_MATERIAL_FRAGMENT_SHADER_MIN_TEXTURE_BINDINGS + MAX_VIEW_LIGHT_PROBES)
+                as u32
+        && render_device.features().contains(
+            WgpuFeatures::TEXTURE_BINDING_ARRAY
+                | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+        )
 }

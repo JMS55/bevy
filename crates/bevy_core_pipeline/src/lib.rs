@@ -80,7 +80,6 @@ impl Plugin for CorePipelinePlugin {
                 PostProcessingPlugin,
                 OrderIndependentTransparencyPlugin,
                 MipGenerationPlugin,
-                TemporalAntiAliasPlugin,
             ));
     }
 

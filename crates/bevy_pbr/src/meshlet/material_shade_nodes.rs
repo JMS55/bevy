@@ -46,7 +46,6 @@ impl ViewNode for MeshletMainOpaquePass3dNode {
         &'static MeshletViewMaterialsMainOpaquePass,
         &'static MeshletViewBindGroups,
         &'static MeshletViewResources,
-        Option<&'static MainPassViewportOverride>,
     );
 
     fn run(
@@ -67,7 +66,6 @@ impl ViewNode for MeshletMainOpaquePass3dNode {
             meshlet_view_materials,
             meshlet_view_bind_groups,
             meshlet_view_resources,
-            viewport_override,
         ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
@@ -157,7 +155,6 @@ impl ViewNode for MeshletPrepassNode {
         &'static MeshletViewMaterialsPrepass,
         &'static MeshletViewBindGroups,
         &'static MeshletViewResources,
-        Option<&'static MainPassViewportOverride>,
     );
 
     fn run(
@@ -174,7 +171,6 @@ impl ViewNode for MeshletPrepassNode {
             meshlet_view_materials,
             meshlet_view_bind_groups,
             meshlet_view_resources,
-            viewport_override,
         ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
@@ -285,7 +281,6 @@ impl ViewNode for MeshletDeferredGBufferPrepassNode {
         &'static MeshletViewMaterialsDeferredGBufferPrepass,
         &'static MeshletViewBindGroups,
         &'static MeshletViewResources,
-        Option<&'static MainPassViewportOverride>,
     );
 
     fn run(
@@ -302,7 +297,6 @@ impl ViewNode for MeshletDeferredGBufferPrepassNode {
             meshlet_view_materials,
             meshlet_view_bind_groups,
             meshlet_view_resources,
-            viewport_override,
         ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {

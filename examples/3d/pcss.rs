@@ -6,7 +6,6 @@ use bevy::{
     anti_aliasing::taa::TemporalAntiAliasing,
     core_pipeline::{
         prepass::{DepthPrepass, MotionVectorPrepass},
-        taa::TemporalAntiAliasing,
         Skybox,
     },
     math::vec3,

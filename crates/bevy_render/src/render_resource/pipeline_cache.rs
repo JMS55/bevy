@@ -875,7 +875,6 @@ impl PipelineCache {
                 let compilation_options = PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: descriptor.zero_initialize_workgroup_memory,
-                    ..Default::default()
                 };
 
                 let descriptor = RawRenderPipelineDescriptor {
@@ -959,7 +958,6 @@ impl PipelineCache {
                         constants: &[],
                         zero_initialize_workgroup_memory: descriptor
                             .zero_initialize_workgroup_memory,
-                        ..Default::default()
                     },
                     cache: None,
                 };

@@ -4,7 +4,7 @@ use crate::{
 };
 use bevy_ecs::{prelude::World, query::QueryItem};
 use bevy_render::{
-    camera::{ExtractedCamera, MainPassViewportOverride},
+    camera::{ExtractedCamera, MainPassResolutionOverride},
     diagnostic::RecordDiagnostics,
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_phase::{TrackedRenderPass, ViewBinnedRenderPhases},
@@ -31,7 +31,7 @@ impl ViewNode for MainOpaquePass3dNode {
         Option<&'static SkyboxPipelineId>,
         Option<&'static SkyboxBindGroup>,
         &'static ViewUniformOffset,
-        Option<&'static MainPassViewportOverride>,
+        Option<&'static MainPassResolutionOverride>,
     );
 
     fn run<'w>(
@@ -46,6 +46,7 @@ impl ViewNode for MainOpaquePass3dNode {
             skybox_pipeline,
             skybox_bind_group,
             view_uniform_offset,
+            resolution_override,
         ): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
@@ -90,9 +91,8 @@ impl ViewNode for MainOpaquePass3dNode {
             let mut render_pass = TrackedRenderPass::new(&render_device, render_pass);
             let pass_span = diagnostics.pass_span(&mut render_pass, "main_opaque_pass_3d");
 
-            let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
-            if let Some(viewport) = viewport {
-                render_pass.set_camera_viewport(viewport);
+            if let Some(viewport) = camera.viewport.as_ref() {
+                render_pass.set_camera_viewport(&viewport.with_override(resolution_override));
             }
 
             // Opaque draws

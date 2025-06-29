@@ -3,7 +3,7 @@ use crate::core_3d::Transmissive3d;
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_image::ToExtents;
 use bevy_render::{
-    camera::{ExtractedCamera, MainPassViewportOverride},
+    camera::{ExtractedCamera, MainPassResolutionOverride},
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_phase::ViewSortedRenderPhases,
     render_resource::{RenderPassDescriptor, StoreOp},
@@ -28,14 +28,14 @@ impl ViewNode for MainTransmissivePass3dNode {
         &'static ViewTarget,
         Option<&'static ViewTransmissionTexture>,
         &'static ViewDepthTexture,
-        Option<&'static MainPassViewportOverride>,
+        Option<&'static MainPassResolutionOverride>,
     );
 
     fn run(
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (camera, view, camera_3d, target, transmission, depth, viewport_override): QueryItem<
+        (camera, view, camera_3d, target, transmission, depth, resolution_override): QueryItem<
             Self::ViewQuery,
         >,
         world: &World,
@@ -112,9 +112,8 @@ impl ViewNode for MainTransmissivePass3dNode {
                 let mut render_pass =
                     render_context.begin_tracked_render_pass(render_pass_descriptor);
 
-                let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
-                if let Some(viewport) = viewport {
-                    render_pass.set_camera_viewport(viewport);
+                if let Some(viewport) = camera.viewport.as_ref() {
+                    render_pass.set_camera_viewport(&viewport.with_override(resolution_override));
                 }
 
                 if let Err(err) = transmissive_phase.render(&mut render_pass, world, view_entity) {

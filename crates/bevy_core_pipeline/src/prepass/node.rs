@@ -1,6 +1,6 @@
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_render::{
-    camera::{ExtractedCamera, MainPassViewportOverride},
+    camera::{ExtractedCamera, MainPassResolutionOverride},
     diagnostic::RecordDiagnostics,
     experimental::occlusion_culling::OcclusionCulling,
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
@@ -64,7 +64,7 @@ impl ViewNode for LatePrepassNode {
         Option<&'static RenderSkyboxPrepassPipeline>,
         Option<&'static SkyboxPrepassBindGroup>,
         Option<&'static PreviousViewUniformOffset>,
-        Option<&'static MainPassViewportOverride>,
+        Option<&'static MainPassResolutionOverride>,
         Has<OcclusionCulling>,
         Has<NoIndirectDrawing>,
         Has<DeferredPrepass>,
@@ -79,7 +79,7 @@ impl ViewNode for LatePrepassNode {
     ) -> Result<(), NodeRunError> {
         // We only need a late prepass if we have occlusion culling and indirect
         // drawing.
-        let (_, _, _, _, _, _, _, _, _, _, occlusion_culling, no_indirect_drawing, _) = query;
+        let (.., occlusion_culling, no_indirect_drawing, _) = query;
         if !occlusion_culling || no_indirect_drawing {
             return Ok(());
         }
@@ -110,7 +110,7 @@ fn run_prepass<'w>(
         skybox_prepass_pipeline,
         skybox_prepass_bind_group,
         view_prev_uniform_offset,
-        viewport_override,
+        resolution_override,
         _,
         _,
         has_deferred,
@@ -184,9 +184,8 @@ fn run_prepass<'w>(
         let mut render_pass = TrackedRenderPass::new(&render_device, render_pass);
         let pass_span = diagnostics.pass_span(&mut render_pass, label);
 
-        let viewport = viewport_override.map_or(camera.viewport.as_ref(), |v| Some(&v.0));
-        if let Some(viewport) = viewport {
-            render_pass.set_camera_viewport(viewport);
+        if let Some(viewport) = camera.viewport.as_ref() {
+            render_pass.set_camera_viewport(&viewport.with_override(resolution_override));
         }
 
         // Opaque draws

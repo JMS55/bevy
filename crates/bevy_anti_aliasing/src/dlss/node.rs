@@ -1,8 +1,8 @@
 use super::{prepare::ViewDlssContext, Dlss};
-use crate::prepass::ViewPrepassTextures;
+use bevy_core_pipeline::prepass::ViewPrepassTextures;
 use bevy_ecs::{query::QueryItem, world::World};
 use bevy_render::{
-    camera::{MainPassViewportOverride, TemporalJitter},
+    camera::{MainPassResolutionOverride, TemporalJitter},
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     renderer::{RenderAdapter, RenderContext},
     view::ViewTarget,
@@ -16,7 +16,7 @@ impl ViewNode for DlssNode {
     type ViewQuery = (
         &'static Dlss,
         &'static ViewDlssContext,
-        &'static MainPassViewportOverride,
+        &'static MainPassResolutionOverride,
         &'static TemporalJitter,
         &'static ViewTarget,
         &'static ViewPrepassTextures,
@@ -45,7 +45,7 @@ impl ViewNode for DlssNode {
 
         let view_target = view_target.post_process_write();
 
-        let render_resolution = viewport_override.0.physical_size;
+        let render_resolution = viewport_override.0;
         let render_parameters = DlssRenderParameters {
             color: DlssTexture {
                 texture: &view_target.source_texture,

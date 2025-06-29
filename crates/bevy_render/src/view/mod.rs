@@ -8,7 +8,8 @@ pub use window::*;
 use crate::{
     camera::{
         CameraMainTextureUsages, ClearColor, ClearColorConfig, Exposure, ExtractedCamera,
-        ManualTextureViews, MipBias, NormalizedRenderTarget, TemporalJitter,
+        MainPassResolutionOverride, ManualTextureViews, MipBias, NormalizedRenderTarget,
+        TemporalJitter,
     },
     experimental::occlusion_culling::OcclusionCulling,
     extract_component::ExtractComponentPlugin,
@@ -912,7 +913,7 @@ pub fn prepare_view_uniforms(
         Option<&Frustum>,
         Option<&TemporalJitter>,
         Option<&MipBias>,
-        Option<&MainPassViewportOverride>,
+        Option<&MainPassResolutionOverride>,
     )>,
     frame_count: Res<FrameCount>,
 ) {
@@ -940,8 +941,7 @@ pub fn prepare_view_uniforms(
         let mut clip_from_view = unjittered_projection;
 
         if let Some(temporal_jitter) = temporal_jitter {
-            let jitter_view_size =
-                viewport_override.map_or(viewport.zw(), |v| v.0.physical_size.as_vec2());
+            let jitter_view_size = viewport_override.map_or(viewport.zw(), |v| v.0.as_vec2());
             temporal_jitter.jitter_projection(&mut clip_from_view, jitter_view_size);
         }
 

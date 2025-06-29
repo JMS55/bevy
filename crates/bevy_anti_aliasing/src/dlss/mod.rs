@@ -2,24 +2,22 @@ mod extract;
 mod node;
 mod prepare;
 
-use crate::{
-    core_3d::graph::{Core3d, Node3d},
-    DepthPrepass, MotionVectorPrepass,
-};
 use bevy_app::{App, Plugin};
+use bevy_core_pipeline::{
+    core_3d::graph::{Core3d, Node3d},
+    prepass::{DepthPrepass, MotionVectorPrepass},
+};
 use bevy_ecs::{
-    component::{require, Component},
-    prelude::ReflectComponent,
-    resource::Resource,
-    schedule::IntoSystemConfigs,
+    component::Component, prelude::ReflectComponent, resource::Resource,
+    schedule::IntoScheduleConfigs,
 };
 use bevy_reflect::{prelude::ReflectDefault, reflect_remote, Reflect};
 use bevy_render::{
     camera::{MipBias, TemporalJitter},
     render_graph::{RenderGraphApp, ViewNodeRunner},
     renderer::RenderDevice,
-    view::{prepare_view_targets, prepare_view_uniforms},
-    ExtractSchedule, Render, RenderApp, RenderSet,
+    view::{prepare_view_targets, prepare_view_uniforms, Hdr},
+    ExtractSchedule, Render, RenderApp, RenderSystems,
 };
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -59,13 +57,13 @@ impl Plugin for DlssPlugin {
             .add_systems(
                 Render,
                 prepare::configure_dlss_view_targets
-                    .in_set(RenderSet::ManageViews)
+                    .in_set(RenderSystems::ManageViews)
                     .before(prepare_view_targets),
             )
             .add_systems(
                 Render,
                 prepare::prepare_dlss
-                    .in_set(RenderSet::PrepareResources)
+                    .in_set(RenderSystems::PrepareResources)
                     .before(prepare_view_uniforms),
             )
             .add_render_graph_node::<ViewNodeRunner<node::DlssNode>>(Core3d, Node3d::Dlss)
@@ -84,7 +82,7 @@ impl Plugin for DlssPlugin {
 
 #[derive(Component, Reflect, Clone, Default)]
 #[reflect(Component, Default)]
-#[require(TemporalJitter, MipBias, DepthPrepass, MotionVectorPrepass)]
+#[require(TemporalJitter, MipBias, DepthPrepass, MotionVectorPrepass, Hdr)]
 pub struct Dlss {
     #[reflect(remote = DlssPerfQualityModeRemoteReflect)]
     pub perf_quality_mode: DlssPerfQualityMode,

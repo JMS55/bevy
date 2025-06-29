@@ -1,5 +1,5 @@
 use super::{Dlss, DlssSdk};
-use crate::{
+use bevy_core_pipeline::{
     core_3d::Camera3d,
     prepass::{DepthPrepass, MotionVectorPrepass},
 };
@@ -12,10 +12,7 @@ use bevy_ecs::{
 };
 use bevy_math::Vec4Swizzles;
 use bevy_render::{
-    camera::{
-        CameraMainTextureUsages, ExtractedCamera, MainPassViewportOverride, MipBias,
-        TemporalJitter, Viewport,
-    },
+    camera::{CameraMainTextureUsages, MainPassResolutionOverride, MipBias, TemporalJitter},
     render_resource::TextureUsages,
     renderer::{RenderDevice, RenderQueue},
     view::ExtractedView,
@@ -28,7 +25,6 @@ pub fn prepare_dlss(
         (
             Entity,
             &ExtractedView,
-            &ExtractedCamera,
             &Dlss,
             &mut TemporalJitter,
             &mut MipBias,
@@ -47,9 +43,7 @@ pub fn prepare_dlss(
     frame_count: Res<FrameCount>,
     mut commands: Commands,
 ) {
-    for (entity, view, camera, dlss, mut temporal_jitter, mut mip_bias, mut dlss_context) in
-        &mut query
-    {
+    for (entity, view, dlss, mut temporal_jitter, mut mip_bias, mut dlss_context) in &mut query {
         let upscaled_resolution = view.viewport.zw();
 
         let dlss_feature_flags = DlssFeatureFlags::LowResolutionMotionVectors
@@ -90,11 +84,7 @@ pub fn prepare_dlss(
                         perf_quality_mode: dlss.perf_quality_mode,
                         feature_flags: dlss_feature_flags,
                     },
-                    MainPassViewportOverride(Viewport {
-                        physical_position: view.viewport.xy(),
-                        physical_size: render_resolution,
-                        depth: camera.viewport.clone().map(|v| v.depth).unwrap_or(0.0..1.0),
-                    }),
+                    MainPassResolutionOverride(render_resolution),
                 ));
             }
         }

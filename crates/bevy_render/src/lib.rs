@@ -104,7 +104,7 @@ use crate::{
     mesh::{MeshPlugin, MorphPlugin, RenderMesh},
     render_asset::prepare_assets,
     render_resource::{PipelineCache, Shader, ShaderLoader},
-    renderer::{render_system, RenderInstance},
+    renderer::render_system,
     settings::RenderCreation,
     storage::StoragePlugin,
     view::{ViewPlugin, WindowRenderPlugin},
@@ -113,11 +113,9 @@ use alloc::sync::Arc;
 use bevy_app::{App, AppLabel, Plugin, SubApp};
 use bevy_asset::{AssetApp, AssetServer};
 use bevy_ecs::{prelude::*, schedule::ScheduleLabel};
-use bevy_utils::WgpuWrapper;
 use bitflags::bitflags;
 use core::ops::{Deref, DerefMut};
 use std::sync::Mutex;
-use tracing::debug;
 
 /// Inline shader as an `embedded_asset` and load it permanently.
 ///

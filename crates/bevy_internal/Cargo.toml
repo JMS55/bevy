@@ -74,7 +74,7 @@ tonemapping_luts = ["bevy_core_pipeline/tonemapping_luts"]
 smaa_luts = ["bevy_anti_aliasing/smaa_luts"]
 
 # NVIDIA Deep Learning Super Sampling
-dlss = ["bevy_core_pipeline/dlss", "bevy_render/dlss"]
+dlss = ["bevy_anti_aliasing/dlss", "bevy_render/dlss"]
 
 # Audio format support (vorbis is enabled by default)
 flac = ["bevy_audio/flac"]

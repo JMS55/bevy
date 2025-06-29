@@ -12,8 +12,6 @@ pub mod bloom;
 pub mod core_2d;
 pub mod core_3d;
 pub mod deferred;
-#[cfg(feature = "dlss")]
-pub mod dlss;
 pub mod dof;
 pub mod experimental;
 pub mod motion_blur;
@@ -83,8 +81,6 @@ impl Plugin for CorePipelinePlugin {
                 OrderIndependentTransparencyPlugin,
                 MipGenerationPlugin,
                 TemporalAntiAliasPlugin,
-                #[cfg(feature = "dlss")]
-                dlss::DlssPlugin,
             ));
     }
 

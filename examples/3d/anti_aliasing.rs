@@ -22,7 +22,7 @@ use bevy::{
 };
 
 #[cfg(feature = "dlss")]
-use bevy::core_pipeline::dlss::{Dlss, DlssPerfQualityMode, DlssProjectId, DlssSupported};
+use bevy::anti_aliasing::dlss::{Dlss, DlssPerfQualityMode, DlssProjectId, DlssSupported};
 
 fn main() {
     let mut app = App::new();

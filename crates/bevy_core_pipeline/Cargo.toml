@@ -17,8 +17,6 @@ trace = []
 webgl = []
 webgpu = []
 tonemapping_luts = ["bevy_render/ktx2", "bevy_image/ktx2", "bevy_image/zstd"]
-smaa_luts = ["bevy_render/ktx2", "bevy_image/ktx2", "bevy_image/zstd"]
-dlss = ["dep:dlss_wgpu"]
 
 [dependencies]
 # bevy
@@ -48,7 +46,6 @@ smallvec = "1"
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 bytemuck = { version = "1" }
-dlss_wgpu = { path = "../../../dlss_wgpu", optional = true }
 
 [lints]
 workspace = true

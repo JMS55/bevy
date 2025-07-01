@@ -24,6 +24,7 @@ struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
 const INITIAL_SAMPLES = 32u;
+const SPATIAL_REUSE_DISOCCLUSION_BOOST_SAMPLES = 5u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 20.0;
 
@@ -75,7 +76,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let emissive = rgb9e5_to_vec3_(gpixel.g);
 
     let input_reservoir = reservoirs_b[pixel_index];
-    let spatial_reservoir = load_spatial_reservoir(global_id.xy, depth, world_position, world_normal, &rng);
+    let spatial_reservoir = load_spatial_reservoirs(global_id.xy, depth, world_position, world_normal, diffuse_brdf, input_reservoir.confidence_weight, &rng);
     let merge_result = merge_reservoirs(input_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
     let combined_reservoir = merge_result.merged_reservoir;
 
@@ -116,6 +117,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     }
 
     reservoir.confidence_weight = 1.0;
+
     return reservoir;
 }
 
@@ -148,6 +150,57 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     return temporal_reservoir;
 }
 
+fn load_spatial_reservoirs(
+    pixel_id: vec2<u32>,
+    depth: f32, world_position:
+    vec3<f32>, world_normal: vec3<f32>,
+    diffuse_brdf: vec3<f32>,
+    confidence_weight: f32,
+    rng: ptr<function, u32>,
+) -> Reservoir {
+    let resample_count = select(SPATIAL_REUSE_DISOCCLUSION_BOOST_SAMPLES, 1u, confidence_weight >= CONFIDENCE_WEIGHT_CAP);
+
+    var rng_copy1 = *rng;
+    var rng_copy2 = *rng;
+
+    // TODO: Better MIS weights
+    var confidence_weight_sum = 0.0;
+    for (var i = 0u; i < resample_count; i++) {
+        confidence_weight_sum += load_spatial_reservoir(pixel_id, depth, world_position, world_normal, &rng_copy1).confidence_weight;
+    }
+    if confidence_weight_sum == 0.0 { return empty_reservoir(); }
+    let mis_weight_denominator = 1.0 / confidence_weight_sum;
+
+    var spatial_reservoir = empty_reservoir();
+    var spatial_reservoir_target_function = 0.0;
+    for (var i = 0u; i < resample_count; i++) {
+        let reservoir = load_spatial_reservoir(pixel_id, depth, world_position, world_normal, &rng_copy2);
+
+        let mis_weight = reservoir.confidence_weight * mis_weight_denominator;
+        let target_function = reservoir_target_function(reservoir, world_position, world_normal, diffuse_brdf);
+        let resampling_weight = mis_weight * (target_function.a * reservoir.unbiased_contribution_weight);
+
+        spatial_reservoir.weight_sum += resampling_weight;
+        spatial_reservoir.confidence_weight += reservoir.confidence_weight;
+
+        if rand_f(rng) < resampling_weight / spatial_reservoir.weight_sum {
+            spatial_reservoir.sample = reservoir.sample;
+            spatial_reservoir_target_function = target_function.a;
+        }
+    }
+
+    if reservoir_valid(spatial_reservoir) {
+        let inverse_target_function = select(0.0, 1.0 / spatial_reservoir_target_function, spatial_reservoir_target_function > 0.0);
+        spatial_reservoir.unbiased_contribution_weight = spatial_reservoir.weight_sum * inverse_target_function;
+
+        spatial_reservoir.visibility = trace_light_visibility(spatial_reservoir.sample, world_position);
+    }
+
+    spatial_reservoir.confidence_weight = min(spatial_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
+
+    return spatial_reservoir;
+}
+
 fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
     let spatial_pixel_id = get_neighbor_pixel_id(pixel_id, rng);
 
@@ -160,13 +213,7 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
     }
 
     let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.viewport.z);
-    var spatial_reservoir = reservoirs_b[spatial_pixel_index];
-
-    if reservoir_valid(spatial_reservoir) {
-        spatial_reservoir.visibility = trace_light_visibility(spatial_reservoir.sample, world_position);
-    }
-
-    return spatial_reservoir;
+    return reservoirs_b[spatial_pixel_index];
 }
 
 fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, rng: ptr<function, u32>) -> vec2<u32> {

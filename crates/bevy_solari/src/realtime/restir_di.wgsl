@@ -178,15 +178,15 @@ fn load_spatial_reservoirs(
         let reservoir = load_spatial_reservoir(pixel_id, depth, world_position, world_normal, &rng_copy2);
 
         let mis_weight = reservoir.confidence_weight * mis_weight_denominator;
-        let target_function = reservoir_target_function(reservoir, world_position, world_normal, diffuse_brdf);
-        let resampling_weight = mis_weight * (target_function.a * reservoir.unbiased_contribution_weight);
+        let target_function = reservoir_target_function(reservoir, world_position, world_normal, diffuse_brdf).a;
+        let resampling_weight = mis_weight * (target_function * reservoir.unbiased_contribution_weight);
 
         spatial_reservoir.weight_sum += resampling_weight;
         spatial_reservoir.confidence_weight += reservoir.confidence_weight;
 
         if rand_f(rng) < resampling_weight / spatial_reservoir.weight_sum {
             spatial_reservoir.sample = reservoir.sample;
-            spatial_reservoir_target_function = target_function.a;
+            spatial_reservoir_target_function = target_function;
         }
     }
 

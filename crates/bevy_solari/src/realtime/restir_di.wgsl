@@ -152,8 +152,9 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
 
 fn load_spatial_reservoirs(
     pixel_id: vec2<u32>,
-    depth: f32, world_position:
-    vec3<f32>, world_normal: vec3<f32>,
+    depth: f32,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
     diffuse_brdf: vec3<f32>,
     confidence_weight: f32,
     rng: ptr<function, u32>,

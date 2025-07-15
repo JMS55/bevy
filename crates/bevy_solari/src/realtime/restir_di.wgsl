@@ -20,10 +20,11 @@
 @group(1) @binding(9) var previous_depth_buffer: texture_depth_2d;
 @group(1) @binding(10) var<uniform> view: View;
 @group(1) @binding(11) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(12) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
-const INITIAL_SAMPLES = 32u;
+const INITIAL_SAMPLES = 8u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 20.0;
 
@@ -75,17 +76,42 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let emissive = rgb9e5_to_vec3_(gpixel.g);
 
     let input_reservoir = di_reservoirs_b[pixel_index];
-    let spatial_reservoir = load_spatial_reservoir(global_id.xy, depth, world_position, world_normal, &rng);
-    let merge_result = merge_reservoirs(input_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
+
+    let spatial_pixel_id = get_neighbor_pixel_id(global_id.xy, &rng);
+    let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
+    let spatial_gpixel = textureLoad(gbuffer, spatial_pixel_id, 0);
+    let spatial_world_position = reconstruct_world_position(spatial_pixel_id, spatial_depth);
+    let spatial_world_normal = octahedral_decode(unpack_24bit_normal(spatial_gpixel.a));
+    let spatial_base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
+    let spatial_diffuse_brdf = spatial_base_color / PI;
+    let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.viewport.z);
+    var spatial_reservoir = di_reservoirs_b[spatial_pixel_index];
+    if pixel_dissimilar(depth, world_position, spatial_world_position, world_normal, spatial_world_normal) {
+        spatial_reservoir = empty_reservoir();
+    }
+
+    let merge_result = merge_reservoirs2(input_reservoir, world_position, world_normal, diffuse_brdf,
+        spatial_reservoir, spatial_world_position, spatial_world_normal, spatial_diffuse_brdf, &rng);
     let combined_reservoir = merge_result.merged_reservoir;
+
+    // if reservoir_valid(spatial_reservoir) {
+    //     spatial_reservoir.unbiased_contribution_weight *= trace_light_visibility(spatial_reservoir.sample, world_position);
+    // }
+    // let merge_result = merge_reservoirs(input_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
+    // let combined_reservoir = merge_result.merged_reservoir;
 
     di_reservoirs_a[pixel_index] = combined_reservoir;
 
-    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * combined_reservoir.visibility;
+    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color *= view.exposure;
     pixel_color *= diffuse_brdf;
     pixel_color += emissive;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+
+    // let old_color = textureLoad(accumulation_texture, global_id.xy);
+    // let new_color = mix(old_color.rgb, pixel_color, 1.0 / (old_color.a + 1.0));
+    // textureStore(accumulation_texture, global_id.xy, vec4(new_color, old_color.a + 1.0));
+    // textureStore(view_output, global_id.xy, vec4(new_color, 1.0));
 }
 
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>) -> Reservoir{
@@ -111,7 +137,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
         reservoir.unbiased_contribution_weight = reservoir.weight_sum * inverse_target_function;
 
-        reservoir.visibility = trace_light_visibility(reservoir.sample, world_position);
+        reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
     }
 
     reservoir.confidence_weight = 1.0;
@@ -166,9 +192,9 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
     let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.viewport.z);
     var spatial_reservoir = di_reservoirs_b[spatial_pixel_index];
 
-    if reservoir_valid(spatial_reservoir) {
-        spatial_reservoir.visibility = trace_light_visibility(spatial_reservoir.sample, world_position);
-    }
+    // if reservoir_valid(spatial_reservoir) {
+    //     spatial_reservoir.unbiased_contribution_weight *= trace_light_visibility(spatial_reservoir.sample, world_position);
+    // }
 
     return spatial_reservoir;
 }
@@ -219,7 +245,7 @@ struct Reservoir {
     weight_sum: f32,
     confidence_weight: f32,
     unbiased_contribution_weight: f32,
-    visibility: f32,
+    padding: f32,
 }
 
 fn empty_reservoir() -> Reservoir {
@@ -249,7 +275,6 @@ fn merge_reservoirs(
     diffuse_brdf: vec3<f32>,
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
-    // TODO: Balance heuristic MIS weights
     let mis_weight_denominator = 1.0 / (canonical_reservoir.confidence_weight + other_reservoir.confidence_weight);
 
     let canonical_mis_weight = canonical_reservoir.confidence_weight * mis_weight_denominator;
@@ -263,10 +288,6 @@ fn merge_reservoirs(
     var combined_reservoir = empty_reservoir();
     combined_reservoir.weight_sum = canonical_resampling_weight + other_resampling_weight;
     combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
-
-    // https://yusuketokuyoshi.com/papers/2024/Efficient_Visibility_Reuse_for_Real-time_ReSTIR_(Supplementary_Document).pdf
-    combined_reservoir.visibility = max(0.0, (canonical_reservoir.visibility * canonical_resampling_weight
-        + other_reservoir.visibility * other_resampling_weight) / combined_reservoir.weight_sum);
 
     if rand_f(rng) < other_resampling_weight / combined_reservoir.weight_sum {
         combined_reservoir.sample = other_reservoir.sample;
@@ -285,9 +306,63 @@ fn merge_reservoirs(
     }
 }
 
+fn merge_reservoirs2(
+    canonical_reservoir: Reservoir,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    diffuse_brdf: vec3<f32>,
+    other_reservoir: Reservoir,
+    other_world_position: vec3<f32>,
+    other_world_normal: vec3<f32>,
+    other_diffuse_brdf: vec3<f32>,
+    rng: ptr<function, u32>,
+) -> ReservoirMergeResult {
+    let canonical_target_function_canonical_sample = reservoir_target_function(canonical_reservoir, world_position, world_normal, diffuse_brdf);
+    var other_target_function_canonical_sample = reservoir_target_function(canonical_reservoir, other_world_position, other_world_normal, other_diffuse_brdf);
+
+    let other_target_function_other_sample = reservoir_target_function(other_reservoir, other_world_position, other_world_normal, other_diffuse_brdf);
+    var canonical_target_function_other_sample = reservoir_target_function(other_reservoir, world_position, world_normal, diffuse_brdf);
+
+    if reservoir_valid(canonical_reservoir) {
+        other_target_function_canonical_sample *= trace_light_visibility(canonical_reservoir.sample, other_world_position);
+    }
+
+    if reservoir_valid(other_reservoir) {
+        canonical_target_function_other_sample *= trace_light_visibility(other_reservoir.sample, world_position);
+    }
+
+    let canonical_mis_weight = (canonical_reservoir.confidence_weight * canonical_target_function_canonical_sample.a) /
+        ((canonical_reservoir.confidence_weight * canonical_target_function_canonical_sample.a) + (other_reservoir.confidence_weight * other_target_function_canonical_sample.a));
+    let canonical_resampling_weight = max(0.0, canonical_mis_weight) * (canonical_target_function_canonical_sample.a * canonical_reservoir.unbiased_contribution_weight);
+
+    let other_mis_weight = (other_reservoir.confidence_weight * other_target_function_other_sample.a) /
+        ((other_reservoir.confidence_weight * other_target_function_other_sample.a) + (canonical_reservoir.confidence_weight * canonical_target_function_other_sample.a));
+    let other_resampling_weight = max(0.0, other_mis_weight) * (canonical_target_function_other_sample.a * other_reservoir.unbiased_contribution_weight);
+
+    var combined_reservoir = empty_reservoir();
+    combined_reservoir.weight_sum = canonical_resampling_weight + other_resampling_weight;
+    combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
+
+    if rand_f(rng) < other_resampling_weight / combined_reservoir.weight_sum {
+        combined_reservoir.sample = other_reservoir.sample;
+
+        let inverse_target_function = select(0.0, 1.0 / canonical_target_function_other_sample.a, canonical_target_function_other_sample.a > 0.0);
+        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+
+        return ReservoirMergeResult(combined_reservoir, canonical_target_function_other_sample.rgb);
+    } else {
+        combined_reservoir.sample = canonical_reservoir.sample;
+
+        let inverse_target_function = select(0.0, 1.0 / canonical_target_function_canonical_sample.a, canonical_target_function_canonical_sample.a > 0.0);
+        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+
+        return ReservoirMergeResult(combined_reservoir, canonical_target_function_canonical_sample.rgb);
+    }
+}
+
 fn reservoir_target_function(reservoir: Reservoir, world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>) -> vec4<f32> {
     if !reservoir_valid(reservoir) { return vec4(0.0); }
-    let light_contribution = calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance * reservoir.visibility;
+    let light_contribution = calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance;
     let target_function = luminance(light_contribution * diffuse_brdf);
     return vec4(light_contribution, target_function);
 }

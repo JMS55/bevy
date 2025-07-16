@@ -81,7 +81,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     di_reservoirs_a[pixel_index] = combined_reservoir;
 
-    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * combined_reservoir.visibility;
+    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color *= view.exposure;
     pixel_color *= diffuse_brdf;
     pixel_color += emissive;
@@ -91,6 +91,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>) -> Reservoir{
     var reservoir = empty_reservoir();
     var reservoir_target_function = 0.0;
+    var weight_sum = 0.0;
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
         let light_sample = generate_random_light_sample(rng);
 
@@ -99,9 +100,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let target_function = luminance(light_contribution.radiance * diffuse_brdf);
         let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
 
-        reservoir.weight_sum += resampling_weight;
+        weight_sum += resampling_weight;
 
-        if rand_f(rng) < resampling_weight / reservoir.weight_sum {
+        if rand_f(rng) < resampling_weight / weight_sum {
             reservoir.sample = light_sample;
             reservoir_target_function = target_function;
         }
@@ -109,9 +110,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
     if reservoir_valid(reservoir) {
         let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
-        reservoir.unbiased_contribution_weight = reservoir.weight_sum * inverse_target_function;
+        reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
-        reservoir.visibility = trace_light_visibility(reservoir.sample, world_position);
+        reservoir.unbiased_contribution_weight *= trace_light_visibility(reservoir.sample, world_position);
     }
 
     reservoir.confidence_weight = 1.0;
@@ -170,7 +171,7 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
     var spatial_reservoir = di_reservoirs_b[spatial_pixel_index];
 
     if reservoir_valid(spatial_reservoir) {
-        spatial_reservoir.visibility = trace_light_visibility(spatial_reservoir.sample, world_position);
+        spatial_reservoir.unbiased_contribution_weight *= trace_light_visibility(spatial_reservoir.sample, world_position);
     }
 
     return spatial_reservoir;
@@ -219,10 +220,8 @@ fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
 // Don't adjust the size of this struct without also adjusting DI_RESERVOIR_STRUCT_SIZE.
 struct Reservoir {
     sample: LightSample,
-    weight_sum: f32,
     confidence_weight: f32,
     unbiased_contribution_weight: f32,
-    visibility: f32,
 }
 
 fn empty_reservoir() -> Reservoir {
@@ -230,8 +229,6 @@ fn empty_reservoir() -> Reservoir {
         LightSample(NULL_RESERVOIR_SAMPLE, 0u),
         0.0,
         0.0,
-        0.0,
-        0.0
     );
 }
 
@@ -263,26 +260,23 @@ fn merge_reservoirs(
     let other_target_function = reservoir_target_function(other_reservoir, world_position, world_normal, diffuse_brdf);
     let other_resampling_weight = other_mis_weight * (other_target_function.a * other_reservoir.unbiased_contribution_weight);
 
+    let weight_sum = canonical_resampling_weight + other_resampling_weight;
+
     var combined_reservoir = empty_reservoir();
-    combined_reservoir.weight_sum = canonical_resampling_weight + other_resampling_weight;
     combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
 
-    // https://yusuketokuyoshi.com/papers/2024/Efficient_Visibility_Reuse_for_Real-time_ReSTIR_(Supplementary_Document).pdf
-    combined_reservoir.visibility = max(0.0, (canonical_reservoir.visibility * canonical_resampling_weight
-        + other_reservoir.visibility * other_resampling_weight) / combined_reservoir.weight_sum);
-
-    if rand_f(rng) < other_resampling_weight / combined_reservoir.weight_sum {
+    if rand_f(rng) < other_resampling_weight / weight_sum {
         combined_reservoir.sample = other_reservoir.sample;
 
         let inverse_target_function = select(0.0, 1.0 / other_target_function.a, other_target_function.a > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, other_target_function.rgb);
     } else {
         combined_reservoir.sample = canonical_reservoir.sample;
 
         let inverse_target_function = select(0.0, 1.0 / canonical_target_function.a, canonical_target_function.a > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, canonical_target_function.rgb);
     }
@@ -290,7 +284,7 @@ fn merge_reservoirs(
 
 fn reservoir_target_function(reservoir: Reservoir, world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>) -> vec4<f32> {
     if !reservoir_valid(reservoir) { return vec4(0.0); }
-    let light_contribution = calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance * reservoir.visibility;
+    let light_contribution = calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance;
     let target_function = luminance(light_contribution * diffuse_brdf);
     return vec4(light_contribution, target_function);
 }

@@ -142,10 +142,13 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     var temporal_reservoir = di_reservoirs_a[temporal_pixel_index];
 
     // Check if the light selected in the previous frame no longer exists in the current frame (e.g. entity despawned)
-    temporal_reservoir.sample.light_id.x = previous_frame_light_id_translations[temporal_reservoir.sample.light_id.x];
-    if temporal_reservoir.sample.light_id.x == LIGHT_NOT_PRESENT_THIS_FRAME {
+    let previous_light_id = temporal_reservoir.sample.light_id >> 16u;
+    let triangle_id = temporal_reservoir.sample.light_id & 0xFFFFu;
+    let light_id = previous_frame_light_id_translations[previous_light_id];
+    if light_id == LIGHT_NOT_PRESENT_THIS_FRAME {
         return empty_reservoir();
     }
+    temporal_reservoir.sample.light_id = (light_id << 16u) | triangle_id;
 
     temporal_reservoir.confidence_weight = min(temporal_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
 
@@ -224,7 +227,7 @@ struct Reservoir {
 
 fn empty_reservoir() -> Reservoir {
     return Reservoir(
-        LightSample(vec2(NULL_RESERVOIR_SAMPLE, 0u), vec2(0.0)),
+        LightSample(NULL_RESERVOIR_SAMPLE, 0u),
         0.0,
         0.0,
         0.0,
@@ -233,7 +236,7 @@ fn empty_reservoir() -> Reservoir {
 }
 
 fn reservoir_valid(reservoir: Reservoir) -> bool {
-    return reservoir.sample.light_id.x != NULL_RESERVOIR_SAMPLE;
+    return reservoir.sample.light_id != NULL_RESERVOIR_SAMPLE;
 }
 
 struct ReservoirMergeResult {

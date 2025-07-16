@@ -18,7 +18,7 @@ use bevy_render::{
 };
 
 /// Size of a DI Reservoir shader struct in bytes.
-const DI_RESERVOIR_STRUCT_SIZE: u64 = 32;
+const DI_RESERVOIR_STRUCT_SIZE: u64 = 24;
 
 /// Size of a GI Reservoir shader struct in bytes.
 const GI_RESERVOIR_STRUCT_SIZE: u64 = 48;

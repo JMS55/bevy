@@ -4,22 +4,24 @@
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
-#import bevy_pbr::utils::{rand_f, octahedral_decode}
+#import bevy_pbr::utils::{rand_f, rand_range_u, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
-#import bevy_solari::sampling::{LightSample, generate_random_light_sample, calculate_light_contribution, trace_light_visibility, sample_disk}
+#import bevy_solari::sampling::{LightSample, ResolvedLightSample, calculate_light_contribution, trace_light_visibility, sample_disk}
 #import bevy_solari::scene_bindings::{previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
-@group(1) @binding(1) var<storage, read_write> di_reservoirs_a: array<Reservoir>;
-@group(1) @binding(2) var<storage, read_write> di_reservoirs_b: array<Reservoir>;
-@group(1) @binding(5) var gbuffer: texture_2d<u32>;
-@group(1) @binding(6) var depth_buffer: texture_depth_2d;
-@group(1) @binding(7) var motion_vectors: texture_2d<f32>;
-@group(1) @binding(8) var previous_gbuffer: texture_2d<u32>;
-@group(1) @binding(9) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(10) var<uniform> view: View;
-@group(1) @binding(11) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(1) var<storage, read_write> light_tile_samples: array<LightSample>;
+@group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSample>;
+@group(1) @binding(3) var<storage, read_write> di_reservoirs_a: array<Reservoir>;
+@group(1) @binding(4) var<storage, read_write> di_reservoirs_b: array<Reservoir>;
+@group(1) @binding(7) var gbuffer: texture_2d<u32>;
+@group(1) @binding(8) var depth_buffer: texture_depth_2d;
+@group(1) @binding(9) var motion_vectors: texture_2d<f32>;
+@group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
+@group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
+@group(1) @binding(12) var<uniform> view: View;
+@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -30,7 +32,7 @@ const CONFIDENCE_WEIGHT_CAP = 20.0;
 const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 
 @compute @workgroup_size(8, 8, 1)
-fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
@@ -47,7 +49,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
     let diffuse_brdf = base_color / PI;
 
-    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, &rng);
+    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, &rng, workgroup_id.xy);
     let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_position, world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng);
 
@@ -88,22 +90,33 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>) -> Reservoir{
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>, workgroup_id: vec2<u32>) -> Reservoir{
+    var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
+    let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+
     var reservoir = empty_reservoir();
     var reservoir_target_function = 0.0;
     var weight_sum = 0.0;
+    let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
-        let light_sample = generate_random_light_sample(rng);
+        let i = light_tile_start + rand_range_u(1024u, rng);
+        let resolved_light_sample = light_tile_resolved_samples[i];
 
-        let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
-        let light_contribution = calculate_light_contribution(light_sample, world_position, world_normal);
-        let target_function = luminance(light_contribution.radiance * diffuse_brdf);
-        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+        let ray = resolved_light_sample.world_position.xyz - (resolved_light_sample.world_position.w * world_position);
+        let light_distance = length(ray);
+        let ray_direction = ray / light_distance;
+        let cos_theta_origin = saturate(dot(ray_direction, world_normal));
+        let cos_theta_light = saturate(dot(-ray_direction, resolved_light_sample.world_normal));
+        let light_distance_squared = light_distance * light_distance;
+        let radiance = resolved_light_sample.radiance * cos_theta_origin * (cos_theta_light / light_distance_squared);
+
+        let target_function = luminance(radiance * diffuse_brdf);
+        let resampling_weight = mis_weight * (target_function * resolved_light_sample.inverse_pdf);
 
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {
-            reservoir.sample = light_sample;
+            reservoir.sample = light_tile_samples[i];
             reservoir_target_function = target_function;
         }
     }

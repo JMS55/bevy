@@ -65,6 +65,14 @@ struct LightSample {
     seed: u32,
 }
 
+struct ResolvedLightSample {
+    world_position: vec4<f32>,
+    world_normal: vec3<f32>,
+    padding: f32,
+    radiance: vec3<f32>,
+    inverse_pdf: f32,
+}
+
 struct LightContribution {
     radiance: vec3<f32>,
     inverse_pdf: f32,

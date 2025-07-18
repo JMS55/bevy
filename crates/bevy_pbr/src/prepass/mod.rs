@@ -11,6 +11,7 @@ use crate::{
     RenderMeshInstances, RenderPhaseType, SetMaterialBindGroup, SetMeshBindGroup, ShadowView,
 };
 use bevy_app::{App, Plugin, PreUpdate};
+use bevy_camera::Exposure;
 use bevy_render::{
     alpha::AlphaMode,
     batching::gpu_preprocessing::GpuPreprocessingSupport,
@@ -204,9 +205,12 @@ struct AnyPrepassPluginLoaded;
 
 pub fn update_previous_view_data(
     mut commands: Commands,
-    query: Query<(Entity, &Camera, &GlobalTransform), Or<(With<Camera3d>, With<ShadowView>)>>,
+    query: Query<
+        (Entity, &Camera, Option<&Exposure>, &GlobalTransform),
+        Or<(With<Camera3d>, With<ShadowView>)>,
+    >,
 ) {
-    for (entity, camera, camera_transform) in &query {
+    for (entity, camera, exposure, camera_transform) in &query {
         let world_from_view = camera_transform.to_matrix();
         let view_from_world = world_from_view.inverse();
         let view_from_clip = camera.clip_from_view().inverse();
@@ -217,6 +221,10 @@ pub fn update_previous_view_data(
             clip_from_view: camera.clip_from_view(),
             world_from_clip: world_from_view * view_from_clip,
             view_from_clip,
+            padding: Default::default(),
+            exposure: exposure
+                .map(Exposure::exposure)
+                .unwrap_or_else(|| Exposure::default().exposure()),
         });
     }
 }
@@ -656,7 +664,12 @@ pub fn prepare_previous_view_uniforms(
     render_queue: Res<RenderQueue>,
     mut previous_view_uniforms: ResMut<PreviousViewUniforms>,
     views: Query<
-        (Entity, &ExtractedView, Option<&PreviousViewData>),
+        (
+            Entity,
+            &ExtractedView,
+            Option<&Exposure>,
+            Option<&PreviousViewData>,
+        ),
         Or<(With<Camera3d>, With<ShadowView>)>,
     >,
 ) {
@@ -670,7 +683,7 @@ pub fn prepare_previous_view_uniforms(
         return;
     };
 
-    for (entity, camera, maybe_previous_view_uniforms) in views_iter {
+    for (entity, camera, exposure, maybe_previous_view_uniforms) in views_iter {
         let prev_view_data = match maybe_previous_view_uniforms {
             Some(previous_view) => previous_view.clone(),
             None => {
@@ -684,6 +697,10 @@ pub fn prepare_previous_view_uniforms(
                     clip_from_view: camera.clip_from_view,
                     world_from_clip: world_from_view * view_from_clip,
                     view_from_clip,
+                    padding: Default::default(),
+                    exposure: exposure
+                        .map(Exposure::exposure)
+                        .unwrap_or_else(|| Exposure::default().exposure()),
                 }
             }
         };

@@ -3,16 +3,16 @@
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
-#import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
-#import bevy_pbr::utils::{rand_f, octahedral_decode}
+#import bevy_pbr::rgb9e5::{vec3_to_rgb9e5_, rgb9e5_to_vec3_}
+#import bevy_pbr::utils::{rand_f, octahedral_encode, octahedral_decode}
 #import bevy_render::maths::{PI, PI_2}
 #import bevy_render::view::View
 #import bevy_solari::sampling::{sample_uniform_hemisphere, sample_random_light, sample_disk, trace_point_visibility}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
-@group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<Reservoir>;
-@group(1) @binding(6) var<storage, read_write> gi_reservoirs_b: array<Reservoir>;
+@group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<PackedReservoir>;
+@group(1) @binding(6) var<storage, read_write> gi_reservoirs_b: array<PackedReservoir>;
 @group(1) @binding(7) var gbuffer: texture_2d<u32>;
 @group(1) @binding(8) var depth_buffer: texture_depth_2d;
 @group(1) @binding(9) var motion_vectors: texture_2d<f32>;
@@ -35,7 +35,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
-        gi_reservoirs_b[pixel_index] = empty_reservoir();
+        gi_reservoirs_b[pixel_index] = empty_packed_reservoir();
         return;
     }
     let gpixel = textureLoad(gbuffer, global_id.xy, 0);
@@ -46,7 +46,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_position, world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, temporal_reservoir, vec3(1.0), vec3(1.0), &rng);
 
-    gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
+    gi_reservoirs_b[pixel_index] = pack_reservoir(merge_result.merged_reservoir, world_position);
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -58,7 +58,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
-        gi_reservoirs_a[pixel_index] = empty_reservoir();
+        gi_reservoirs_a[pixel_index] = empty_packed_reservoir();
         return;
     }
     let gpixel = textureLoad(gbuffer, global_id.xy, 0);
@@ -67,7 +67,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
     let diffuse_brdf = base_color / PI;
 
-    let input_reservoir = gi_reservoirs_b[pixel_index];
+    let input_reservoir = unpack_reservoir(gi_reservoirs_b[pixel_index], world_position, view.exposure);
     let spatial_reservoir = load_spatial_reservoir(global_id.xy, depth, world_position, world_normal, &rng);
 
     let input_factor = dot(normalize(input_reservoir.sample_point_world_position - world_position), world_normal) * diffuse_brdf;
@@ -76,7 +76,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let merge_result = merge_reservoirs(input_reservoir, spatial_reservoir, input_factor, spatial_factor, &rng);
     let combined_reservoir = merge_result.merged_reservoir;
 
-    gi_reservoirs_a[pixel_index] = combined_reservoir;
+    gi_reservoirs_a[pixel_index] = pack_reservoir(combined_reservoir, world_position);
 
     var pixel_color = textureLoad(view_output, global_id.xy);
     pixel_color += vec4(merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * view.exposure, 0.0);
@@ -134,7 +134,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     }
 
     let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.viewport.z);
-    var temporal_reservoir = gi_reservoirs_a[temporal_pixel_index];
+    var temporal_reservoir = unpack_reservoir(gi_reservoirs_a[temporal_pixel_index], temporal_world_position, previous_view.exposure);
 
     temporal_reservoir.confidence_weight = min(temporal_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
 
@@ -153,7 +153,7 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
     }
 
     let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.viewport.z);
-    var spatial_reservoir = gi_reservoirs_b[spatial_pixel_index];
+    var spatial_reservoir = unpack_reservoir(gi_reservoirs_b[spatial_pixel_index], spatial_world_position, view.exposure);
 
     var jacobian = jacobian(
         world_position,
@@ -236,13 +236,32 @@ fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 {
 }
 
 // Don't adjust the size of this struct without also adjusting GI_RESERVOIR_STRUCT_SIZE.
+struct PackedReservoir {
+    ray_direction: u32,
+    hit_distance: f32,
+    sample_point_world_normal: u32,
+    radiance: u32,
+    confidence_weight: f32,
+    unbiased_contribution_weight: f32,
+}
+
 struct Reservoir {
     sample_point_world_position: vec3<f32>,
-    weight_sum: f32,
-    radiance: vec3<f32>,
     confidence_weight: f32,
     sample_point_world_normal: vec3<f32>,
+    radiance: vec3<f32>,
     unbiased_contribution_weight: f32,
+}
+
+fn empty_packed_reservoir() -> PackedReservoir {
+    return PackedReservoir(
+        0u,
+        0.0,
+        0u,
+        0u,
+        0.0,
+        0.0,
+    );
 }
 
 fn empty_reservoir() -> Reservoir {
@@ -250,9 +269,36 @@ fn empty_reservoir() -> Reservoir {
         vec3(0.0),
         0.0,
         vec3(0.0),
-        0.0,
         vec3(0.0),
         0.0,
+    );
+}
+
+fn pack_reservoir(reservoir: Reservoir, ray_origin: vec3<f32>) -> PackedReservoir {
+    // Note: This loses some precision for sample_point_world_position, it's not entirely lossless
+    var ray_direction = reservoir.sample_point_world_position - ray_origin;
+    let hit_distance = length(ray_direction);
+    ray_direction /= hit_distance;
+
+    return PackedReservoir(
+        pack2x16unorm(octahedral_encode(ray_direction)),
+        hit_distance,
+        pack2x16unorm(octahedral_encode(reservoir.sample_point_world_normal)),
+        vec3_to_rgb9e5_(reservoir.radiance * view.exposure),
+        reservoir.confidence_weight,
+        reservoir.unbiased_contribution_weight,
+    );
+}
+
+fn unpack_reservoir(packed_reservoir: PackedReservoir, ray_origin: vec3<f32>, exposure: f32) -> Reservoir {
+    let ray_direction = octahedral_decode(unpack2x16unorm(packed_reservoir.ray_direction));
+    let sample_point_world_position = ray_origin + (ray_direction * packed_reservoir.hit_distance);
+    return Reservoir(
+        sample_point_world_position,
+        packed_reservoir.confidence_weight,
+        octahedral_decode(unpack2x16unorm(packed_reservoir.sample_point_world_normal)),
+        rgb9e5_to_vec3_(packed_reservoir.radiance) / exposure,
+        packed_reservoir.unbiased_contribution_weight,
     );
 }
 
@@ -286,15 +332,15 @@ fn merge_reservoirs(
     let other_target_function = luminance(other_radiance);
     let other_resampling_weight = other_mis_weight * (other_target_function * other_reservoir.unbiased_contribution_weight);
 
-    combined_reservoir.weight_sum = canonical_resampling_weight + other_resampling_weight;
+    let weight_sum = canonical_resampling_weight + other_resampling_weight;
 
-    if rand_f(rng) < other_resampling_weight / combined_reservoir.weight_sum {
+    if rand_f(rng) < other_resampling_weight / weight_sum {
         combined_reservoir.sample_point_world_position = other_reservoir.sample_point_world_position;
         combined_reservoir.sample_point_world_normal = other_reservoir.sample_point_world_normal;
         combined_reservoir.radiance = other_reservoir.radiance;
 
         let inverse_target_function = select(0.0, 1.0 / other_target_function, other_target_function > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, other_radiance);
     } else {
@@ -303,7 +349,7 @@ fn merge_reservoirs(
         combined_reservoir.radiance = canonical_reservoir.radiance;
 
         let inverse_target_function = select(0.0, 1.0 / canonical_target_function, canonical_target_function > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, canonical_radiance);
     }

@@ -27,7 +27,7 @@ const RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE: u64 = 48;
 const DI_RESERVOIR_STRUCT_SIZE: u64 = 16;
 
 /// Size of the GI Reservoir shader struct in bytes.
-const GI_RESERVOIR_STRUCT_SIZE: u64 = 48;
+const GI_RESERVOIR_STRUCT_SIZE: u64 = 24;
 
 pub const LIGHT_TILE_BLOCKS: u64 = 128;
 pub const LIGHT_TILE_SAMPLES_PER_BLOCK: u64 = 1024;

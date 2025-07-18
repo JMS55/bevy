@@ -33,7 +33,11 @@ const CONFIDENCE_WEIGHT_CAP = 20.0;
 const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 
 @compute @workgroup_size(16, 16, 1)
-fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
+fn initial_and_temporal(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_index) local_invocation_index: u32,
+) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
@@ -50,7 +54,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
     let diffuse_brdf = base_color / PI;
 
-    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, &rng, workgroup_id.xy);
+    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, &rng, workgroup_id.xy, local_invocation_index);
     let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_position, world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng);
 
@@ -91,17 +95,31 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>, workgroup_id: vec2<u32>) -> Reservoir{
+var<workgroup> light_tile: array<ResolvedLightSamplePacked, 1024u>;
+
+fn generate_initial_reservoir(
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    diffuse_brdf: vec3<f32>,
+    rng: ptr<function, u32>,
+    workgroup_id: vec2<u32>,
+    local_invocation_index: u32,
+) -> Reservoir{
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+    for (var i = 0u; i < 4u; i++) {
+        let x = (local_invocation_index * 4u) + i;
+        light_tile[x] = light_tile_resolved_samples[light_tile_start + x];
+    }
+    workgroupBarrier();
+    let start = rand_range_u(1024u - INITIAL_SAMPLES + 1u, rng);
 
     var reservoir = empty_reservoir();
     var reservoir_target_function = 0.0;
     var weight_sum = 0.0;
     let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
-    var i = light_tile_start + rand_range_u(1024u - INITIAL_SAMPLES + 1u, rng);
-    for (var j = 0u; j < INITIAL_SAMPLES; j++) {
-        let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[i], view.exposure);
+    for (var i = start; i < start + INITIAL_SAMPLES; i++) {
+        let resolved_light_sample = unpack_resolved_light_sample(light_tile[i], view.exposure);
 
         let ray = resolved_light_sample.world_position.xyz - (resolved_light_sample.world_position.w * world_position);
         let light_distance = length(ray);
@@ -120,8 +138,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             reservoir.sample = light_tile_samples[i];
             reservoir_target_function = target_function;
         }
-
-        i += 1u;
     }
 
     if reservoir_valid(reservoir) {

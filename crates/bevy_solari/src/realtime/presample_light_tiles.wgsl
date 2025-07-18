@@ -1,9 +1,14 @@
-#import bevy_pbr::utils::{rand_u, rand_range_u}
+#define_import_path bevy_solari::presample_light_tiles
+
+#import bevy_pbr::rgb9e5::{vec3_to_rgb9e5_, rgb9e5_to_vec3_}
+#import bevy_pbr::utils::{rand_u, rand_range_u, octahedral_encode, octahedral_decode}
+#import bevy_render::view::View
 #import bevy_solari::sampling::{LightSample, ResolvedLightSample, triangle_barycentrics}
 #import bevy_solari::scene_bindings::{light_sources, directional_lights, resolve_triangle_data_full, LIGHT_SOURCE_KIND_DIRECTIONAL}
 
 @group(1) @binding(1) var<storage, read_write> light_tile_samples: array<LightSample>;
-@group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSample>;
+@group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSamplePacked>;
+@group(1) @binding(12) var<uniform> view: View;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -33,7 +38,6 @@ fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builti
         resolved_light_sample = ResolvedLightSample(
             vec4(directional_light.direction_to_light, 0.0),
             -directional_light.direction_to_light,
-            0.0,
             directional_light.luminance,
             directional_light.inverse_pdf,
         );
@@ -45,7 +49,6 @@ fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builti
         resolved_light_sample = ResolvedLightSample(
             vec4(triangle_data.world_position, 1.0),
             triangle_data.world_normal,
-            0.0,
             triangle_data.material.emissive.rgb,
             f32(triangle_count) * triangle_data.triangle_area,
         );
@@ -54,5 +57,41 @@ fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builti
 
     let i = (tile_id * 1024u) + sample_index;
     light_tile_samples[i] = light_sample;
-    light_tile_resolved_samples[i] = resolved_light_sample;
+    light_tile_resolved_samples[i] = pack_resolved_light_sample(resolved_light_sample);
+}
+
+struct ResolvedLightSample {
+    world_position: vec4<f32>,
+    world_normal: vec3<f32>,
+    radiance: vec3<f32>,
+    inverse_pdf: f32,
+}
+
+struct ResolvedLightSamplePacked {
+    world_position_x: f32,
+    world_position_y: f32,
+    world_position_z: f32,
+    world_normal: u32,
+    radiance: u32,
+    inverse_pdf: f32,
+}
+
+fn pack_resolved_light_sample(sample: ResolvedLightSample) -> ResolvedLightSamplePacked {
+    return ResolvedLightSamplePacked(
+        sample.world_position.x,
+        sample.world_position.y,
+        sample.world_position.z,
+        pack2x16unorm(octahedral_encode(sample.world_normal)),
+        vec3_to_rgb9e5_(sample.radiance * view.exposure),
+        sample.inverse_pdf * select(1.0, -1.0, sample.world_position.w == 0.0),
+    );
+}
+
+fn unpack_resolved_light_sample(packed: ResolvedLightSamplePacked, exposure: f32) -> ResolvedLightSample {
+    return ResolvedLightSample(
+        vec4(packed.world_position_x, packed.world_position_y, packed.world_position_z, select(1.0, 0.0, packed.inverse_pdf < 0.0)),
+        octahedral_decode(unpack2x16unorm(packed.world_normal)),
+        rgb9e5_to_vec3_(packed.radiance) / exposure,
+        abs(packed.inverse_pdf),
+    );
 }

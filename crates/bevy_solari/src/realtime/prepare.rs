@@ -20,8 +20,8 @@ use bevy_render::{
 /// Size of the LightSample shader struct in bytes.
 const LIGHT_SAMPLE_STRUCT_SIZE: u64 = 8;
 
-/// Size of the ResolvedLightSample shader struct in bytes.
-const RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE: u64 = 48;
+/// Size of the ResolvedLightSamplePacked shader struct in bytes.
+const RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE: u64 = 24;
 
 /// Size of the DI Reservoir shader struct in bytes.
 const DI_RESERVOIR_STRUCT_SIZE: u64 = 16;

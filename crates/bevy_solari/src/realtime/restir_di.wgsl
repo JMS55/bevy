@@ -7,12 +7,13 @@
 #import bevy_pbr::utils::{rand_f, rand_range_u, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
-#import bevy_solari::sampling::{LightSample, ResolvedLightSample, calculate_light_contribution, trace_light_visibility, sample_disk}
+#import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
+#import bevy_solari::sampling::{LightSample, calculate_light_contribution, trace_light_visibility, sample_disk}
 #import bevy_solari::scene_bindings::{previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(1) var<storage, read_write> light_tile_samples: array<LightSample>;
-@group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSample>;
+@group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSamplePacked>;
 @group(1) @binding(3) var<storage, read_write> di_reservoirs_a: array<Reservoir>;
 @group(1) @binding(4) var<storage, read_write> di_reservoirs_b: array<Reservoir>;
 @group(1) @binding(7) var gbuffer: texture_2d<u32>;
@@ -100,7 +101,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
     var i = light_tile_start + rand_range_u(1024u - INITIAL_SAMPLES + 1u, rng);
     for (var j = 0u; j < INITIAL_SAMPLES; j++) {
-        let resolved_light_sample = light_tile_resolved_samples[i];
+        let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[i], view.exposure);
 
         let ray = resolved_light_sample.world_position.xyz - (resolved_light_sample.world_position.w * world_position);
         let light_distance = length(ray);

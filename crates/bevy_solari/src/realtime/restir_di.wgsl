@@ -107,9 +107,9 @@ fn generate_initial_reservoir(
 ) -> Reservoir{
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
-    for (var i = 0u; i < 4u; i++) {
-        let x = (local_invocation_index * 4u) + i;
-        light_tile[x] = light_tile_resolved_samples[light_tile_start + x];
+    let tile_start = local_invocation_index * 4u;
+    for (var i = tile_start; i < tile_start + 4u; i++) {
+        light_tile[i] = light_tile_resolved_samples[light_tile_start + i];
     }
     workgroupBarrier();
     let start = rand_range_u(1024u - INITIAL_SAMPLES + 1u, rng);

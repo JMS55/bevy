@@ -98,7 +98,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var reservoir_target_function = 0.0;
     var weight_sum = 0.0;
     let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
-    var i = clamp(light_tile_start + rand_range_u(1024u, rng), 0u, 1024u * 128u - 32u);
+    var i = light_tile_start + rand_range_u(1024u - INITIAL_SAMPLES, rng);
     for (var j = 0u; j < INITIAL_SAMPLES; j++) {
         let resolved_light_sample = light_tile_resolved_samples[i];
 

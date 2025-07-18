@@ -293,7 +293,7 @@ fn pack_reservoir(reservoir: Reservoir, ray_origin: vec3<f32>) -> PackedReservoi
 fn unpack_reservoir(packed_reservoir: PackedReservoir, ray_origin: vec3<f32>, exposure: f32) -> Reservoir {
     let ray_direction = octahedral_decode(unpack2x16unorm(packed_reservoir.ray_direction));
     let sample_point_world_position = ray_origin + (ray_direction * packed_reservoir.hit_distance);
-    
+
     return Reservoir(
         sample_point_world_position,
         packed_reservoir.confidence_weight,

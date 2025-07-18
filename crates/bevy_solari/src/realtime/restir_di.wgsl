@@ -31,7 +31,7 @@ const CONFIDENCE_WEIGHT_CAP = 20.0;
 
 const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16, 1)
 fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
@@ -56,7 +56,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     di_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16, 1)
 fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 

@@ -26,7 +26,7 @@ var<push_constant> constants: PushConstants;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 30.0;
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16, 1)
 fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 
@@ -49,7 +49,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16, 1)
 fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
 

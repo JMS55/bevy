@@ -171,16 +171,16 @@ impl ViewNode for SolariLightingNode {
         pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
 
         pass.set_pipeline(di_initial_and_temporal_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
+        pass.dispatch_workgroups(viewport.x.div_ceil(16), viewport.y.div_ceil(16), 1);
 
         pass.set_pipeline(di_spatial_and_shade_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
+        pass.dispatch_workgroups(viewport.x.div_ceil(16), viewport.y.div_ceil(16), 1);
 
         pass.set_pipeline(gi_initial_and_temporal_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
+        pass.dispatch_workgroups(viewport.x.div_ceil(16), viewport.y.div_ceil(16), 1);
 
         pass.set_pipeline(gi_spatial_and_shade_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
+        pass.dispatch_workgroups(viewport.x.div_ceil(16), viewport.y.div_ceil(16), 1);
 
         pass_span.end(&mut pass);
         drop(pass);

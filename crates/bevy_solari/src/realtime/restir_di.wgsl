@@ -42,10 +42,10 @@ fn initial_and_temporal(
     @builtin(subgroup_size) subgroup_size: u32,
 ) {
     let global_index = (workgroup_id.y * num_workgroups.x + workgroup_id.x) * 64u + local_index;
-    var pixel_id = vec2(global_index % u32(view.viewport.z + 128.0), global_index / u32(view.viewport.z + 128.0));
+    var pixel_id = vec2(global_index % u32(view.viewport.z + 64.0), global_index / u32(view.viewport.z + 64.0));
 
     var frame_rng = constants.frame_index;
-    let jitter = rand_vec2f(&frame_rng) * 32.0 - 16.0;
+    let jitter = rand_vec2f(&frame_rng) * -64.0;
     let pixel_id_i = vec2<i32>(pixel_id) + vec2<i32>(jitter);
     pixel_id = vec2<u32>(pixel_id_i);
 

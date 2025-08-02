@@ -180,7 +180,7 @@ impl ViewNode for SolariLightingNode {
         pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
 
         pass.set_pipeline(di_initial_and_temporal_pipeline);
-        let total_workgroups = ((viewport.x + 128) * (viewport.y + 128)).div_ceil(64);
+        let total_workgroups = ((viewport.x + 64) * (viewport.y + 64)).div_ceil(64);
         let dispatch_x = (total_workgroups as f32).sqrt().ceil() as u32;
         let dispatch_y = total_workgroups.div_ceil(dispatch_x);
         pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);

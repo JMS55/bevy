@@ -5,7 +5,7 @@
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
-#import bevy_pbr::utils::{rand_f, rand_vec2f, rand_range_u, octahedral_decode}
+#import bevy_pbr::utils::{rand_f, rand_range_u, octahedral_encode, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
@@ -157,8 +157,8 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
 }
 
 var<workgroup> wg_reservoirs: array<Reservoir, 64>;
-var<workgroup> wg_positions: array<vec3<f32>, 64>;
-var<workgroup> wg_normals: array<vec3<f32>, 64>;
+var<workgroup> wg_depths: array<f32, 64>;
+var<workgroup> wg_normals: array<u32, 64>;
 
 fn load_spatial_reservoir(
     canonical_reservoir: Reservoir,
@@ -172,8 +172,8 @@ fn load_spatial_reservoir(
     jitter: vec2<f32>,
 ) -> Reservoir {
     wg_reservoirs[thread_index] = canonical_reservoir;
-    wg_positions[thread_index] = world_position;
-    wg_normals[thread_index] = world_normal;
+    wg_depths[thread_index] = depth;
+    wg_normals[thread_index] = pack2x16unorm(octahedral_encode(world_normal));
     workgroupBarrier();
 
     var confidence_weight_sum = 0.0;
@@ -185,8 +185,8 @@ fn load_spatial_reservoir(
         if any(pixel_id_f < vec2(0.0)) || any(pixel_id_f >= view.viewport.zw) { continue; }
 
         let reservoir_i = workgroupUniformLoad(&wg_reservoirs[i]);
-        let world_position_i = workgroupUniformLoad(&wg_positions[i]);
-        let world_normal_i = workgroupUniformLoad(&wg_normals[i]);
+        let world_position_i = reconstruct_world_position(vec2<u32>(pixel_id_f), workgroupUniformLoad(&wg_depths[i]));
+        let world_normal_i = octahedral_decode(unpack2x16unorm(workgroupUniformLoad(&wg_normals[i])));
 
         if thread_index != i && !pixel_dissimilar(depth, world_position, world_position_i, world_normal, world_normal_i) {
             confidence_weight_sum += reservoir_i.confidence_weight;

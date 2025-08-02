@@ -5,7 +5,7 @@
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
-#import bevy_pbr::utils::{rand_f, rand_range_u, octahedral_decode}
+#import bevy_pbr::utils::{rand_f, rand_vec2f, rand_range_u, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
@@ -36,19 +36,27 @@ const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 @compute @workgroup_size(64, 1, 1)
 fn initial_and_temporal(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
-    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
     @builtin(subgroup_invocation_id) subgroup_id: u32,
     @builtin(subgroup_size) subgroup_size: u32,
 ) {
-    let pixel_id = vec2(global_id.x % u32(view.viewport.z), global_id.x / u32(view.viewport.z));
+    let global_index = (workgroup_id.y * num_workgroups.x + workgroup_id.x) * 64u + local_index;
+    var pixel_id = vec2(global_index % u32(view.viewport.z + 128.0), global_index / u32(view.viewport.z + 128.0));
 
-    if any(pixel_id >= vec2u(view.viewport.zw)) { return; }
+    var frame_rng = constants.frame_index;
+    let jitter = rand_vec2f(&frame_rng) * 32.0 - 16.0;
+    let pixel_id_i = vec2<i32>(pixel_id) + vec2<i32>(jitter);
+    pixel_id = vec2<u32>(pixel_id_i);
 
-    var rng = global_id.x + constants.frame_index;
+    if any(pixel_id_i < vec2(0)) || any(pixel_id_i >= vec2<i32>(view.viewport.zw)) { return; }
+
+    let pixel_index = pixel_id.x + pixel_id.y * u32(view.viewport.z);
+    var rng = pixel_index + constants.frame_index;
 
     let depth = textureLoad(depth_buffer, pixel_id, 0);
     if depth == 0.0 {
-        di_reservoirs_b[global_id.x] = empty_reservoir();
+        di_reservoirs_b[pixel_index] = empty_reservoir();
         return;
     }
     let gpixel = textureLoad(gbuffer, pixel_id, 0);
@@ -58,14 +66,14 @@ fn initial_and_temporal(
     let diffuse_brdf = base_color / PI;
     let emissive = rgb9e5_to_vec3_(gpixel.g);
 
-    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, workgroup_id.x, &rng);
+    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, workgroup_id.xy, &rng);
     let temporal_reservoir = load_temporal_reservoir(pixel_id, depth, world_position, world_normal);
     let initial_and_temporal_reservoir = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng).merged_reservoir;
     let spatial_reservoir = load_spatial_reservoir(initial_and_temporal_reservoir, depth, world_position, world_normal, diffuse_brdf,
         &rng, subgroup_id, subgroup_size);
     let final_merge = merge_reservoirs(initial_and_temporal_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
 
-    di_reservoirs_b[global_id.x] = final_merge.merged_reservoir;
+    di_reservoirs_b[pixel_index] = final_merge.merged_reservoir;
 
     var pixel_color = final_merge.selected_sample_radiance * final_merge.merged_reservoir.unbiased_contribution_weight;
     pixel_color *= view.exposure;
@@ -74,8 +82,8 @@ fn initial_and_temporal(
     textureStore(view_output, pixel_id, vec4(pixel_color, 1.0));
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: u32, rng: ptr<function, u32>) -> Reservoir {
-    var workgroup_rng = workgroup_id;
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
+    var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
     var reservoir = empty_reservoir();

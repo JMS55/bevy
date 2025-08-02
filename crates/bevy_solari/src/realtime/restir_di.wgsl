@@ -33,32 +33,25 @@ const CONFIDENCE_WEIGHT_CAP = 20.0;
 
 const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 
-@compute @workgroup_size(64, 1, 1)
+@compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
-    @builtin(num_workgroups) num_workgroups: vec3<u32>,
-    @builtin(local_invocation_index) local_index: u32,
-    @builtin(subgroup_invocation_id) subgroup_id: u32,
-    @builtin(subgroup_size) subgroup_size: u32,
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_index) thread_index: u32,
 ) {
-    let global_index = (workgroup_id.y * num_workgroups.x + workgroup_id.x) * 64u + local_index;
-    var pixel_id = vec2(global_index % u32(view.viewport.z + 64.0), global_index / u32(view.viewport.z + 64.0));
-
-    var frame_rng = constants.frame_index;
-    let jitter = rand_vec2f(&frame_rng) * -64.0;
-    let pixel_id_i = vec2<i32>(pixel_id) + vec2<i32>(jitter);
-    pixel_id = vec2<u32>(pixel_id_i);
-
-    if any(pixel_id_i < vec2(0)) || any(pixel_id_i >= vec2<i32>(view.viewport.zw)) { return; }
+    let frame_offset = (constants.frame_index / 5782582u) % 4u;
+    let half_workgroup_size = 8.0 / 2.0;
+    let jitter = half_workgroup_size * vec2(
+        f32(frame_offset & 1u),
+        f32((frame_offset >> 1u) & 1u)
+    );
+    let pixel_id_f = vec2<f32>(global_id.xy) - jitter;
+    let pixel_id = vec2<u32>(clamp(pixel_id_f, vec2(0.0), view.viewport.zw - 1.0));
 
     let pixel_index = pixel_id.x + pixel_id.y * u32(view.viewport.z);
     var rng = pixel_index + constants.frame_index;
 
     let depth = textureLoad(depth_buffer, pixel_id, 0);
-    if depth == 0.0 {
-        di_reservoirs_b[pixel_index] = empty_reservoir();
-        return;
-    }
     let gpixel = textureLoad(gbuffer, pixel_id, 0);
     let world_position = reconstruct_world_position(pixel_id, depth);
     let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
@@ -69,9 +62,10 @@ fn initial_and_temporal(
     let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, workgroup_id.xy, &rng);
     let temporal_reservoir = load_temporal_reservoir(pixel_id, depth, world_position, world_normal);
     let initial_and_temporal_reservoir = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng).merged_reservoir;
-    let spatial_reservoir = load_spatial_reservoir(initial_and_temporal_reservoir, depth, world_position, world_normal, diffuse_brdf,
-        &rng, subgroup_id, subgroup_size);
+    let spatial_reservoir = load_spatial_reservoir(initial_and_temporal_reservoir, depth, world_position, world_normal, diffuse_brdf, &rng, workgroup_id.xy, thread_index, jitter);
     let final_merge = merge_reservoirs(initial_and_temporal_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
+
+    if any(pixel_id_f < vec2(0.0)) || any(pixel_id_f >= view.viewport.zw) { return; }
 
     di_reservoirs_b[pixel_index] = final_merge.merged_reservoir;
 
@@ -162,6 +156,10 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     return temporal_reservoir;
 }
 
+var<workgroup> wg_reservoirs: array<Reservoir, 64>;
+var<workgroup> wg_positions: array<vec3<f32>, 64>;
+var<workgroup> wg_normals: array<vec3<f32>, 64>;
+
 fn load_spatial_reservoir(
     canonical_reservoir: Reservoir,
     depth: f32,
@@ -169,23 +167,30 @@ fn load_spatial_reservoir(
     world_normal: vec3<f32>,
     diffuse_brdf: vec3<f32>,
     rng: ptr<function, u32>,
-    subgroup_id: u32,
-    subgroup_size: u32,
+    workgroup_id: vec2<u32>,
+    thread_index: u32,
+    jitter: vec2<f32>,
 ) -> Reservoir {
-    let active_threads = subgroupBallot(true);
+    wg_reservoirs[thread_index] = canonical_reservoir;
+    wg_positions[thread_index] = world_position;
+    wg_normals[thread_index] = world_normal;
+    workgroupBarrier();
 
     var confidence_weight_sum = 0.0;
-    var reusable_threads = vec4(0u);
-    for (var i = 0u; i < subgroup_size; i++) {
-        if !subgroupBallotBitExtract(active_threads, i) { continue; }
+    var reusable_threads = vec2(0u);
+    for (var i = 0u; i < 64u; i++) {
+        let local_id = vec2(i % 8u, i / 8u);
+        let global_id = workgroup_id * 8u + local_id;
+        let pixel_id_f = vec2<f32>(global_id) - jitter;
+        if any(pixel_id_f < vec2(0.0)) || any(pixel_id_f >= view.viewport.zw) { continue; }
 
-        let world_position_i = subgroupBroadcast(world_position, i);
-        let world_normal_i = subgroupBroadcast(world_normal, i);
-        let confidence_weight_i = subgroupBroadcast(canonical_reservoir.confidence_weight, i);
+        let reservoir_i = workgroupUniformLoad(&wg_reservoirs[i]);
+        let world_position_i = workgroupUniformLoad(&wg_positions[i]);
+        let world_normal_i = workgroupUniformLoad(&wg_normals[i]);
 
-        if subgroup_id != i && !pixel_dissimilar(depth, world_position, world_position_i, world_normal, world_normal_i) {
-            confidence_weight_sum += confidence_weight_i;
-            reusable_threads = subgroupBallotBitSet(reusable_threads, i);
+        if thread_index != i && !pixel_dissimilar(depth, world_position, world_position_i, world_normal, world_normal_i) {
+            confidence_weight_sum += reservoir_i.confidence_weight;
+            reusable_threads = workgroupBitmaskSet(reusable_threads, i);
         }
     }
 
@@ -195,17 +200,10 @@ fn load_spatial_reservoir(
     var weight_sum = 0.0;
     let mis_weight_denominator = select(0.0, 1.0 / confidence_weight_sum, confidence_weight_sum > 0.0);
     var selected_target_function = 0.0;
-    for (var i = 0u; i < subgroup_size; i++) {
-        if !subgroupBallotBitExtract(active_threads, i) { continue; }
+    for (var i = 0u; i < 64u; i++) {
+        let reservoir_i = workgroupUniformLoad(&wg_reservoirs[i]);
 
-        let sample_i = subgroupBroadcast(vec2(canonical_reservoir.sample.light_id, canonical_reservoir.sample.seed), i);
-        let reservoir_i = Reservoir(
-            LightSample(sample_i.x, sample_i.y),
-            subgroupBroadcast(canonical_reservoir.confidence_weight, i),
-            subgroupBroadcast(canonical_reservoir.unbiased_contribution_weight, i),
-        );
-
-        if !subgroupBallotBitExtract(reusable_threads, i) { continue; }
+        if !workgroupBitmaskExtract(reusable_threads, i) { continue; }
 
         let mis_weight = reservoir_i.confidence_weight * mis_weight_denominator;
         let target_function = reservoir_target_function(reservoir_i, world_position, world_normal, diffuse_brdf).a;
@@ -334,20 +332,18 @@ fn reservoir_target_function(reservoir: Reservoir, world_position: vec3<f32>, wo
     return vec4(light_contribution, target_function);
 }
 
-fn subgroupBallotBitExtract(ballot: vec4<u32>, bit_index: u32) -> bool {
+fn workgroupBitmaskExtract(mask: vec2<u32>, bit_index: u32) -> bool {
     let component_index = bit_index / 32u;
     let bit_offset = bit_index % 32u;
-    return (ballot[component_index] & (1u << bit_offset)) != 0u;
+    return (mask[component_index] & (1u << bit_offset)) != 0u;
 }
 
-fn subgroupBallotBitSet(ballot: vec4<u32>, bit_index: u32) -> vec4<u32> {
+fn workgroupBitmaskSet(mask: vec2<u32>, bit_index: u32) -> vec2<u32> {
     let component_index = bit_index / 32u;
     let bit_offset = bit_index % 32u;
     let bit_mask = 1u << bit_offset;
-    return vec4(
-        select(ballot.x, ballot.x | bit_mask, component_index == 0u),
-        select(ballot.y, ballot.y | bit_mask, component_index == 1u),
-        select(ballot.z, ballot.z | bit_mask, component_index == 2u),
-        select(ballot.w, ballot.w | bit_mask, component_index == 3u),
+    return vec2(
+        select(mask.x, mask.x | bit_mask, component_index == 0u),
+        select(mask.y, mask.y | bit_mask, component_index == 1u),
     );
 }

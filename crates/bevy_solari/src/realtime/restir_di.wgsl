@@ -5,7 +5,7 @@
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
-#import bevy_pbr::utils::{rand_f, rand_range_u, octahedral_decode, sample_disk}
+#import bevy_pbr::utils::{rand_f, rand_range_u, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
@@ -33,67 +33,49 @@ const CONFIDENCE_WEIGHT_CAP = 20.0;
 
 const NULL_RESERVOIR_SAMPLE = 0xFFFFFFFFu;
 
-@compute @workgroup_size(8, 8, 1)
-fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
-    if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
+@compute @workgroup_size(64, 1, 1)
+fn initial_and_temporal(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(subgroup_invocation_id) subgroup_id: u32,
+    @builtin(subgroup_size) subgroup_size: u32,
+) {
+    let pixel_id = vec2(global_id.x % u32(view.viewport.z), global_id.x / u32(view.viewport.z));
 
-    let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
-    var rng = pixel_index + constants.frame_index;
+    if any(pixel_id >= vec2u(view.viewport.zw)) { return; }
 
-    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    var rng = global_id.x + constants.frame_index;
+
+    let depth = textureLoad(depth_buffer, pixel_id, 0);
     if depth == 0.0 {
-        di_reservoirs_b[pixel_index] = empty_reservoir();
+        di_reservoirs_b[global_id.x] = empty_reservoir();
         return;
     }
-    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
-    let world_position = reconstruct_world_position(global_id.xy, depth);
-    let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
-    let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
-    let diffuse_brdf = base_color / PI;
-
-    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, workgroup_id.xy, &rng);
-    let temporal_reservoir = load_temporal_reservoir(global_id.xy, depth, world_position, world_normal);
-    let merge_result = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng);
-
-    di_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
-}
-
-@compute @workgroup_size(8, 8, 1)
-fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if any(global_id.xy >= vec2u(view.viewport.zw)) { return; }
-
-    let pixel_index = global_id.x + global_id.y * u32(view.viewport.z);
-    var rng = pixel_index + constants.frame_index;
-
-    let depth = textureLoad(depth_buffer, global_id.xy, 0);
-    if depth == 0.0 {
-        di_reservoirs_a[pixel_index] = empty_reservoir();
-        textureStore(view_output, global_id.xy, vec4(vec3(0.0), 1.0));
-        return;
-    }
-    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
-    let world_position = reconstruct_world_position(global_id.xy, depth);
+    let gpixel = textureLoad(gbuffer, pixel_id, 0);
+    let world_position = reconstruct_world_position(pixel_id, depth);
     let world_normal = octahedral_decode(unpack_24bit_normal(gpixel.a));
     let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
     let diffuse_brdf = base_color / PI;
     let emissive = rgb9e5_to_vec3_(gpixel.g);
 
-    let input_reservoir = di_reservoirs_b[pixel_index];
-    let spatial_reservoir = load_spatial_reservoir(global_id.xy, depth, world_position, world_normal, &rng);
-    let merge_result = merge_reservoirs(input_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
-    let combined_reservoir = merge_result.merged_reservoir;
+    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, diffuse_brdf, workgroup_id.x, &rng);
+    let temporal_reservoir = load_temporal_reservoir(pixel_id, depth, world_position, world_normal);
+    let initial_and_temporal_reservoir = merge_reservoirs(initial_reservoir, temporal_reservoir, world_position, world_normal, diffuse_brdf, &rng).merged_reservoir;
+    let spatial_reservoir = load_spatial_reservoir(initial_and_temporal_reservoir, depth, world_position, world_normal, diffuse_brdf,
+        &rng, subgroup_id, subgroup_size);
+    let final_merge = merge_reservoirs(initial_and_temporal_reservoir, spatial_reservoir, world_position, world_normal, diffuse_brdf, &rng);
 
-    di_reservoirs_a[pixel_index] = combined_reservoir;
+    di_reservoirs_b[global_id.x] = final_merge.merged_reservoir;
 
-    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;
+    var pixel_color = final_merge.selected_sample_radiance * final_merge.merged_reservoir.unbiased_contribution_weight;
     pixel_color *= view.exposure;
     pixel_color *= diffuse_brdf;
     pixel_color += emissive;
-    textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+    textureStore(view_output, pixel_id, vec4(pixel_color, 1.0));
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
-    var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: u32, rng: ptr<function, u32>) -> Reservoir {
+    var workgroup_rng = workgroup_id;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
     var reservoir = empty_reservoir();
@@ -172,32 +154,70 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     return temporal_reservoir;
 }
 
-fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
-    let spatial_pixel_id = get_neighbor_pixel_id(pixel_id, rng);
+fn load_spatial_reservoir(
+    canonical_reservoir: Reservoir,
+    depth: f32,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    diffuse_brdf: vec3<f32>,
+    rng: ptr<function, u32>,
+    subgroup_id: u32,
+    subgroup_size: u32,
+) -> Reservoir {
+    let active_threads = subgroupBallot(true);
 
-    let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
-    let spatial_gpixel = textureLoad(gbuffer, spatial_pixel_id, 0);
-    let spatial_world_position = reconstruct_world_position(spatial_pixel_id, spatial_depth);
-    let spatial_world_normal = octahedral_decode(unpack_24bit_normal(spatial_gpixel.a));
-    if pixel_dissimilar(depth, world_position, spatial_world_position, world_normal, spatial_world_normal) {
-        return empty_reservoir();
+    var confidence_weight_sum = 0.0;
+    var reusable_threads = vec4(0u);
+    for (var i = 0u; i < subgroup_size; i++) {
+        if !subgroupBallotBitExtract(active_threads, i) { continue; }
+
+        let world_position_i = subgroupBroadcast(world_position, i);
+        let world_normal_i = subgroupBroadcast(world_normal, i);
+        let confidence_weight_i = subgroupBroadcast(canonical_reservoir.confidence_weight, i);
+
+        if subgroup_id != i && !pixel_dissimilar(depth, world_position, world_position_i, world_normal, world_normal_i) {
+            confidence_weight_sum += confidence_weight_i;
+            reusable_threads = subgroupBallotBitSet(reusable_threads, i);
+        }
     }
 
-    let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.viewport.z);
-    var spatial_reservoir = di_reservoirs_b[spatial_pixel_index];
+    var spatial_reservoir = empty_reservoir();
+    spatial_reservoir.confidence_weight = min(confidence_weight_sum, CONFIDENCE_WEIGHT_CAP);
+
+    var weight_sum = 0.0;
+    let mis_weight_denominator = select(0.0, 1.0 / confidence_weight_sum, confidence_weight_sum > 0.0);
+    var selected_target_function = 0.0;
+    for (var i = 0u; i < subgroup_size; i++) {
+        if !subgroupBallotBitExtract(active_threads, i) { continue; }
+
+        let sample_i = subgroupBroadcast(vec2(canonical_reservoir.sample.light_id, canonical_reservoir.sample.seed), i);
+        let reservoir_i = Reservoir(
+            LightSample(sample_i.x, sample_i.y),
+            subgroupBroadcast(canonical_reservoir.confidence_weight, i),
+            subgroupBroadcast(canonical_reservoir.unbiased_contribution_weight, i),
+        );
+
+        if !subgroupBallotBitExtract(reusable_threads, i) { continue; }
+
+        let mis_weight = reservoir_i.confidence_weight * mis_weight_denominator;
+        let target_function = reservoir_target_function(reservoir_i, world_position, world_normal, diffuse_brdf).a;
+        let resampling_weight = mis_weight * (target_function * reservoir_i.unbiased_contribution_weight);
+        weight_sum += resampling_weight;
+        if rand_f(rng) < resampling_weight / weight_sum {
+            spatial_reservoir.sample = reservoir_i.sample;
+            selected_target_function = target_function;
+        }
+    }
 
     if reservoir_valid(spatial_reservoir) {
+        let inverse_target_function = select(0.0, 1.0 / selected_target_function, selected_target_function > 0.0);
+        spatial_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
+
         let resolved_light_sample = resolve_light_sample(spatial_reservoir.sample, light_sources[spatial_reservoir.sample.light_id >> 16u]);
         spatial_reservoir.unbiased_contribution_weight *= trace_light_visibility(world_position, resolved_light_sample.world_position);
     }
 
     return spatial_reservoir;
-}
-
-fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, rng: ptr<function, u32>) -> vec2<u32> {
-    var spatial_id = vec2<f32>(center_pixel_id) + sample_disk(SPATIAL_REUSE_RADIUS_PIXELS, rng);
-    spatial_id = clamp(spatial_id, vec2(0.0), view.viewport.zw - 1.0);
-    return vec2<u32>(spatial_id);
 }
 
 fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
@@ -304,4 +324,22 @@ fn reservoir_target_function(reservoir: Reservoir, world_position: vec3<f32>, wo
     let light_contribution = resolve_and_calculate_light_contribution(reservoir.sample, world_position, world_normal).radiance;
     let target_function = luminance(light_contribution * diffuse_brdf);
     return vec4(light_contribution, target_function);
+}
+
+fn subgroupBallotBitExtract(ballot: vec4<u32>, bit_index: u32) -> bool {
+    let component_index = bit_index / 32u;
+    let bit_offset = bit_index % 32u;
+    return (ballot[component_index] & (1u << bit_offset)) != 0u;
+}
+
+fn subgroupBallotBitSet(ballot: vec4<u32>, bit_index: u32) -> vec4<u32> {
+    let component_index = bit_index / 32u;
+    let bit_offset = bit_index % 32u;
+    let bit_mask = 1u << bit_offset;
+    return vec4(
+        select(ballot.x, ballot.x | bit_mask, component_index == 0u),
+        select(ballot.y, ballot.y | bit_mask, component_index == 1u),
+        select(ballot.z, ballot.z | bit_mask, component_index == 2u),
+        select(ballot.w, ballot.w | bit_mask, component_index == 3u),
+    );
 }

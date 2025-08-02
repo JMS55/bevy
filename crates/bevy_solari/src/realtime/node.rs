@@ -41,7 +41,6 @@ pub struct SolariLightingNode {
     bind_group_layout: BindGroupLayout,
     presample_light_tiles_pipeline: CachedComputePipelineId,
     di_initial_and_temporal_pipeline: CachedComputePipelineId,
-    di_spatial_and_shade_pipeline: CachedComputePipelineId,
     gi_initial_and_temporal_pipeline: CachedComputePipelineId,
     gi_spatial_and_shade_pipeline: CachedComputePipelineId,
 }
@@ -80,7 +79,6 @@ impl ViewNode for SolariLightingNode {
         let (
             Some(presample_light_tiles_pipeline),
             Some(di_initial_and_temporal_pipeline),
-            Some(di_spatial_and_shade_pipeline),
             Some(gi_initial_and_temporal_pipeline),
             Some(gi_spatial_and_shade_pipeline),
             Some(scene_bindings),
@@ -93,7 +91,6 @@ impl ViewNode for SolariLightingNode {
         ) = (
             pipeline_cache.get_compute_pipeline(self.presample_light_tiles_pipeline),
             pipeline_cache.get_compute_pipeline(self.di_initial_and_temporal_pipeline),
-            pipeline_cache.get_compute_pipeline(self.di_spatial_and_shade_pipeline),
             pipeline_cache.get_compute_pipeline(self.gi_initial_and_temporal_pipeline),
             pipeline_cache.get_compute_pipeline(self.gi_spatial_and_shade_pipeline),
             &scene_bindings.bind_group,
@@ -119,12 +116,24 @@ impl ViewNode for SolariLightingNode {
                 solari_lighting_resources
                     .light_tile_resolved_samples
                     .as_entire_binding(),
-                solari_lighting_resources
-                    .di_reservoirs_a
-                    .as_entire_binding(),
-                solari_lighting_resources
-                    .di_reservoirs_b
-                    .as_entire_binding(),
+                if frame_count.0 % 2 == 0 {
+                    solari_lighting_resources
+                        .di_reservoirs_a
+                        .as_entire_binding()
+                } else {
+                    solari_lighting_resources
+                        .di_reservoirs_b
+                        .as_entire_binding()
+                },
+                if frame_count.0 % 2 == 0 {
+                    solari_lighting_resources
+                        .di_reservoirs_b
+                        .as_entire_binding()
+                } else {
+                    solari_lighting_resources
+                        .di_reservoirs_a
+                        .as_entire_binding()
+                },
                 solari_lighting_resources
                     .gi_reservoirs_a
                     .as_entire_binding(),
@@ -171,10 +180,7 @@ impl ViewNode for SolariLightingNode {
         pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
 
         pass.set_pipeline(di_initial_and_temporal_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
-
-        pass.set_pipeline(di_spatial_and_shade_pipeline);
-        pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
+        pass.dispatch_workgroups((viewport.x * viewport.y).div_ceil(64), 1, 1);
 
         pass.set_pipeline(gi_initial_and_temporal_pipeline);
         pass.dispatch_workgroups(viewport.x.div_ceil(8), viewport.y.div_ceil(8), 1);
@@ -273,11 +279,6 @@ impl FromWorld for SolariLightingNode {
             di_initial_and_temporal_pipeline: create_pipeline(
                 "solari_lighting_di_initial_and_temporal_pipeline",
                 "initial_and_temporal",
-                load_embedded_asset!(world, "restir_di.wgsl"),
-            ),
-            di_spatial_and_shade_pipeline: create_pipeline(
-                "solari_lighting_di_spatial_and_shade_pipeline",
-                "spatial_and_shade",
                 load_embedded_asset!(world, "restir_di.wgsl"),
             ),
             gi_initial_and_temporal_pipeline: create_pipeline(

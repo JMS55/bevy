@@ -1,7 +1,7 @@
 #import bevy_pbr::utils::sample_cosine_hemisphere
 #import bevy_render::view::View
 #import bevy_solari::sampling::sample_random_light
-#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
+#import bevy_solari::scene_bindings::{trace_ray_geometric, RAY_T_MIN, RAY_T_MAX}
 #import bevy_solari::world_cache::{
     WORLD_CACHE_MAX_TEMPORAL_SAMPLES,
     query_world_cache,
@@ -33,9 +33,8 @@ fn sample_radiance(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 
 #ifndef NO_MULTIBOUNCE
         let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
-        let ray_hit = trace_ray(geometry_data.world_position, ray_direction, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
-        if ray_hit.kind != RAY_QUERY_INTERSECTION_NONE {
-            let ray_hit = resolve_ray_hit_full(ray_hit);
+        let ray_hit = trace_ray_geometric(geometry_data.world_position, ray_direction, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+        if !ray_hit.ray_missed {
             new_radiance += ray_hit.material.base_color * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position);
         }
 #endif

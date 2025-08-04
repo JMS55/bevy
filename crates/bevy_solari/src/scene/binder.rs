@@ -288,6 +288,10 @@ impl FromWorld for RaytracingSceneBindings {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
 
+        let supports_ray_hit_vertex_return = render_device
+            .features()
+            .contains(WgpuFeatures::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN);
+
         Self {
             bind_group: None,
             bind_group_layout: render_device.create_bind_group_layout(
@@ -301,7 +305,7 @@ impl FromWorld for RaytracingSceneBindings {
                             .count(MAX_TEXTURE_COUNT),
                         sampler(SamplerBindingType::Filtering).count(MAX_TEXTURE_COUNT),
                         storage_buffer_read_only_sized(false, None),
-                        acceleration_structure(),
+                        acceleration_structure_vertex_return(supports_ray_hit_vertex_return),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
@@ -311,9 +315,7 @@ impl FromWorld for RaytracingSceneBindings {
                     ),
                 ),
             ),
-            supports_ray_hit_vertex_return: render_device
-                .features()
-                .contains(WgpuFeatures::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN),
+            supports_ray_hit_vertex_return,
             previous_frame_light_entities: Vec::new(),
         }
     }

@@ -46,6 +46,10 @@ pub fn prepare_raytracing_blas(
         return;
     }
 
+    let supports_ray_hit_vertex_return = render_device
+        .features()
+        .contains(WgpuFeatures::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN);
+
     // Create new BLAS for added or changed meshes
     let blas_resources = extracted_meshes
         .extracted
@@ -55,8 +59,13 @@ pub fn prepare_raytracing_blas(
             let vertex_slice = mesh_allocator.mesh_vertex_slice(asset_id).unwrap();
             let index_slice = mesh_allocator.mesh_index_slice(asset_id).unwrap();
 
-            let (blas, blas_size) =
-                allocate_blas(&vertex_slice, &index_slice, asset_id, &render_device);
+            let (blas, blas_size) = allocate_blas(
+                &vertex_slice,
+                &index_slice,
+                asset_id,
+                &render_device,
+                supports_ray_hit_vertex_return,
+            );
 
             blas_manager.insert(*asset_id, blas);
 
@@ -97,6 +106,7 @@ fn allocate_blas(
     index_slice: &MeshBufferSlice,
     asset_id: &AssetId<Mesh>,
     render_device: &RenderDevice,
+    supports_ray_hit_vertex_return: bool,
 ) -> (Blas, BlasTriangleGeometrySizeDescriptor) {
     let blas_size = BlasTriangleGeometrySizeDescriptor {
         vertex_format: Mesh::ATTRIBUTE_POSITION.format,
@@ -106,10 +116,15 @@ fn allocate_blas(
         flags: AccelerationStructureGeometryFlags::OPAQUE,
     };
 
+    let mut flags = AccelerationStructureFlags::PREFER_FAST_TRACE;
+    if supports_ray_hit_vertex_return {
+        flags |= AccelerationStructureFlags::ALLOW_RAY_HIT_VERTEX_RETURN;
+    }
+
     let blas = render_device.wgpu_device().create_blas(
         &CreateBlasDescriptor {
             label: Some(&asset_id.to_string()),
-            flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
+            flags,
             update_mode: AccelerationStructureUpdateMode::Build,
         },
         BlasGeometrySizeDescriptors::Triangles {

@@ -132,7 +132,7 @@ fn trace_ray_geometric(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_mi
         result.world_position = (ray_hit.object_to_world * vec4(local_position, 1.0)).xyz;
 
         let geometric_local_normal = cross(vertex_positions[1] - vertex_positions[0], vertex_positions[2] - vertex_positions[0]);
-        result.geometric_world_normal = normalize((geometric_world_position * ray_hit.world_to_object).xyz);
+        result.geometric_world_normal = normalize((geometric_local_normal * ray_hit.world_to_object).xyz);
 
         let material_id = material_ids[ray_hit.instance_index];
         let material = materials[material_id];
@@ -141,7 +141,7 @@ fn trace_ray_geometric(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_mi
         let ray_hit = resolve_ray_hit_full(ray_hit);
         result.world_position = ray_hit.world_position;
         result.geometric_world_normal = ray_hit.geometric_world_normal;
-        result.material = ray_hit.material;
+        result.material = ray_hit.material; // TODO: Don't apply texture maps for parity with RAY_HIT_VERTEX_RETURN path
 #endif
     }
 

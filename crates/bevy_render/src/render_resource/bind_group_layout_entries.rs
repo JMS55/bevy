@@ -583,10 +583,9 @@ pub mod binding_types {
         .into_bind_group_layout_entry_builder()
     }
 
-    pub fn acceleration_structure_vertex_return() -> BindGroupLayoutEntryBuilder {
-        BindingType::AccelerationStructure {
-            vertex_return: true,
-        }
-        .into_bind_group_layout_entry_builder()
+    pub fn acceleration_structure_vertex_return(
+        vertex_return: bool,
+    ) -> BindGroupLayoutEntryBuilder {
+        BindingType::AccelerationStructure { vertex_return }.into_bind_group_layout_entry_builder()
     }
 }

@@ -351,6 +351,9 @@ impl FromWorld for SolariLightingNode {
                 "WORLD_CACHE_SIZE".into(),
                 WORLD_CACHE_SIZE as u32,
             )];
+            if scene_bindings.supports_ray_hit_vertex_return {
+                shader_defs.push("RAY_HIT_VERTEX_RETURN".into());
+            }
             shader_defs.extend_from_slice(&extra_shader_defs);
 
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {

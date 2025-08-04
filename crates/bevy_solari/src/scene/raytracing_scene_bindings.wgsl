@@ -75,7 +75,11 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(2) var textures: binding_array<texture_2d<f32>>;
 @group(0) @binding(3) var samplers: binding_array<sampler>;
 @group(0) @binding(4) var<storage> materials: array<Material>;
+#ifdef RAY_HIT_VERTEX_RETURN
+@group(0) @binding(5) var tlas: acceleration_structure<vertex_return>;
+#else
 @group(0) @binding(5) var tlas: acceleration_structure;
+#endif
 @group(0) @binding(6) var<storage> transforms: array<mat4x4<f32>>;
 @group(0) @binding(7) var<storage> geometry_ids: array<InstanceGeometryIds>;
 @group(0) @binding(8) var<storage> material_ids: array<u32>; // TODO: Store material_id in instance_custom_index instead?
@@ -88,12 +92,60 @@ const RAY_T_MAX = 100000.0f;
 
 const RAY_NO_CULL = 0xFFu;
 
+#ifdef RAY_HIT_VERTEX_RETURN
+alias ray_query_type = ray_query<vertex_return>;
+#else
+alias ray_query_type = ray_query;
+#endif
+
 fn trace_ray(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> RayIntersection {
     let ray = RayDesc(ray_flag, RAY_NO_CULL, ray_t_min, ray_t_max, ray_origin, ray_direction);
-    var rq: ray_query;
+    var rq: ray_query_type;
     rayQueryInitialize(&rq, tlas, ray);
     rayQueryProceed(&rq);
     return rayQueryGetCommittedIntersection(&rq);
+}
+
+struct TraceRayGeometricResult {
+    ray_missed: bool,
+    world_position: vec3<f32>,
+    geometric_world_normal: vec3<f32>,
+    material: ResolvedMaterial,
+}
+
+fn trace_ray_geometric(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> TraceRayGeometricResult {
+    let ray = RayDesc(ray_flag, RAY_NO_CULL, ray_t_min, ray_t_max, ray_origin, ray_direction);
+    var rq: ray_query_type;
+    rayQueryInitialize(&rq, tlas, ray);
+    rayQueryProceed(&rq);
+    let ray_hit = rayQueryGetCommittedIntersection(&rq);
+
+    var result = TraceRayGeometricResult(ray_hit.kind == RAY_QUERY_INTERSECTION_NONE, vec3(0.0), vec3(0.0),
+        ResolvedMaterial(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0));
+
+    if !result.ray_missed {
+#ifdef RAY_HIT_VERTEX_RETURN
+        let vertex_positions = getCommittedHitVertexPositions(&rq);
+
+        let barycentrics = vec3(1.0 - ray_hit.barycentrics.x - ray_hit.barycentrics.y, ray_hit.barycentrics);
+        let local_position = vertex_positions[0] * barycentrics.x + vertex_positions[1] * barycentrics.y + vertex_positions[2] * barycentrics.z;
+        result.world_position = (ray_hit.object_to_world * vec4(local_position, 1.0)).xyz;
+
+        let geometric_local_normal = cross(vertex_positions[1] - vertex_positions[0], vertex_positions[2] - vertex_positions[0]);
+        result.geometric_world_normal = normalize((geometric_world_position * ray_hit.world_to_object).xyz);
+
+        let material_id = material_ids[ray_hit.instance_index];
+        let material = materials[material_id];
+        result.material = resolve_material_untextured(material); // TODO: Apply texture maps?
+#else
+        let ray_hit = resolve_ray_hit_full(ray_hit);
+        result.world_position = ray_hit.world_position;
+        result.geometric_world_normal = ray_hit.geometric_world_normal;
+        result.material = ray_hit.material;
+#endif
+    }
+
+    return result;
 }
 
 fn sample_texture(id: u32, uv: vec2<f32>) -> vec3<f32> {
@@ -144,6 +196,17 @@ fn resolve_material(material: Material, uv: vec2<f32>) -> ResolvedMaterial {
     }
     m.roughness = clamp(m.perceptual_roughness * m.perceptual_roughness, 0.001, 1.0);
 
+    return m;
+}
+
+fn resolve_material_untextured(material: Material) -> ResolvedMaterial {
+    var m: ResolvedMaterial;
+    m.base_color = material.base_color.rgb;
+    m.emissive = material.emissive.rgb;
+    m.reflectance = material.reflectance;
+    m.perceptual_roughness = material.perceptual_roughness;
+    m.metallic = material.metallic;
+    m.roughness = clamp(m.perceptual_roughness * m.perceptual_roughness, 0.001, 1.0);
     return m;
 }
 

@@ -34,6 +34,7 @@ const LIGHT_NOT_PRESENT_THIS_FRAME: u32 = u32::MAX;
 pub struct RaytracingSceneBindings {
     pub bind_group: Option<BindGroup>,
     pub bind_group_layout: BindGroupLayout,
+    pub supports_ray_hit_vertex_return: bool,
     previous_frame_light_entities: Vec<Entity>,
 }
 
@@ -66,19 +67,22 @@ pub fn prepare_raytracing_scene_bindings(
         return;
     }
 
+    let mut tlas_descriptor = CreateTlasDescriptor {
+        label: Some("tlas"),
+        flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
+        update_mode: AccelerationStructureUpdateMode::Build,
+        max_instances: instances_query.iter().len() as u32,
+    };
+    if raytracing_scene_bindings.supports_ray_hit_vertex_return {
+        tlas_descriptor.flags |= AccelerationStructureFlags::ALLOW_RAY_HIT_VERTEX_RETURN;
+    }
+
     let mut vertex_buffers = CachedBindingArray::new();
     let mut index_buffers = CachedBindingArray::new();
     let mut textures = CachedBindingArray::new();
     let mut samplers = Vec::new();
     let mut materials = StorageBufferList::<GpuMaterial>::default();
-    let mut tlas = render_device
-        .wgpu_device()
-        .create_tlas(&CreateTlasDescriptor {
-            label: Some("tlas"),
-            flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
-            update_mode: AccelerationStructureUpdateMode::Build,
-            max_instances: instances_query.iter().len() as u32,
-        });
+    let mut tlas = render_device.wgpu_device().create_tlas(&tlas_descriptor);
     let mut transforms = StorageBufferList::<Mat4>::default();
     let mut geometry_ids = StorageBufferList::<GpuInstanceGeometryIds>::default();
     let mut material_ids = StorageBufferList::<u32>::default();
@@ -307,6 +311,9 @@ impl FromWorld for RaytracingSceneBindings {
                     ),
                 ),
             ),
+            supports_ray_hit_vertex_return: render_device
+                .features()
+                .contains(WgpuFeatures::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN),
             previous_frame_light_entities: Vec::new(),
         }
     }

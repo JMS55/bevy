@@ -171,6 +171,8 @@ impl ViewNode for SolariLightingNode {
         let diagnostics = render_context.diagnostic_recorder();
         let command_encoder = render_context.command_encoder();
 
+        command_encoder.clear_buffer(&solari_lighting_resources.foo, 0, None);
+
         let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("solari_lighting"),
             timestamp_writes: None,

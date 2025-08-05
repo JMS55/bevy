@@ -227,7 +227,7 @@ pub fn prepare_solari_lighting_resources(
         let foo = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_foo"),
             size: size_of::<[f32; 3]>() as u64,
-            usage: BufferUsages::STORAGE,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 

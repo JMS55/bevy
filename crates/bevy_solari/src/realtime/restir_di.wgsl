@@ -24,6 +24,7 @@
 @group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
 @group(1) @binding(12) var<uniform> view: View;
 @group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(23) var<storage, read_write> total_radiance: vec3<f32>;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -85,9 +86,16 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     di_reservoirs_a[pixel_index] = combined_reservoir;
 
-    var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;
-    pixel_color *= view.exposure;
-    pixel_color *= diffuse_brdf;
+    let f_g = (merge_result.selected_sample_radiance * diffuse_brdf * view.exposure) * combined_reservoir.unbiased_contribution_weight;
+
+    let w = resolve_light_sample(combined_reservoir.sample, light_sources[combined_reservoir.sample.light_id >> 16u]);
+    let sample_power = w.radiance * view.exposure;
+    var h_g = (sample_power / total_radiance) * combined_reservoir.unbiased_contribution_weight;
+    if all(h_g == vec3(0.0)) {
+        h_g = vec3(1.0);
+    }
+
+    var pixel_color = f_g / h_g;
     pixel_color += emissive;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }

@@ -56,6 +56,8 @@ pub struct SolariLightingResources {
     pub world_cache_active_cell_indices: Buffer,
     pub world_cache_active_cells_count: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    pub foo: Buffer,
+    pub bar: Buffer,
     pub view_size: UVec2,
 }
 
@@ -222,6 +224,20 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let foo = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_foo"),
+            size: size_of::<[f32; 3]>() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let bar = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_bar"),
+            size: size_of::<[f32; 3]>() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         commands.entity(entity).insert(SolariLightingResources {
             light_tile_samples,
             light_tile_resolved_samples,
@@ -241,6 +257,8 @@ pub fn prepare_solari_lighting_resources(
             world_cache_active_cell_indices,
             world_cache_active_cells_count,
             world_cache_active_cells_dispatch,
+            foo,
+            bar,
             view_size,
         });
     }

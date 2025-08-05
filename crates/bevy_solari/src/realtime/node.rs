@@ -46,6 +46,7 @@ pub struct SolariLightingNode {
     sample_for_world_cache_pipeline: CachedComputePipelineId,
     blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
+    combine_pipeline: CachedComputePipelineId,
     di_initial_and_temporal_pipeline: CachedComputePipelineId,
     di_spatial_and_shade_pipeline: CachedComputePipelineId,
     gi_initial_and_temporal_pipeline: CachedComputePipelineId,
@@ -89,6 +90,7 @@ impl ViewNode for SolariLightingNode {
             Some(sample_for_world_cache_pipeline),
             Some(blend_new_world_cache_samples_pipeline),
             Some(presample_light_tiles_pipeline),
+            Some(combine_pipeline),
             Some(di_initial_and_temporal_pipeline),
             Some(di_spatial_and_shade_pipeline),
             Some(gi_initial_and_temporal_pipeline),
@@ -108,6 +110,7 @@ impl ViewNode for SolariLightingNode {
             pipeline_cache.get_compute_pipeline(self.sample_for_world_cache_pipeline),
             pipeline_cache.get_compute_pipeline(self.blend_new_world_cache_samples_pipeline),
             pipeline_cache.get_compute_pipeline(self.presample_light_tiles_pipeline),
+            pipeline_cache.get_compute_pipeline(self.combine_pipeline),
             pipeline_cache.get_compute_pipeline(self.di_initial_and_temporal_pipeline),
             pipeline_cache.get_compute_pipeline(self.di_spatial_and_shade_pipeline),
             pipeline_cache.get_compute_pipeline(self.gi_initial_and_temporal_pipeline),
@@ -151,6 +154,8 @@ impl ViewNode for SolariLightingNode {
                 s.world_cache_b.as_entire_binding(),
                 s.world_cache_active_cell_indices.as_entire_binding(),
                 s.world_cache_active_cells_count.as_entire_binding(),
+                s.foo.as_entire_binding(),
+                s.bar.as_entire_binding(),
             )),
         );
         let bind_group_world_cache_active_cells_dispatch =
@@ -223,6 +228,13 @@ impl ViewNode for SolariLightingNode {
         );
         pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
 
+        pass.set_pipeline(combine_pipeline);
+        pass.set_push_constants(
+            0,
+            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        );
+        pass.dispatch_workgroups(1, 1, 1);
+
         pass.set_pipeline(di_initial_and_temporal_pipeline);
         pass.set_push_constants(
             0,
@@ -237,19 +249,19 @@ impl ViewNode for SolariLightingNode {
         );
         pass.dispatch_workgroups(dx, dy, 1);
 
-        pass.set_pipeline(gi_initial_and_temporal_pipeline);
-        pass.set_push_constants(
-            0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-        );
-        pass.dispatch_workgroups(dx, dy, 1);
+        // pass.set_pipeline(gi_initial_and_temporal_pipeline);
+        // pass.set_push_constants(
+        //     0,
+        //     bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        // );
+        // pass.dispatch_workgroups(dx, dy, 1);
 
-        pass.set_pipeline(gi_spatial_and_shade_pipeline);
-        pass.set_push_constants(
-            0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-        );
-        pass.dispatch_workgroups(dx, dy, 1);
+        // pass.set_pipeline(gi_spatial_and_shade_pipeline);
+        // pass.set_push_constants(
+        //     0,
+        //     bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        // );
+        // pass.dispatch_workgroups(dx, dy, 1);
 
         pass_span.end(&mut pass);
         drop(pass);
@@ -310,6 +322,8 @@ impl FromWorld for SolariLightingNode {
                     texture_depth_2d(),
                     uniform_buffer::<ViewUniform>(true),
                     uniform_buffer::<PreviousViewData>(true),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
@@ -408,6 +422,13 @@ impl FromWorld for SolariLightingNode {
                 "solari_lighting_blend_new_world_cache_samples_pipeline",
                 "blend_new_samples",
                 load_embedded_asset!(world, "world_cache_update.wgsl"),
+                None,
+                vec![],
+            ),
+            combine_pipeline: create_pipeline(
+                "fooooo",
+                "combine",
+                load_embedded_asset!(world, "combine.wgsl"),
                 None,
                 vec![],
             ),

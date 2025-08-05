@@ -7,8 +7,15 @@
 #import bevy_render::view::View
 #import bevy_solari::sampling::{generate_random_light_sample, LightSample, ResolvedLightSample}
 
+struct AtomicVec3 {
+    r: atomic<f32>,
+    g: atomic<f32>,
+    b: atomic<f32>,
+}
+
 @group(1) @binding(1) var<storage, read_write> light_tile_samples: array<LightSample>;
 @group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSamplePacked>;
+@group(1) @binding(23) var<storage, read_write> foo: AtomicVec3;
 @group(1) @binding(12) var<uniform> view: View;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
@@ -19,10 +26,15 @@ fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builti
     var rng = (tile_id * 5782582u) + sample_index + constants.frame_index;
 
     let sample = generate_random_light_sample(&rng);
+    let resolved_light_sample = sample.resolved_light_sample;
+
+    atomicAdd(&foo.r, resolved_light_sample.radiance.r * view.exposure * resolved_light_sample.inverse_pdf);
+    atomicAdd(&foo.g, resolved_light_sample.radiance.g * view.exposure * resolved_light_sample.inverse_pdf);
+    atomicAdd(&foo.b, resolved_light_sample.radiance.b * view.exposure * resolved_light_sample.inverse_pdf);
 
     let i = (tile_id * 1024u) + sample_index;
     light_tile_samples[i] = sample.light_sample;
-    light_tile_resolved_samples[i] = pack_resolved_light_sample(sample.resolved_light_sample);
+    light_tile_resolved_samples[i] = pack_resolved_light_sample(resolved_light_sample);
 }
 
 struct ResolvedLightSamplePacked {

@@ -95,7 +95,7 @@ fn random_light_pdf(hit: ResolvedRayHitFull) -> f32 {
 }
 
 fn generate_random_light_sample(rng: ptr<function, u32>) -> GenerateRandomLightSampleResult {
-    let light_count = arrayLength(&light_sources) - 1u;
+    let light_count = arrayLength(&light_sources);
     let light_id = rand_range_u(light_count, rng);
 
     let light_source = light_sources[light_id];

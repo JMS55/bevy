@@ -127,8 +127,8 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     // Check if the current pixel was off screen during the previous frame (current pixel is newly visible),
     // or if all temporal history should assumed to be invalid
     if any(temporal_pixel_id_float < vec2(0.0)) || any(temporal_pixel_id_float >= view.main_pass_viewport.zw) || bool(constants.reset) {
-        return empty_reservoir();
         textureStore(gi_reservoir_subpixels_b, pixel_id, vec4(0.5));
+        return empty_reservoir();
     }
 
     let max_size = vec2<u32>(view.main_pass_viewport.zw - 1.0);

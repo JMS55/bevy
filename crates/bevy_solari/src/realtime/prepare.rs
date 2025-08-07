@@ -3,7 +3,6 @@ use bevy_core_pipeline::{core_3d::CORE_3D_DEPTH_FORMAT, deferred::DEFERRED_PREPA
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::With,
     system::{Commands, Query, Res},
 };
 use bevy_image::ToExtents;
@@ -12,7 +11,7 @@ use bevy_render::{
     camera::{ExtractedCamera, MainPassResolutionOverride},
     render_resource::{
         Buffer, BufferDescriptor, BufferUsages, Texture, TextureDescriptor, TextureDimension,
-        TextureUsages, TextureView, TextureViewDescriptor,
+        TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
 };
@@ -44,6 +43,8 @@ pub struct SolariLightingResources {
     pub di_reservoirs_b: Buffer,
     pub gi_reservoirs_a: Buffer,
     pub gi_reservoirs_b: Buffer,
+    pub gi_reservoir_subpixels_a: (Texture, TextureView),
+    pub gi_reservoir_subpixels_b: (Texture, TextureView),
     pub previous_gbuffer: (Texture, TextureView),
     pub previous_depth: (Texture, TextureView),
     pub world_cache_checksums: Buffer,
@@ -60,19 +61,19 @@ pub struct SolariLightingResources {
 }
 
 pub fn prepare_solari_lighting_resources(
-    query: Query<
-        (
-            Entity,
-            &ExtractedCamera,
-            Option<&SolariLightingResources>,
-            Option<&MainPassResolutionOverride>,
-        ),
-        With<SolariLighting>,
-    >,
+    mut query: Query<(
+        Entity,
+        &ExtractedCamera,
+        &mut SolariLighting,
+        Option<&SolariLightingResources>,
+        Option<&MainPassResolutionOverride>,
+    )>,
     render_device: Res<RenderDevice>,
     mut commands: Commands,
 ) {
-    for (entity, camera, solari_lighting_resources, resolution_override) in &query {
+    for (entity, camera, mut solari_lighting, solari_lighting_resources, resolution_override) in
+        &mut query
+    {
         let Some(mut view_size) = camera.physical_viewport_size else {
             continue;
         };
@@ -83,6 +84,7 @@ pub fn prepare_solari_lighting_resources(
         if solari_lighting_resources.map(|r| r.view_size) == Some(view_size) {
             continue;
         }
+        solari_lighting.reset = true;
 
         let light_tile_samples = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_light_tile_samples"),
@@ -127,6 +129,32 @@ pub fn prepare_solari_lighting_resources(
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+
+        let gi_reservoir_subpixels_a = render_device.create_texture(&TextureDescriptor {
+            label: Some("solari_lighting_gi_reservoir_subpixels_a"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rg8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let gi_reservoir_subpixels_a_view =
+            gi_reservoir_subpixels_a.create_view(&TextureViewDescriptor::default());
+
+        let gi_reservoir_subpixels_b = render_device.create_texture(&TextureDescriptor {
+            label: Some("solari_lighting_gi_reservoir_subpixels_b"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rg8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let gi_reservoir_subpixels_b_view =
+            gi_reservoir_subpixels_b.create_view(&TextureViewDescriptor::default());
 
         let previous_gbuffer = render_device.create_texture(&TextureDescriptor {
             label: Some("solari_lighting_previous_gbuffer"),
@@ -229,6 +257,8 @@ pub fn prepare_solari_lighting_resources(
             di_reservoirs_b,
             gi_reservoirs_a,
             gi_reservoirs_b,
+            gi_reservoir_subpixels_a: (gi_reservoir_subpixels_a, gi_reservoir_subpixels_a_view),
+            gi_reservoir_subpixels_b: (gi_reservoir_subpixels_b, gi_reservoir_subpixels_b_view),
             previous_gbuffer: (previous_gbuffer, previous_gbuffer_view),
             previous_depth: (previous_depth, previous_depth_view),
             world_cache_checksums,

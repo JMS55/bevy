@@ -14,13 +14,15 @@
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<Reservoir>;
 @group(1) @binding(6) var<storage, read_write> gi_reservoirs_b: array<Reservoir>;
-@group(1) @binding(7) var gbuffer: texture_2d<u32>;
-@group(1) @binding(8) var depth_buffer: texture_depth_2d;
-@group(1) @binding(9) var motion_vectors: texture_2d<f32>;
-@group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
-@group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
-@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(7) var gi_reservoir_subpixels_a: texture_2d<f32>;
+@group(1) @binding(8) var gi_reservoir_subpixels_b: texture_storage_2d<rg8unorm, read_write>;
+@group(1) @binding(9) var gbuffer: texture_2d<u32>;
+@group(1) @binding(10) var depth_buffer: texture_depth_2d;
+@group(1) @binding(11) var motion_vectors: texture_2d<f32>;
+@group(1) @binding(12) var previous_gbuffer: texture_2d<u32>;
+@group(1) @binding(13) var previous_depth_buffer: texture_depth_2d;
+@group(1) @binding(14) var<uniform> view: View;
+@group(1) @binding(15) var<uniform> previous_view: PreviousViewUniforms;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -37,6 +39,7 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
         gi_reservoirs_b[pixel_index] = empty_reservoir();
+        textureStore(gi_reservoir_subpixels_b, global_id.xy, vec4(0.5));
         return;
     }
     let gpixel = textureLoad(gbuffer, global_id.xy, 0);
@@ -118,21 +121,78 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> Reservoir {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
-    let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
-    let temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
+    let temporal_pixel_id_float = vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw);
+    let temporal_pixel_id_center_float = temporal_pixel_id_float + 0.5;
 
     // Check if the current pixel was off screen during the previous frame (current pixel is newly visible),
     // or if all temporal history should assumed to be invalid
     if any(temporal_pixel_id_float < vec2(0.0)) || any(temporal_pixel_id_float >= view.main_pass_viewport.zw) || bool(constants.reset) {
         return empty_reservoir();
+        textureStore(gi_reservoir_subpixels_b, pixel_id, vec4(0.5));
     }
 
-    // Check if the pixel features have changed heavily between the current and previous frame
-    let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
-    let temporal_gpixel = textureLoad(previous_gbuffer, temporal_pixel_id, 0);
-    let temporal_world_position = reconstruct_previous_world_position(temporal_pixel_id, temporal_depth);
-    let temporal_world_normal = octahedral_decode(unpack_24bit_normal(temporal_gpixel.a));
-    if pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+    let max_size = vec2<u32>(view.main_pass_viewport.zw - 1.0);
+    let tl = vec2<u32>(temporal_pixel_id_float);
+    let tr = min(tl + vec2(1u, 0u), max_size);
+    let bl = min(tl + vec2(0u, 1u), max_size);
+    let br = min(tl + vec2(1u, 1u), max_size);
+
+    // TODO: Try textureGather
+    let tl_subpixel = textureLoad(gi_reservoir_subpixels_a, tl, 0).xy;
+    let tr_subpixel = textureLoad(gi_reservoir_subpixels_a, tr, 0).xy;
+    let bl_subpixel = textureLoad(gi_reservoir_subpixels_a, bl, 0).xy;
+    let br_subpixel = textureLoad(gi_reservoir_subpixels_a, br, 0).xy;
+
+    let tl_depth = textureLoad(previous_depth_buffer, tl, 0);
+    let tr_depth = textureLoad(previous_depth_buffer, tr, 0);
+    let bl_depth = textureLoad(previous_depth_buffer, bl, 0);
+    let br_depth = textureLoad(previous_depth_buffer, br, 0);
+
+    let tl_gpixel = textureLoad(previous_gbuffer, tl, 0).a;
+    let tr_gpixel = textureLoad(previous_gbuffer, tr, 0).a;
+    let bl_gpixel = textureLoad(previous_gbuffer, bl, 0).a;
+    let br_gpixel = textureLoad(previous_gbuffer, br, 0).a;
+
+    var temporal_pixel_id = tl;
+    var temporal_subpixel = tl_subpixel;
+    var closest_distance = 999999999.0;
+
+    var temporal_world_position = reconstruct_previous_world_position(vec2<f32>(tl) + tl_subpixel, tl_depth);
+    var temporal_world_normal = octahedral_decode(unpack_24bit_normal(tl_gpixel));
+    var sample_distance = distance(vec2<f32>(tl) + tl_subpixel, temporal_pixel_id_center_float);
+    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+        closest_distance = sample_distance;
+    }
+
+    temporal_world_position = reconstruct_previous_world_position(vec2<f32>(tr) + tr_subpixel, tr_depth);
+    temporal_world_normal = octahedral_decode(unpack_24bit_normal(tr_gpixel));
+    sample_distance = distance(vec2<f32>(tr) + tr_subpixel, temporal_pixel_id_center_float);
+    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+        temporal_pixel_id = tr;
+        temporal_subpixel = tr_subpixel;
+        closest_distance = sample_distance;
+    }
+
+    temporal_world_position = reconstruct_previous_world_position(vec2<f32>(bl) + bl_subpixel, bl_depth);
+    temporal_world_normal = octahedral_decode(unpack_24bit_normal(bl_gpixel));
+    sample_distance = distance(vec2<f32>(bl) + bl_subpixel, temporal_pixel_id_center_float);
+    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+        temporal_pixel_id = bl;
+        temporal_subpixel = bl_subpixel;
+        closest_distance = sample_distance;
+    }
+
+    temporal_world_position = reconstruct_previous_world_position(vec2<f32>(br) + br_subpixel, br_depth);
+    temporal_world_normal = octahedral_decode(unpack_24bit_normal(br_gpixel));
+    sample_distance = distance(vec2<f32>(br) + br_subpixel, temporal_pixel_id_center_float);
+    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+        temporal_pixel_id = br;
+        temporal_subpixel = br_subpixel;
+        closest_distance = sample_distance;
+    }
+
+    if closest_distance == 999999999.0 {
+        textureStore(gi_reservoir_subpixels_b, pixel_id, vec4(0.5));
         return empty_reservoir();
     }
 
@@ -140,6 +200,9 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     var temporal_reservoir = gi_reservoirs_a[temporal_pixel_index];
 
     temporal_reservoir.confidence_weight = min(temporal_reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
+
+    let new_subpixel = fract(temporal_subpixel + motion_vector);
+    textureStore(gi_reservoir_subpixels_b, pixel_id, vec4(new_subpixel, 0.0, 0.0));
 
     return temporal_reservoir;
 }
@@ -207,8 +270,8 @@ fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
     return world_pos.xyz / world_pos.w;
 }
 
-fn reconstruct_previous_world_position(pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
-    let uv = (vec2<f32>(pixel_id) + 0.5) / view.main_pass_viewport.zw;
+fn reconstruct_previous_world_position(subpixel_id: vec2<f32>, depth: f32) -> vec3<f32> {
+    let uv = subpixel_id / view.main_pass_viewport.zw;
     let xy_ndc = (uv - vec2(0.5)) * vec2(2.0, -2.0);
     let world_pos = previous_view.world_from_clip * vec4(xy_ndc, depth, 1.0);
     return world_pos.xyz / world_pos.w;

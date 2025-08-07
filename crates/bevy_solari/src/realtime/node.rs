@@ -22,7 +22,7 @@ use bevy_render::{
         },
         BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, CachedComputePipelineId,
         ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, PushConstantRange, Shader,
-        ShaderDefVal, ShaderStages, StorageTextureAccess, TextureSampleType,
+        ShaderDefVal, ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice},
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
@@ -135,6 +135,16 @@ impl ViewNode for SolariLightingNode {
                 s.di_reservoirs_b.as_entire_binding(),
                 s.gi_reservoirs_a.as_entire_binding(),
                 s.gi_reservoirs_b.as_entire_binding(),
+                if frame_count.0 % 2 == 0 {
+                    &s.gi_reservoir_subpixels_a.1
+                } else {
+                    &s.gi_reservoir_subpixels_b.1
+                },
+                if frame_count.0 % 2 == 0 {
+                    &s.gi_reservoir_subpixels_b.1
+                } else {
+                    &s.gi_reservoir_subpixels_a.1
+                },
                 gbuffer,
                 depth_buffer,
                 motion_vectors,
@@ -303,6 +313,8 @@ impl FromWorld for SolariLightingNode {
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    texture_storage_2d(TextureFormat::Rg8Unorm, StorageTextureAccess::ReadWrite),
                     texture_2d(TextureSampleType::Uint),
                     texture_depth_2d(),
                     texture_2d(TextureSampleType::Float { filterable: true }),

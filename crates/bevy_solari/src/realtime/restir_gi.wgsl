@@ -122,7 +122,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> Reservoir {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     let temporal_pixel_id_float = vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw);
-    let temporal_pixel_id_center_float = temporal_pixel_id_float + 0.5;
 
     // Check if the current pixel was off screen during the previous frame (current pixel is newly visible),
     // or if all temporal history should assumed to be invalid
@@ -153,6 +152,10 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     let bl_gpixel = textureLoad(previous_gbuffer, bl, 0).a;
     let br_gpixel = textureLoad(previous_gbuffer, br, 0).a;
 
+    let temporal_pixel_id_center_float = temporal_pixel_id_float + 0.5;
+    let aabb_min = temporal_pixel_id_float;
+    let aabb_max = temporal_pixel_id_float + 1.0;
+
     var temporal_pixel_id = tl;
     var temporal_subpixel = tl_subpixel;
     var closest_distance = 999999999.0;
@@ -160,14 +163,20 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     var temporal_world_position = reconstruct_previous_world_position(vec2<f32>(tl) + tl_subpixel, tl_depth);
     var temporal_world_normal = octahedral_decode(unpack_24bit_normal(tl_gpixel));
     var sample_distance = distance(vec2<f32>(tl) + tl_subpixel, temporal_pixel_id_center_float);
-    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+    if sample_distance < closest_distance
+        && all(vec2<f32>(tl) + tl_subpixel >= aabb_min)
+        && all(vec2<f32>(tl) + tl_subpixel < aabb_max)
+        && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
         closest_distance = sample_distance;
     }
 
     temporal_world_position = reconstruct_previous_world_position(vec2<f32>(tr) + tr_subpixel, tr_depth);
     temporal_world_normal = octahedral_decode(unpack_24bit_normal(tr_gpixel));
     sample_distance = distance(vec2<f32>(tr) + tr_subpixel, temporal_pixel_id_center_float);
-    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+    if sample_distance < closest_distance
+        && all(vec2<f32>(tr) + tr_subpixel >= aabb_min)
+        && all(vec2<f32>(tr) + tr_subpixel < aabb_max)
+        && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
         temporal_pixel_id = tr;
         temporal_subpixel = tr_subpixel;
         closest_distance = sample_distance;
@@ -176,7 +185,10 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     temporal_world_position = reconstruct_previous_world_position(vec2<f32>(bl) + bl_subpixel, bl_depth);
     temporal_world_normal = octahedral_decode(unpack_24bit_normal(bl_gpixel));
     sample_distance = distance(vec2<f32>(bl) + bl_subpixel, temporal_pixel_id_center_float);
-    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+    if sample_distance < closest_distance
+        && all(vec2<f32>(bl) + bl_subpixel >= aabb_min)
+        && all(vec2<f32>(bl) + bl_subpixel < aabb_max)
+        && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
         temporal_pixel_id = bl;
         temporal_subpixel = bl_subpixel;
         closest_distance = sample_distance;
@@ -185,7 +197,10 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     temporal_world_position = reconstruct_previous_world_position(vec2<f32>(br) + br_subpixel, br_depth);
     temporal_world_normal = octahedral_decode(unpack_24bit_normal(br_gpixel));
     sample_distance = distance(vec2<f32>(br) + br_subpixel, temporal_pixel_id_center_float);
-    if sample_distance < closest_distance && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+    if sample_distance < closest_distance
+        && all(vec2<f32>(br) + br_subpixel >= aabb_min)
+        && all(vec2<f32>(br) + br_subpixel < aabb_max)
+        && !pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
         temporal_pixel_id = br;
         temporal_subpixel = br_subpixel;
         closest_distance = sample_distance;

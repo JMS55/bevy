@@ -10,6 +10,9 @@ keywords = ["bevy"]
 
 [dependencies]
 # bevy
+bevy_anti_aliasing = { path = "../bevy_anti_aliasing", version = "0.17.0-dev", features = [
+  "dlss",
+] }
 bevy_app = { path = "../bevy_app", version = "0.17.0-dev" }
 bevy_asset = { path = "../bevy_asset", version = "0.17.0-dev" }
 bevy_color = { path = "../bevy_color", version = "0.17.0-dev" }

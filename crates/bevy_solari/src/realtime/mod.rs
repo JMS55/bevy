@@ -3,6 +3,7 @@ mod node;
 mod prepare;
 
 use crate::SolariPlugins;
+use bevy_anti_aliasing::dlss::{Dlss, DlssRayReconstructionFeature};
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_core_pipeline::{
@@ -31,6 +32,7 @@ pub struct SolariLightingPlugin;
 
 impl Plugin for SolariLightingPlugin {
     fn build(&self, app: &mut App) {
+        embedded_asset!(app, "resolve_dlss_rr_textures.wgsl");
         embedded_asset!(app, "presample_light_tiles.wgsl");
         embedded_asset!(app, "restir_di.wgsl");
         embedded_asset!(app, "restir_gi.wgsl");
@@ -74,7 +76,11 @@ impl Plugin for SolariLightingPlugin {
 /// `Msaa::Off`.
 #[derive(Component, Reflect, Clone)]
 #[reflect(Component, Default, Clone)]
-#[require(Hdr, DeferredPrepass, DepthPrepass, MotionVectorPrepass)]
+#[require(Dlss::<DlssRayReconstructionFeature> {
+    perf_quality_mode: Default::default(),
+    reset: Default::default(),
+    _phantom_data: Default::default(),
+}, Hdr, DeferredPrepass, DepthPrepass, MotionVectorPrepass)]
 pub struct SolariLighting {
     /// Set to true to delete the saved temporal history (past frames).
     ///

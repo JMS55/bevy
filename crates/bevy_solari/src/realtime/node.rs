@@ -3,6 +3,7 @@ use super::{
     SolariLighting,
 };
 use crate::scene::RaytracingSceneBindings;
+use bevy_anti_aliasing::dlss::ViewDlssRayReconstructionTextures;
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_core_pipeline::prepass::{
     PreviousViewData, PreviousViewUniformOffset, PreviousViewUniforms, ViewPrepassTextures,
@@ -22,7 +23,7 @@ use bevy_render::{
         },
         BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, CachedComputePipelineId,
         ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, PushConstantRange, Shader,
-        ShaderStages, StorageTextureAccess, TextureSampleType,
+        ShaderDefVal, ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice},
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
@@ -38,6 +39,8 @@ pub mod graph {
 
 pub struct SolariLightingNode {
     bind_group_layout: BindGroupLayout,
+    bind_group_layout_resolve_dlss_rr_textures: BindGroupLayout,
+    resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
     di_initial_and_temporal_pipeline: CachedComputePipelineId,
     di_spatial_and_shade_pipeline: CachedComputePipelineId,
@@ -51,6 +54,7 @@ impl ViewNode for SolariLightingNode {
         &'static SolariLightingResources,
         &'static ViewTarget,
         &'static ViewPrepassTextures,
+        &'static ViewDlssRayReconstructionTextures,
         &'static ViewUniformOffset,
         &'static PreviousViewUniformOffset,
     );
@@ -64,6 +68,7 @@ impl ViewNode for SolariLightingNode {
             solari_lighting_resources,
             view_target,
             view_prepass_textures,
+            view_dlss_rr_textures,
             view_uniform_offset,
             previous_view_uniform_offset,
         ): QueryItem<Self::ViewQuery>,
@@ -75,6 +80,7 @@ impl ViewNode for SolariLightingNode {
         let previous_view_uniforms = world.resource::<PreviousViewUniforms>();
         let frame_count = world.resource::<FrameCount>();
         let (
+            Some(resolve_dlss_rr_textures_pipeline),
             Some(presample_light_tiles_pipeline),
             Some(di_initial_and_temporal_pipeline),
             Some(di_spatial_and_shade_pipeline),
@@ -87,6 +93,7 @@ impl ViewNode for SolariLightingNode {
             Some(view_uniforms),
             Some(previous_view_uniforms),
         ) = (
+            pipeline_cache.get_compute_pipeline(self.resolve_dlss_rr_textures_pipeline),
             pipeline_cache.get_compute_pipeline(self.presample_light_tiles_pipeline),
             pipeline_cache.get_compute_pipeline(self.di_initial_and_temporal_pipeline),
             pipeline_cache.get_compute_pipeline(self.di_spatial_and_shade_pipeline),
@@ -135,6 +142,16 @@ impl ViewNode for SolariLightingNode {
                 previous_view_uniforms,
             )),
         );
+        let bind_group_resolve_dlss_rr_textures = render_context.render_device().create_bind_group(
+            "solari_lighting_bind_group_resolve_dlss_rr_textures",
+            &self.bind_group_layout_resolve_dlss_rr_textures,
+            &BindGroupEntries::sequential((
+                &view_dlss_rr_textures.diffuse_albedo.default_view,
+                &view_dlss_rr_textures.specular_albedo.default_view,
+                &view_dlss_rr_textures.normal_roughness.default_view,
+                &view_dlss_rr_textures.specular_motion_vectors.default_view,
+            )),
+        );
 
         // Choice of number here is arbitrary
         let frame_index = frame_count.0.wrapping_mul(5782582);
@@ -160,6 +177,12 @@ impl ViewNode for SolariLightingNode {
                 previous_view_uniform_offset.offset,
             ],
         );
+        pass.set_bind_group(2, &bind_group_resolve_dlss_rr_textures, &[]);
+
+        pass.set_pipeline(resolve_dlss_rr_textures_pipeline);
+        pass.dispatch_workgroups(dx, dy, 1);
+
+        pass.set_bind_group(2, None, &[]);
 
         pass.set_pipeline(presample_light_tiles_pipeline);
         pass.set_push_constants(
@@ -169,15 +192,31 @@ impl ViewNode for SolariLightingNode {
         pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
 
         pass.set_pipeline(di_initial_and_temporal_pipeline);
+        pass.set_push_constants(
+            0,
+            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        );
         pass.dispatch_workgroups(dx, dy, 1);
 
         pass.set_pipeline(di_spatial_and_shade_pipeline);
+        pass.set_push_constants(
+            0,
+            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        );
         pass.dispatch_workgroups(dx, dy, 1);
 
         pass.set_pipeline(gi_initial_and_temporal_pipeline);
+        pass.set_push_constants(
+            0,
+            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        );
         pass.dispatch_workgroups(dx, dy, 1);
 
         pass.set_pipeline(gi_spatial_and_shade_pipeline);
+        pass.set_push_constants(
+            0,
+            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        );
         pass.dispatch_workgroups(dx, dy, 1);
 
         pass_span.end(&mut pass);
@@ -243,50 +282,94 @@ impl FromWorld for SolariLightingNode {
             ),
         );
 
-        let create_pipeline =
-            |label: &'static str, entry_point: &'static str, shader: Handle<Shader>| {
-                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                    label: Some(label.into()),
-                    layout: vec![
-                        scene_bindings.bind_group_layout.clone(),
-                        bind_group_layout.clone(),
-                    ],
-                    push_constant_ranges: vec![PushConstantRange {
-                        stages: ShaderStages::COMPUTE,
-                        range: 0..8,
-                    }],
-                    shader,
-                    entry_point: Some(entry_point.into()),
-                    ..default()
-                })
-            };
+        let bind_group_layout_resolve_dlss_rr_textures = render_device.create_bind_group_layout(
+            "solari_lighting_bind_group_layout_resolve_dlss_rr_textures",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
+                    texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
+                    texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                    texture_storage_2d(TextureFormat::Rg16Float, StorageTextureAccess::WriteOnly),
+                ),
+            ),
+        );
+
+        let create_pipeline = |label: &'static str,
+                               entry_point: &'static str,
+                               shader: Handle<Shader>,
+                               extra_bind_group_layout: Option<&BindGroupLayout>,
+                               extra_shader_defs: Vec<ShaderDefVal>| {
+            let mut layout = vec![
+                scene_bindings.bind_group_layout.clone(),
+                bind_group_layout.clone(),
+            ];
+            if let Some(extra_bind_group_layout) = extra_bind_group_layout {
+                layout.push(extra_bind_group_layout.clone());
+            }
+
+            let mut shader_defs = vec![];
+            shader_defs.extend_from_slice(&extra_shader_defs);
+
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some(label.into()),
+                layout,
+                push_constant_ranges: vec![PushConstantRange {
+                    stages: ShaderStages::COMPUTE,
+                    range: 0..8,
+                }],
+                shader,
+                shader_defs,
+                entry_point: Some(entry_point.into()),
+                ..default()
+            })
+        };
 
         Self {
             bind_group_layout: bind_group_layout.clone(),
+            bind_group_layout_resolve_dlss_rr_textures: bind_group_layout_resolve_dlss_rr_textures
+                .clone(),
+            resolve_dlss_rr_textures_pipeline: create_pipeline(
+                "solari_lighting_resolve_dlss_rr_textures_pipeline",
+                "resolve_dlss_rr_textures",
+                load_embedded_asset!(world, "resolve_dlss_rr_textures.wgsl"),
+                Some(&bind_group_layout_resolve_dlss_rr_textures),
+                vec![],
+            ),
             presample_light_tiles_pipeline: create_pipeline(
                 "solari_lighting_presample_light_tiles_pipeline",
                 "presample_light_tiles",
                 load_embedded_asset!(world, "presample_light_tiles.wgsl"),
+                None,
+                vec![],
             ),
             di_initial_and_temporal_pipeline: create_pipeline(
                 "solari_lighting_di_initial_and_temporal_pipeline",
                 "initial_and_temporal",
                 load_embedded_asset!(world, "restir_di.wgsl"),
+                None,
+                vec![],
             ),
             di_spatial_and_shade_pipeline: create_pipeline(
                 "solari_lighting_di_spatial_and_shade_pipeline",
                 "spatial_and_shade",
                 load_embedded_asset!(world, "restir_di.wgsl"),
+                None,
+                vec![],
             ),
             gi_initial_and_temporal_pipeline: create_pipeline(
                 "solari_lighting_gi_initial_and_temporal_pipeline",
                 "initial_and_temporal",
                 load_embedded_asset!(world, "restir_gi.wgsl"),
+                None,
+                vec![],
             ),
             gi_spatial_and_shade_pipeline: create_pipeline(
                 "solari_lighting_gi_spatial_and_shade_pipeline",
                 "spatial_and_shade",
                 load_embedded_asset!(world, "restir_gi.wgsl"),
+                None,
+                vec![],
             ),
         }
     }

@@ -1,4 +1,5 @@
 use super::SolariLighting;
+use bevy_anti_aliasing::dlss::ViewDlssRayReconstructionTextures;
 use bevy_core_pipeline::{core_3d::CORE_3D_DEPTH_FORMAT, deferred::DEFERRED_PREPASS_FORMAT};
 use bevy_ecs::{
     component::Component,
@@ -12,9 +13,10 @@ use bevy_render::{
     camera::{ExtractedCamera, MainPassResolutionOverride},
     render_resource::{
         Buffer, BufferDescriptor, BufferUsages, Texture, TextureDescriptor, TextureDimension,
-        TextureUsages, TextureView, TextureViewDescriptor,
+        TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
+    texture::CachedTexture,
 };
 
 /// Size of the `LightSample` shader struct in bytes.
@@ -139,16 +141,85 @@ pub fn prepare_solari_lighting_resources(
         });
         let previous_depth_view = previous_depth.create_view(&TextureViewDescriptor::default());
 
-        commands.entity(entity).insert(SolariLightingResources {
-            light_tile_samples,
-            light_tile_resolved_samples,
-            di_reservoirs_a,
-            di_reservoirs_b,
-            gi_reservoirs_a,
-            gi_reservoirs_b,
-            previous_gbuffer: (previous_gbuffer, previous_gbuffer_view),
-            previous_depth: (previous_depth, previous_depth_view),
-            view_size,
+        let diffuse_albedo = render_device.create_texture(&TextureDescriptor {
+            label: Some("solari_lighting_diffuse_albedo"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
         });
+        let diffuse_albedo_view = diffuse_albedo.create_view(&TextureViewDescriptor::default());
+
+        let specular_albedo = render_device.create_texture(&TextureDescriptor {
+            label: Some("solari_lighting_specular_albedo"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let specular_albedo_view = specular_albedo.create_view(&TextureViewDescriptor::default());
+
+        let normal_roughness = render_device.create_texture(&TextureDescriptor {
+            label: Some("solari_lighting_normal_roughness"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let normal_roughness_view = normal_roughness.create_view(&TextureViewDescriptor::default());
+
+        let specular_motion_vectors = render_device.create_texture(&TextureDescriptor {
+            label: Some("solari_lighting_specular_motion_vectors"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rg16Float,
+            usage: TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let specular_motion_vectors_view =
+            specular_motion_vectors.create_view(&TextureViewDescriptor::default());
+
+        commands.entity(entity).insert((
+            SolariLightingResources {
+                light_tile_samples,
+                light_tile_resolved_samples,
+                di_reservoirs_a,
+                di_reservoirs_b,
+                gi_reservoirs_a,
+                gi_reservoirs_b,
+                previous_gbuffer: (previous_gbuffer, previous_gbuffer_view),
+                previous_depth: (previous_depth, previous_depth_view),
+                view_size,
+            },
+            ViewDlssRayReconstructionTextures {
+                diffuse_albedo: CachedTexture {
+                    texture: diffuse_albedo,
+                    default_view: diffuse_albedo_view,
+                },
+                specular_albedo: CachedTexture {
+                    texture: specular_albedo,
+                    default_view: specular_albedo_view,
+                },
+                normal_roughness: CachedTexture {
+                    texture: normal_roughness,
+                    default_view: normal_roughness_view,
+                },
+                specular_motion_vectors: CachedTexture {
+                    texture: specular_motion_vectors,
+                    default_view: specular_motion_vectors_view,
+                },
+            },
+        ));
     }
 }

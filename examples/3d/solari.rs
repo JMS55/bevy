@@ -5,6 +5,8 @@ mod camera_controller;
 
 use argh::FromArgs;
 use bevy::{
+    anti_aliasing::dlss::DlssProjectId,
+    asset::uuid::uuid,
     prelude::*,
     render::{camera::CameraMainTextureUsages, mesh::Indices, render_resource::TextureUsages},
     scene::SceneInstanceReady,
@@ -28,7 +30,9 @@ fn main() {
     let args: Args = argh::from_env();
 
     let mut app = App::new();
-    app.add_plugins((DefaultPlugins, SolariPlugins, CameraControllerPlugin))
+
+    app.insert_resource(DlssProjectId(uuid!("5417916c-0291-4e3f-8f65-326c1858ab96")))
+        .add_plugins((DefaultPlugins, SolariPlugins, CameraControllerPlugin))
         .insert_resource(args)
         .add_systems(Startup, setup);
 

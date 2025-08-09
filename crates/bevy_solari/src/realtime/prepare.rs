@@ -148,7 +148,7 @@ pub fn prepare_solari_lighting_resources(
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba8Unorm,
-            usage: TextureUsages::STORAGE_BINDING,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE,
             view_formats: &[],
         });
         let diffuse_albedo_view = diffuse_albedo.create_view(&TextureViewDescriptor::default());
@@ -160,7 +160,7 @@ pub fn prepare_solari_lighting_resources(
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba8Unorm,
-            usage: TextureUsages::STORAGE_BINDING,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE,
             view_formats: &[],
         });
         let specular_albedo_view = specular_albedo.create_view(&TextureViewDescriptor::default());
@@ -172,7 +172,7 @@ pub fn prepare_solari_lighting_resources(
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba16Float,
-            usage: TextureUsages::STORAGE_BINDING,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE,
             view_formats: &[],
         });
         let normal_roughness_view = normal_roughness.create_view(&TextureViewDescriptor::default());
@@ -184,7 +184,7 @@ pub fn prepare_solari_lighting_resources(
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Rg16Float,
-            usage: TextureUsages::STORAGE_BINDING,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE,
             view_formats: &[],
         });
         let specular_motion_vectors_view =

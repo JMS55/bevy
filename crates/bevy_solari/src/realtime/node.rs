@@ -1,5 +1,5 @@
 use super::{
-    prepare::{SolariLightingResources, LIGHT_TILE_BLOCKS},
+    prepare::{SolariLightingResources, LIGHT_TILE_BLOCKS, WORLD_CACHE_SIZE},
     SolariLighting,
 };
 use crate::scene::RaytracingSceneBindings;
@@ -40,7 +40,14 @@ pub mod graph {
 pub struct SolariLightingNode {
     bind_group_layout: BindGroupLayout,
     bind_group_layout_resolve_dlss_rr_textures: BindGroupLayout,
+    bind_group_layout_world_cache_active_cells_dispatch: BindGroupLayout,
     resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
+    decay_world_cache_pipeline: CachedComputePipelineId,
+    compact_world_cache_single_block_pipeline: CachedComputePipelineId,
+    compact_world_cache_blocks_pipeline: CachedComputePipelineId,
+    compact_world_cache_write_active_cells_pipeline: CachedComputePipelineId,
+    sample_for_world_cache_pipeline: CachedComputePipelineId,
+    blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
     di_initial_and_temporal_pipeline: CachedComputePipelineId,
     di_spatial_and_shade_pipeline: CachedComputePipelineId,
@@ -81,6 +88,12 @@ impl ViewNode for SolariLightingNode {
         let frame_count = world.resource::<FrameCount>();
         let (
             Some(resolve_dlss_rr_textures_pipeline),
+            Some(decay_world_cache_pipeline),
+            Some(compact_world_cache_single_block_pipeline),
+            Some(compact_world_cache_blocks_pipeline),
+            Some(compact_world_cache_write_active_cells_pipeline),
+            Some(sample_for_world_cache_pipeline),
+            Some(blend_new_world_cache_samples_pipeline),
             Some(presample_light_tiles_pipeline),
             Some(di_initial_and_temporal_pipeline),
             Some(di_spatial_and_shade_pipeline),
@@ -94,6 +107,13 @@ impl ViewNode for SolariLightingNode {
             Some(previous_view_uniforms),
         ) = (
             pipeline_cache.get_compute_pipeline(self.resolve_dlss_rr_textures_pipeline),
+            pipeline_cache.get_compute_pipeline(self.decay_world_cache_pipeline),
+            pipeline_cache.get_compute_pipeline(self.compact_world_cache_single_block_pipeline),
+            pipeline_cache.get_compute_pipeline(self.compact_world_cache_blocks_pipeline),
+            pipeline_cache
+                .get_compute_pipeline(self.compact_world_cache_write_active_cells_pipeline),
+            pipeline_cache.get_compute_pipeline(self.sample_for_world_cache_pipeline),
+            pipeline_cache.get_compute_pipeline(self.blend_new_world_cache_samples_pipeline),
             pipeline_cache.get_compute_pipeline(self.presample_light_tiles_pipeline),
             pipeline_cache.get_compute_pipeline(self.di_initial_and_temporal_pipeline),
             pipeline_cache.get_compute_pipeline(self.di_spatial_and_shade_pipeline),
@@ -110,36 +130,34 @@ impl ViewNode for SolariLightingNode {
             return Ok(());
         };
 
+        let s = solari_lighting_resources;
         let bind_group = render_context.render_device().create_bind_group(
             "solari_lighting_bind_group",
             &self.bind_group_layout,
             &BindGroupEntries::sequential((
                 view_target.get_unsampled_color_attachment().view,
-                solari_lighting_resources
-                    .light_tile_samples
-                    .as_entire_binding(),
-                solari_lighting_resources
-                    .light_tile_resolved_samples
-                    .as_entire_binding(),
-                solari_lighting_resources
-                    .di_reservoirs_a
-                    .as_entire_binding(),
-                solari_lighting_resources
-                    .di_reservoirs_b
-                    .as_entire_binding(),
-                solari_lighting_resources
-                    .gi_reservoirs_a
-                    .as_entire_binding(),
-                solari_lighting_resources
-                    .gi_reservoirs_b
-                    .as_entire_binding(),
+                s.light_tile_samples.as_entire_binding(),
+                s.light_tile_resolved_samples.as_entire_binding(),
+                s.di_reservoirs_a.as_entire_binding(),
+                s.di_reservoirs_b.as_entire_binding(),
+                s.gi_reservoirs_a.as_entire_binding(),
+                s.gi_reservoirs_b.as_entire_binding(),
                 gbuffer,
                 depth_buffer,
                 motion_vectors,
-                &solari_lighting_resources.previous_gbuffer.1,
-                &solari_lighting_resources.previous_depth.1,
+                &s.previous_gbuffer.1,
+                &s.previous_depth.1,
                 view_uniforms,
                 previous_view_uniforms,
+                s.world_cache_checksums.as_entire_binding(),
+                s.world_cache_life.as_entire_binding(),
+                s.world_cache_radiance.as_entire_binding(),
+                s.world_cache_geometry_data.as_entire_binding(),
+                s.world_cache_active_cells_new_radiance.as_entire_binding(),
+                s.world_cache_a.as_entire_binding(),
+                s.world_cache_b.as_entire_binding(),
+                s.world_cache_active_cell_indices.as_entire_binding(),
+                s.world_cache_active_cells_count.as_entire_binding(),
             )),
         );
         let bind_group_resolve_dlss_rr_textures = render_context.render_device().create_bind_group(
@@ -152,6 +170,12 @@ impl ViewNode for SolariLightingNode {
                 &view_dlss_rr_textures.specular_motion_vectors.default_view,
             )),
         );
+        let bind_group_world_cache_active_cells_dispatch =
+            render_context.render_device().create_bind_group(
+                "solari_lighting_bind_group_world_cache_active_cells_dispatch",
+                &self.bind_group_layout_world_cache_active_cells_dispatch,
+                &BindGroupEntries::single(s.world_cache_active_cells_dispatch.as_entire_binding()),
+            );
 
         // Choice of number here is arbitrary
         let frame_index = frame_count.0.wrapping_mul(5782582);
@@ -182,7 +206,37 @@ impl ViewNode for SolariLightingNode {
         pass.set_pipeline(resolve_dlss_rr_textures_pipeline);
         pass.dispatch_workgroups(dx, dy, 1);
 
+        pass.set_bind_group(2, &bind_group_world_cache_active_cells_dispatch, &[]);
+
+        pass.set_pipeline(decay_world_cache_pipeline);
+        pass.dispatch_workgroups((WORLD_CACHE_SIZE / 1024) as u32, 1, 1);
+
+        pass.set_pipeline(compact_world_cache_single_block_pipeline);
+        pass.dispatch_workgroups((WORLD_CACHE_SIZE / 1024) as u32, 1, 1);
+
+        pass.set_pipeline(compact_world_cache_blocks_pipeline);
+        pass.dispatch_workgroups(1, 1, 1);
+
+        pass.set_pipeline(compact_world_cache_write_active_cells_pipeline);
+        pass.dispatch_workgroups((WORLD_CACHE_SIZE / 1024) as u32, 1, 1);
+
         pass.set_bind_group(2, None, &[]);
+
+        pass.set_pipeline(sample_for_world_cache_pipeline);
+        pass.set_push_constants(
+            0,
+            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+        );
+        pass.dispatch_workgroups_indirect(
+            &solari_lighting_resources.world_cache_active_cells_dispatch,
+            0,
+        );
+
+        pass.set_pipeline(blend_new_world_cache_samples_pipeline);
+        pass.dispatch_workgroups_indirect(
+            &solari_lighting_resources.world_cache_active_cells_dispatch,
+            0,
+        );
 
         pass.set_pipeline(presample_light_tiles_pipeline);
         pass.set_push_constants(
@@ -278,6 +332,15 @@ impl FromWorld for SolariLightingNode {
                     texture_depth_2d(),
                     uniform_buffer::<ViewUniform>(true),
                     uniform_buffer::<PreviousViewData>(true),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
                 ),
             ),
         );
@@ -295,6 +358,15 @@ impl FromWorld for SolariLightingNode {
             ),
         );
 
+        let bind_group_layout_world_cache_active_cells_dispatch = render_device
+            .create_bind_group_layout(
+                "solari_lighting_bind_group_layout_world_cache_active_cells_dispatch",
+                &BindGroupLayoutEntries::single(
+                    ShaderStages::COMPUTE,
+                    storage_buffer_sized(false, None),
+                ),
+            );
+
         let create_pipeline = |label: &'static str,
                                entry_point: &'static str,
                                shader: Handle<Shader>,
@@ -308,7 +380,10 @@ impl FromWorld for SolariLightingNode {
                 layout.push(extra_bind_group_layout.clone());
             }
 
-            let mut shader_defs = vec![];
+            let mut shader_defs = vec![ShaderDefVal::UInt(
+                "WORLD_CACHE_SIZE".into(),
+                WORLD_CACHE_SIZE as u32,
+            )];
             shader_defs.extend_from_slice(&extra_shader_defs);
 
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -329,11 +404,55 @@ impl FromWorld for SolariLightingNode {
             bind_group_layout: bind_group_layout.clone(),
             bind_group_layout_resolve_dlss_rr_textures: bind_group_layout_resolve_dlss_rr_textures
                 .clone(),
+            bind_group_layout_world_cache_active_cells_dispatch:
+                bind_group_layout_world_cache_active_cells_dispatch.clone(),
             resolve_dlss_rr_textures_pipeline: create_pipeline(
                 "solari_lighting_resolve_dlss_rr_textures_pipeline",
                 "resolve_dlss_rr_textures",
                 load_embedded_asset!(world, "resolve_dlss_rr_textures.wgsl"),
                 Some(&bind_group_layout_resolve_dlss_rr_textures),
+                vec![],
+            ),
+            decay_world_cache_pipeline: create_pipeline(
+                "solari_lighting_decay_world_cache_pipeline",
+                "decay_world_cache",
+                load_embedded_asset!(world, "world_cache_compact.wgsl"),
+                Some(&bind_group_layout_world_cache_active_cells_dispatch),
+                vec!["WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER".into()],
+            ),
+            compact_world_cache_single_block_pipeline: create_pipeline(
+                "solari_lighting_compact_world_cache_single_block_pipeline",
+                "compact_world_cache_single_block",
+                load_embedded_asset!(world, "world_cache_compact.wgsl"),
+                Some(&bind_group_layout_world_cache_active_cells_dispatch),
+                vec!["WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER".into()],
+            ),
+            compact_world_cache_blocks_pipeline: create_pipeline(
+                "solari_lighting_compact_world_cache_blocks_pipeline",
+                "compact_world_cache_blocks",
+                load_embedded_asset!(world, "world_cache_compact.wgsl"),
+                Some(&bind_group_layout_world_cache_active_cells_dispatch),
+                vec![],
+            ),
+            compact_world_cache_write_active_cells_pipeline: create_pipeline(
+                "solari_lighting_compact_world_cache_write_active_cells_pipeline",
+                "compact_world_cache_write_active_cells",
+                load_embedded_asset!(world, "world_cache_compact.wgsl"),
+                Some(&bind_group_layout_world_cache_active_cells_dispatch),
+                vec!["WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER".into()],
+            ),
+            sample_for_world_cache_pipeline: create_pipeline(
+                "solari_lighting_sample_for_world_cache_pipeline",
+                "sample_radiance",
+                load_embedded_asset!(world, "world_cache_update.wgsl"),
+                None,
+                vec![],
+            ),
+            blend_new_world_cache_samples_pipeline: create_pipeline(
+                "solari_lighting_blend_new_world_cache_samples_pipeline",
+                "blend_new_samples",
+                load_embedded_asset!(world, "world_cache_update.wgsl"),
+                None,
                 vec![],
             ),
             presample_light_tiles_pipeline: create_pipeline(

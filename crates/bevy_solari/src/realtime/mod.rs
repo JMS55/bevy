@@ -3,7 +3,9 @@ mod node;
 mod prepare;
 
 use crate::SolariPlugins;
-use bevy_anti_aliasing::dlss::{Dlss, DlssRayReconstructionFeature};
+use bevy_anti_aliasing::dlss::{
+    Dlss, DlssRayReconstructionFeature, DlssRayReconstructionSupported,
+};
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_core_pipeline::{
@@ -45,6 +47,15 @@ impl Plugin for SolariLightingPlugin {
     }
 
     fn finish(&self, app: &mut App) {
+        if !app
+            .world()
+            .contains_resource::<DlssRayReconstructionSupported>()
+        {
+            warn!(
+                "GPU does not support DLSS Ray Reconstruction. SolariLightingPlugin will be loaded, but will be extremely noisy and unusable.",
+            );
+        }
+
         let render_app = app.sub_app_mut(RenderApp);
 
         let render_device = render_app.world().resource::<RenderDevice>();

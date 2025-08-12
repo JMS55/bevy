@@ -69,7 +69,7 @@ impl Plugin for DlssPlugin {
             .get_resource::<DlssSuperResolutionSupported>()
             .is_none()
         {
-            info!("DLSS is not supported on this system");
+            info!("DLSS Super Resolution is not supported on this system");
             return;
         }
 
@@ -83,7 +83,7 @@ impl Plugin for DlssPlugin {
         if dlss_sdk.is_err() {
             app.world_mut()
                 .remove_resource::<DlssSuperResolutionSupported>();
-            info!("DLSS is not supported on this system");
+            info!("DLSS Super Resolution is not supported on this system");
             return;
         }
 

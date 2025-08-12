@@ -12,14 +12,14 @@ use std::{f64::consts::PI, str::FromStr};
 
 use argh::FromArgs;
 use bevy::{
+    asset::RenderAssetUsages,
     camera::visibility::{NoCpuCulling, NoFrustumCulling},
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    light::NotShadowCaster,
     math::{DVec2, DVec3},
-    pbr::NotShadowCaster,
     prelude::*,
     render::{
         batching::NoAutomaticBatching,
-        render_asset::RenderAssetUsages,
         render_resource::{Extent3d, TextureDimension, TextureFormat},
         view::NoIndirectDrawing,
     },

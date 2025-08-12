@@ -7,8 +7,10 @@ use argh::FromArgs;
 use bevy::{
     anti_aliasing::dlss::DlssProjectId,
     asset::uuid::uuid,
+    camera::CameraMainTextureUsages,
+    mesh::Indices,
     prelude::*,
-    render::{camera::CameraMainTextureUsages, mesh::Indices, render_resource::TextureUsages},
+    render::render_resource::TextureUsages,
     scene::SceneInstanceReady,
     solari::{
         pathtracer::{Pathtracer, PathtracingPlugin},

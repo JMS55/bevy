@@ -42,6 +42,8 @@ pub mod diagnostic;
 pub mod erased_render_asset;
 pub mod experimental;
 pub mod extract_component;
+#[cfg(feature = "bevy_light")]
+mod extract_impls;
 pub mod extract_instances;
 mod extract_param;
 pub mod extract_resource;
@@ -63,9 +65,6 @@ pub mod sync_world;
 pub mod texture;
 pub mod view;
 mod wgpu_wrapper;
-pub use bevy_camera::primitives;
-#[cfg(feature = "bevy_light")]
-mod extract_impls;
 
 /// The render prelude.
 ///
@@ -75,26 +74,10 @@ pub mod prelude {
     pub use crate::{
         alpha::AlphaMode,
         camera::NormalizedRenderTargetExt as _,
-        mesh::{
-            morph::MorphWeights, primitives::MeshBuilder, primitives::Meshable, Mesh, Mesh2d,
-            Mesh3d,
-        },
-        render_resource::Shader,
         texture::{ImagePlugin, ManualTextureViews},
-        view::{InheritedVisibility, Msaa, ViewVisibility, Visibility},
+        view::Msaa,
         ExtractSchedule,
     };
-    // TODO: Remove this in a follow-up
-    #[doc(hidden)]
-    pub use bevy_camera::{
-        Camera, ClearColor, ClearColorConfig, OrthographicProjection, PerspectiveProjection,
-        Projection,
-    };
-}
-
-#[doc(hidden)]
-pub mod _macro {
-    pub use bevy_asset;
 }
 
 pub use extract_param::Extract;
@@ -104,7 +87,7 @@ use crate::{
     gpu_readback::GpuReadbackPlugin,
     mesh::{MeshPlugin, MorphPlugin, RenderMesh},
     render_asset::prepare_assets,
-    render_resource::{init_empty_bind_group_layout, PipelineCache, Shader, ShaderLoader},
+    render_resource::{init_empty_bind_group_layout, PipelineCache},
     renderer::render_system,
     settings::RenderCreation,
     storage::StoragePlugin,
@@ -119,6 +102,7 @@ use bevy_ecs::{
     schedule::{ScheduleBuildSettings, ScheduleLabel},
 };
 use bevy_image::{CompressedImageFormatSupport, CompressedImageFormats};
+use bevy_shader::{load_shader_library, Shader, ShaderLoader};
 use bevy_utils::prelude::default;
 use bevy_window::{PrimaryWindow, RawHandleWrapperHolder};
 use bitflags::bitflags;
@@ -134,24 +118,6 @@ use settings::RenderResources;
 use std::sync::Mutex;
 use sync_world::{despawn_temporary_render_entities, entity_sync_system, SyncWorldPlugin};
 pub use wgpu_wrapper::WgpuWrapper;
-
-/// Inline shader as an `embedded_asset` and load it permanently.
-///
-/// This works around a limitation of the shader loader not properly loading
-/// dependencies of shaders.
-#[macro_export]
-macro_rules! load_shader_library {
-    ($asset_server_provider: expr, $path: literal $(, $settings: expr)?) => {
-        $crate::_macro::bevy_asset::embedded_asset!($asset_server_provider, $path);
-        let handle: $crate::_macro::bevy_asset::prelude::Handle<$crate::prelude::Shader> =
-            $crate::_macro::bevy_asset::load_embedded_asset!(
-                $asset_server_provider,
-                $path
-                $(,$settings)?
-            );
-        core::mem::forget(handle);
-    }
-}
 
 /// Contains the default Bevy rendering backend based on wgpu.
 ///
@@ -368,7 +334,7 @@ impl Plugin for RenderPlugin {
 
                     let settings = render_creation.clone();
 
-                    #[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+                    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
                     let dlss_project_id = app
                         .world()
                         .get_resource::<DlssProjectId>()
@@ -380,7 +346,7 @@ impl Plugin for RenderPlugin {
                             backends,
                             primary_window,
                             &settings,
-                            #[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+                            #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
                             dlss_project_id,
                         )
                         .await;
@@ -395,7 +361,7 @@ impl Plugin for RenderPlugin {
                         .detach();
                     // Otherwise, just block for it to complete
                     #[cfg(not(target_arch = "wasm32"))]
-                    futures_lite::future::block_on(async_renderer);
+                    bevy_tasks::block_on(async_renderer);
 
                     // SAFETY: Plugins should be set up on the main thread.
                     unsafe { initialize_render_app(app) };
@@ -449,7 +415,7 @@ impl Plugin for RenderPlugin {
         if let Some(future_render_resources) =
             app.world_mut().remove_resource::<FutureRenderResources>()
         {
-            #[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+            #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
             let RenderResources(
                 device,
                 queue,
@@ -459,7 +425,7 @@ impl Plugin for RenderPlugin {
                 dlss_super_resolution_supported,
                 dlss_ray_reconstruction_supported,
             ) = future_render_resources.0.lock().unwrap().take().unwrap();
-            #[cfg(any(not(feature = "dlss"), feature = "bevy_ci_testing"))]
+            #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
             let RenderResources(device, queue, adapter_info, render_adapter, instance) =
                 future_render_resources.0.lock().unwrap().take().unwrap();
 
@@ -473,11 +439,11 @@ impl Plugin for RenderPlugin {
                 .insert_resource(render_adapter.clone())
                 .insert_resource(compressed_image_format_support);
 
-            #[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+            #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
             if let Some(dlss_super_resolution_supported) = dlss_super_resolution_supported {
                 app.insert_resource(dlss_super_resolution_supported);
             }
-            #[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+            #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
             if let Some(dlss_ray_reconstruction_supported) = dlss_ray_reconstruction_supported {
                 app.insert_resource(dlss_ray_reconstruction_supported);
             }
@@ -642,18 +608,18 @@ pub fn get_mali_driver_version(adapter: &RenderAdapter) -> Option<u32> {
 /// Application-specific ID for DLSS.
 ///
 /// See the DLSS programming guide for more info.
-#[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 #[derive(Resource)]
 pub struct DlssProjectId(pub bevy_asset::uuid::Uuid);
 
 /// When DLSS Super Resolution is supported by the current system, this resource will exist in the main world.
 /// Otherwise this resource will be absent.
-#[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 #[derive(Resource, Clone, Copy)]
 pub struct DlssSuperResolutionSupported;
 
 /// When DLSS Ray Reconstruction is supported by the current system, this resource will exist in the main world.
 /// Otherwise this resource will be absent.
-#[cfg(all(feature = "dlss", not(feature = "bevy_ci_testing")))]
+#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 #[derive(Resource, Clone, Copy)]
 pub struct DlssRayReconstructionSupported;

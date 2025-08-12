@@ -50,8 +50,7 @@ pub struct SolariLightingNode {
     sample_for_world_cache_pipeline: CachedComputePipelineId,
     blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
-    di_initial_and_temporal_pipeline: CachedComputePipelineId,
-    di_spatial_and_shade_pipeline: CachedComputePipelineId,
+    di_pipeline: CachedComputePipelineId,
     gi_initial_and_temporal_pipeline: CachedComputePipelineId,
     gi_spatial_and_shade_pipeline: CachedComputePipelineId,
 }
@@ -96,8 +95,7 @@ impl ViewNode for SolariLightingNode {
             Some(sample_for_world_cache_pipeline),
             Some(blend_new_world_cache_samples_pipeline),
             Some(presample_light_tiles_pipeline),
-            Some(di_initial_and_temporal_pipeline),
-            Some(di_spatial_and_shade_pipeline),
+            Some(di_pipeline),
             Some(gi_initial_and_temporal_pipeline),
             Some(gi_spatial_and_shade_pipeline),
             Some(scene_bindings),
@@ -116,8 +114,7 @@ impl ViewNode for SolariLightingNode {
             pipeline_cache.get_compute_pipeline(self.sample_for_world_cache_pipeline),
             pipeline_cache.get_compute_pipeline(self.blend_new_world_cache_samples_pipeline),
             pipeline_cache.get_compute_pipeline(self.presample_light_tiles_pipeline),
-            pipeline_cache.get_compute_pipeline(self.di_initial_and_temporal_pipeline),
-            pipeline_cache.get_compute_pipeline(self.di_spatial_and_shade_pipeline),
+            pipeline_cache.get_compute_pipeline(self.di_pipeline),
             pipeline_cache.get_compute_pipeline(self.gi_initial_and_temporal_pipeline),
             pipeline_cache.get_compute_pipeline(self.gi_spatial_and_shade_pipeline),
             &scene_bindings.bind_group,
@@ -139,8 +136,16 @@ impl ViewNode for SolariLightingNode {
                 view_target.get_unsampled_color_attachment().view,
                 s.light_tile_samples.as_entire_binding(),
                 s.light_tile_resolved_samples.as_entire_binding(),
-                &s.di_reservoirs_a.1,
-                &s.di_reservoirs_b.1,
+                if frame_count.0 % 2 == 0 {
+                    &s.di_reservoirs_a.1
+                } else {
+                    &s.di_reservoirs_b.1
+                },
+                if frame_count.0 % 2 == 0 {
+                    &s.di_reservoirs_b.1
+                } else {
+                    &s.di_reservoirs_a.1
+                },
                 s.gi_reservoirs_a.as_entire_binding(),
                 s.gi_reservoirs_b.as_entire_binding(),
                 gbuffer,
@@ -246,19 +251,12 @@ impl ViewNode for SolariLightingNode {
         );
         pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
 
-        pass.set_pipeline(di_initial_and_temporal_pipeline);
+        pass.set_pipeline(di_pipeline);
         pass.set_push_constants(
             0,
             bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
         );
-        pass.dispatch_workgroups(dx, dy, 1);
-
-        pass.set_pipeline(di_spatial_and_shade_pipeline);
-        pass.set_push_constants(
-            0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-        );
-        pass.dispatch_workgroups(dx, dy, 1);
+        pass.dispatch_workgroups(dx + 1, dy + 1, 1);
 
         pass.set_pipeline(gi_initial_and_temporal_pipeline);
         pass.set_push_constants(
@@ -322,7 +320,7 @@ impl FromWorld for SolariLightingNode {
                     ),
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
-                    texture_storage_2d(TextureFormat::Rgba32Uint, StorageTextureAccess::ReadWrite),
+                    texture_storage_2d(TextureFormat::Rgba32Uint, StorageTextureAccess::ReadOnly),
                     texture_storage_2d(TextureFormat::Rgba32Uint, StorageTextureAccess::ReadWrite),
                     storage_buffer_sized(false, None),
                     storage_buffer_sized(false, None),
@@ -463,16 +461,9 @@ impl FromWorld for SolariLightingNode {
                 None,
                 vec![],
             ),
-            di_initial_and_temporal_pipeline: create_pipeline(
-                "solari_lighting_di_initial_and_temporal_pipeline",
-                "initial_and_temporal",
-                load_embedded_asset!(world, "restir_di.wgsl"),
-                None,
-                vec![],
-            ),
-            di_spatial_and_shade_pipeline: create_pipeline(
-                "solari_lighting_di_spatial_and_shade_pipeline",
-                "spatial_and_shade",
+            di_pipeline: create_pipeline(
+                "solari_lighting_di_pipeline",
+                "restir_di",
                 load_embedded_asset!(world, "restir_di.wgsl"),
                 None,
                 vec![],

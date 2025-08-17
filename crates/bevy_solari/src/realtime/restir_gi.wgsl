@@ -3,7 +3,6 @@
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
-#import bevy_pbr::rgb9e5::rgb9e5_to_vec3_
 #import bevy_pbr::utils::{rand_f, sample_uniform_hemisphere, uniform_hemisphere_inverse_pdf, sample_disk, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View

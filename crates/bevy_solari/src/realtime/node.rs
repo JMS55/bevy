@@ -209,6 +209,8 @@ impl ViewNode for SolariLightingNode {
         // Choice of number here is arbitrary
         let frame_index = frame_count.0.wrapping_mul(5782582);
 
+        let is_gi_validation_frame = frame_index % 3 == 2;
+
         let diagnostics = render_context.diagnostic_recorder();
         let command_encoder = render_context.command_encoder();
 
@@ -257,7 +259,11 @@ impl ViewNode for SolariLightingNode {
         pass.set_pipeline(sample_for_world_cache_pipeline);
         pass.set_push_constants(
             0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            bytemuck::cast_slice(&[
+                frame_index,
+                solari_lighting.reset as u32,
+                is_gi_validation_frame as u32,
+            ]),
         );
         pass.dispatch_workgroups_indirect(
             &solari_lighting_resources.world_cache_active_cells_dispatch,
@@ -273,35 +279,55 @@ impl ViewNode for SolariLightingNode {
         pass.set_pipeline(presample_light_tiles_pipeline);
         pass.set_push_constants(
             0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            bytemuck::cast_slice(&[
+                frame_index,
+                solari_lighting.reset as u32,
+                is_gi_validation_frame as u32,
+            ]),
         );
         pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
 
         pass.set_pipeline(di_initial_and_temporal_pipeline);
         pass.set_push_constants(
             0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            bytemuck::cast_slice(&[
+                frame_index,
+                solari_lighting.reset as u32,
+                is_gi_validation_frame as u32,
+            ]),
         );
         pass.dispatch_workgroups(dx, dy, 1);
 
         pass.set_pipeline(di_spatial_and_shade_pipeline);
         pass.set_push_constants(
             0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            bytemuck::cast_slice(&[
+                frame_index,
+                solari_lighting.reset as u32,
+                is_gi_validation_frame as u32,
+            ]),
         );
         pass.dispatch_workgroups(dx, dy, 1);
 
         pass.set_pipeline(gi_initial_and_temporal_pipeline);
         pass.set_push_constants(
             0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            bytemuck::cast_slice(&[
+                frame_index,
+                solari_lighting.reset as u32,
+                is_gi_validation_frame as u32,
+            ]),
         );
         pass.dispatch_workgroups(dx, dy, 1);
 
         pass.set_pipeline(gi_spatial_and_shade_pipeline);
         pass.set_push_constants(
             0,
-            bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
+            bytemuck::cast_slice(&[
+                frame_index,
+                solari_lighting.reset as u32,
+                is_gi_validation_frame as u32,
+            ]),
         );
         pass.dispatch_workgroups(dx, dy, 1);
 
@@ -424,7 +450,7 @@ impl FromWorld for SolariLightingNode {
                 layout,
                 push_constant_ranges: vec![PushConstantRange {
                     stages: ShaderStages::COMPUTE,
-                    range: 0..8,
+                    range: 0..12,
                 }],
                 shader,
                 shader_defs,

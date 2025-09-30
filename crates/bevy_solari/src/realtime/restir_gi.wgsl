@@ -20,7 +20,7 @@
 @group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
 @group(1) @binding(12) var<uniform> view: View;
 @group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
-struct PushConstants { frame_index: u32, reset: u32 }
+struct PushConstants { frame_index: u32, reset: u32, is_gi_validation_frame: u32 }
 var<push_constant> constants: PushConstants;
 
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
@@ -44,12 +44,16 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let base_color = pow(unpack4x8unorm(gpixel.r).rgb, vec3(2.2));
     let diffuse_brdf = base_color / PI;
 
-    let initial_reservoir = generate_initial_reservoir(world_position, world_normal, &rng);
     let temporal = load_temporal_reservoir(global_id.xy, depth, world_position, world_normal);
-    let merge_result = merge_reservoirs(initial_reservoir, world_position, world_normal, diffuse_brdf,
-        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
+    if any(temporal.reservoir.radiance != vec3(0.0)) && bool(constants.is_gi_validation_frame) {
+        gi_reservoirs_b[pixel_index] = validate_temporal_reservoir(world_position, temporal.reservoir);
+    } else {
+        let initial_reservoir = generate_initial_reservoir(world_position, world_normal, &rng);
+        let merge_result = merge_reservoirs(initial_reservoir, world_position, world_normal, diffuse_brdf,
+            temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
 
-    gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
+        gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
+    }
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -114,6 +118,39 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 #else
     reservoir.radiance = query_world_cache(sample_point.world_position, sample_point.geometric_world_normal, view.world_position);
     reservoir.unbiased_contribution_weight = uniform_hemisphere_inverse_pdf();
+#endif
+
+    let sample_point_diffuse_brdf = sample_point.material.base_color / PI;
+    reservoir.radiance *= sample_point_diffuse_brdf;
+
+    return reservoir;
+}
+
+fn validate_temporal_reservoir(world_position: vec3<f32>, temporal_reservoir: Reservoir) -> Reservoir {
+    var reservoir = empty_reservoir();
+
+    let ray_direction = normalize(temporal_reservoir.sample_point_world_position - world_position);
+    let ray_hit = trace_ray(world_position, ray_direction, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+
+    if ray_hit.kind == RAY_QUERY_INTERSECTION_NONE {
+        return reservoir;
+    }
+
+    let sample_point = resolve_ray_hit_full(ray_hit);
+
+    if all(sample_point.material.emissive != vec3(0.0)) {
+        return reservoir;
+    }
+
+    reservoir.sample_point_world_position = sample_point.world_position;
+    reservoir.sample_point_world_normal = sample_point.world_normal;
+    reservoir.confidence_weight = temporal_reservoir.confidence_weight;
+    reservoir.unbiased_contribution_weight = temporal_reservoir.unbiased_contribution_weight;
+
+#ifdef NO_WORLD_CACHE
+    // TODO: Unimplemented
+#else
+    reservoir.radiance = query_world_cache(sample_point.world_position, sample_point.geometric_world_normal, view.world_position);
 #endif
 
     let sample_point_diffuse_brdf = sample_point.material.base_color / PI;

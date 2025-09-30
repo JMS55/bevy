@@ -16,7 +16,7 @@
 
 @group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSamplePacked>;
 @group(1) @binding(12) var<uniform> view: View;
-struct PushConstants { frame_index: u32, reset: u32 }
+struct PushConstants { frame_index: u32, reset: u32, is_gi_validation_frame: u32 }
 var<push_constant> constants: PushConstants;
 
 const DIRECT_LIGHT_SAMPLE_COUNT: u32 = 32u;

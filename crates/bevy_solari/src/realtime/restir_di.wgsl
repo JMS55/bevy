@@ -22,8 +22,8 @@
 @group(1) @binding(9) var motion_vectors: texture_2d<f32>;
 @group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
 @group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
-@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(13) var<uniform> view: View;
+@group(1) @binding(14) var<uniform> previous_view: PreviousViewUniforms;
 struct PushConstants { frame_index: u32, reset: u32, is_gi_validation_frame: u32 }
 var<push_constant> constants: PushConstants;
 

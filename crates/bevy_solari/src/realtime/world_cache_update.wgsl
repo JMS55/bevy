@@ -1,12 +1,10 @@
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::utils::{rand_f, rand_range_u, sample_cosine_hemisphere}
+#import bevy_pbr::utils::{rand_f, rand_range_u}
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
 #import bevy_solari::sampling::{calculate_resolved_light_contribution, trace_light_visibility}
-#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
 #import bevy_solari::world_cache::{
     WORLD_CACHE_MAX_TEMPORAL_SAMPLES,
-    query_world_cache,
     world_cache_active_cells_count,
     world_cache_active_cell_indices,
     world_cache_geometry_data,
@@ -15,7 +13,7 @@
 }
 
 @group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSamplePacked>;
-@group(1) @binding(12) var<uniform> view: View;
+@group(1) @binding(13) var<uniform> view: View;
 struct PushConstants { frame_index: u32, reset: u32, is_gi_validation_frame: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -30,21 +28,13 @@ fn sample_radiance(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(glob
 
         // TODO: Initialize newly active cells with data from an adjacent LOD
 
-        var new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
-
-#ifndef NO_MULTIBOUNCE
-        let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
-        let ray_hit = trace_ray(geometry_data.world_position, ray_direction, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
-        if ray_hit.kind != RAY_QUERY_INTERSECTION_NONE {
-            let ray_hit = resolve_ray_hit_full(ray_hit);
-            new_radiance += ray_hit.material.base_color * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position);
-        }
-#endif
+        let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
 
         world_cache_active_cells_new_radiance[active_cell_id.x] = new_radiance;
     }
 }
 
+// TODO: Can delete this and just do the blending in the above shader (if we don't plan on initializing new cells with adjacent LOD data)
 @compute @workgroup_size(1024, 1, 1)
 fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     if active_cell_id.x < world_cache_active_cells_count {

@@ -18,8 +18,9 @@
 @group(1) @binding(9) var motion_vectors: texture_2d<f32>;
 @group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
 @group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
-@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(12) var previous_color_buffer: texture_2d<f32>;
+@group(1) @binding(13) var<uniform> view: View;
+@group(1) @binding(14) var<uniform> previous_view: PreviousViewUniforms;
 struct PushConstants { frame_index: u32, reset: u32, is_gi_validation_frame: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -111,19 +112,54 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     reservoir.sample_point_world_normal = sample_point.world_normal;
     reservoir.confidence_weight = 1.0;
 
-#ifdef NO_WORLD_CACHE
-    let direct_lighting = sample_random_light(sample_point.world_position, sample_point.world_normal, rng);
-    reservoir.radiance = direct_lighting.radiance;
-    reservoir.unbiased_contribution_weight = direct_lighting.inverse_pdf * uniform_hemisphere_inverse_pdf();
-#else
-    reservoir.radiance = query_world_cache(sample_point.world_position, sample_point.geometric_world_normal, view.world_position);
     reservoir.unbiased_contribution_weight = uniform_hemisphere_inverse_pdf();
+
+    var radiance = vec3(0.0);
+    if !get_previous_frame_radiance(sample_point.world_position, sample_point.world_normal, &radiance) {
+#ifdef NO_WORLD_CACHE
+        let direct_lighting = sample_random_light(sample_point.world_position, sample_point.world_normal, rng);
+        radiance = direct_lighting.radiance;
+        reservoir.unbiased_contribution_weight *= direct_lighting.inverse_pdf;
+#else
+        radiance = query_world_cache(sample_point.world_position, sample_point.geometric_world_normal, view.world_position);
 #endif
 
-    let sample_point_diffuse_brdf = sample_point.material.base_color / PI;
-    reservoir.radiance *= sample_point_diffuse_brdf;
+        let sample_point_diffuse_brdf = sample_point.material.base_color / PI;
+        radiance *= sample_point_diffuse_brdf;
+    }
+    reservoir.radiance = radiance;
 
     return reservoir;
+}
+
+fn get_previous_frame_radiance(world_position: vec3<f32>, world_normal: vec3<f32>, previous_frame_radiance: ptr<function, vec3<f32>>) -> bool {
+    let clip = view.clip_from_world * vec4(world_position, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let depth = ndc.z;
+    let uv_rounded = round(ndc.xy * vec2(0.5, -0.5) + vec2(0.5));
+    if any(uv_rounded < vec2(0.0)) || any(uv_rounded >= vec2(1.0)) || depth > 1.0 || bool(constants.reset) {
+        return false;
+    }
+    let pixel_id = vec2<u32>(uv_rounded * view.main_pass_viewport.zw);
+
+    let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
+    let temporal_uv_rounded = round(uv_rounded - motion_vector);
+    if any(temporal_uv_rounded < vec2(0.0)) || any(temporal_uv_rounded >= vec2(1.0)) {
+        return false;
+    }
+    let temporal_pixel_id = vec2<u32>(temporal_uv_rounded * view.main_pass_viewport.zw);
+
+    let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
+    let temporal_gpixel = textureLoad(previous_gbuffer, temporal_pixel_id, 0);
+    let temporal_world_position = reconstruct_previous_world_position(temporal_pixel_id, temporal_depth);
+    let temporal_world_normal = octahedral_decode(unpack_24bit_normal(temporal_gpixel.a));
+    if pixel_dissimilar(depth, world_position, temporal_world_position, world_normal, temporal_world_normal) {
+        return false;
+    }
+
+    // TODO: Does dividing by exposure work correctly with emissives?
+    *previous_frame_radiance = textureLoad(previous_color_buffer, temporal_pixel_id, 0).rgb / previous_view.exposure;
+    return true;
 }
 
 fn validate_temporal_reservoir(world_position: vec3<f32>, temporal_reservoir: Reservoir) -> Reservoir {
@@ -155,6 +191,9 @@ fn validate_temporal_reservoir(world_position: vec3<f32>, temporal_reservoir: Re
 
     let sample_point_diffuse_brdf = sample_point.material.base_color / PI;
     reservoir.radiance *= sample_point_diffuse_brdf;
+
+    // TODO: Check if new radiance is _less_ than old radiance, instead of updating
+    // TODO: Also use screen cache
 
     return reservoir;
 }

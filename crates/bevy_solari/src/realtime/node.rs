@@ -173,6 +173,7 @@ impl ViewNode for SolariLightingNode {
                 motion_vectors,
                 &s.previous_gbuffer.1,
                 &s.previous_depth.1,
+                &s.previous_color.1,
                 view_uniforms,
                 previous_view_uniforms,
                 s.world_cache_checksums.as_entire_binding(),
@@ -357,6 +358,11 @@ impl ViewNode for SolariLightingNode {
             solari_lighting_resources.previous_depth.0.as_image_copy(),
             solari_lighting_resources.view_size.to_extents(),
         );
+        command_encoder.copy_texture_to_texture(
+            view_target.main_texture().as_image_copy(),
+            solari_lighting_resources.previous_color.0.as_image_copy(),
+            solari_lighting_resources.view_size.to_extents(),
+        );
 
         Ok(())
     }
@@ -388,6 +394,7 @@ impl FromWorld for SolariLightingNode {
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     texture_2d(TextureSampleType::Uint),
                     texture_depth_2d(),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
                     uniform_buffer::<ViewUniform>(true),
                     uniform_buffer::<PreviousViewData>(true),
                     storage_buffer_sized(false, None),

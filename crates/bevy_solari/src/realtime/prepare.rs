@@ -24,6 +24,7 @@ use bevy_render::{
         TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
+    view::ViewTarget,
 };
 
 /// Size of the `LightSample` shader struct in bytes.
@@ -52,6 +53,7 @@ pub struct SolariLightingResources {
     pub gi_reservoirs_b: Buffer,
     pub previous_gbuffer: (Texture, TextureView),
     pub previous_depth: (Texture, TextureView),
+    pub previous_color: (Texture, TextureView),
     pub world_cache_checksums: Buffer,
     pub world_cache_life: Buffer,
     pub world_cache_radiance: Buffer,
@@ -174,6 +176,18 @@ pub fn prepare_solari_lighting_resources(
         });
         let previous_depth_view = previous_depth.create_view(&TextureViewDescriptor::default());
 
+        let previous_color = render_device.create_texture(&TextureDescriptor {
+            label: Some("solari_lighting_previous_color"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: ViewTarget::TEXTURE_FORMAT_HDR,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let previous_color_view = previous_color.create_view(&TextureViewDescriptor::default());
+
         let world_cache_checksums = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_world_cache_checksums"),
             size: WORLD_CACHE_SIZE * size_of::<u32>() as u64,
@@ -253,6 +267,7 @@ pub fn prepare_solari_lighting_resources(
             gi_reservoirs_b,
             previous_gbuffer: (previous_gbuffer, previous_gbuffer_view),
             previous_depth: (previous_depth, previous_depth_view),
+            previous_color: (previous_color, previous_color_view),
             world_cache_checksums,
             world_cache_life,
             world_cache_radiance,

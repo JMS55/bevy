@@ -1,4 +1,5 @@
 #import bevy_pbr::pbr_functions::calculate_tbn_mikktspace
+#import bevy_pbr::prepass_bindings::PreviousViewUniforms
 #import bevy_render::maths::{orthonormalize, PI}
 #import bevy_render::view::View
 #import bevy_solari::brdf::{evaluate_brdf, evaluate_specular_brdf}
@@ -12,6 +13,10 @@
 @group(1) @binding(7) var gbuffer: texture_2d<u32>;
 @group(1) @binding(8) var depth_buffer: texture_depth_2d;
 @group(1) @binding(12) var<uniform> view: View;
+@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+#ifdef SPECULAR_MOTION_VECTORS
+@group(2) @binding(3) var specular_motion_vectors: texture_storage_2d<rg16float, write>;
+#endif
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -48,7 +53,7 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
         wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
         let pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, surface.material.roughness);
 
-        radiance = trace_glossy_path(surface.world_position, wi, &rng) / pdf;
+        radiance = trace_glossy_path(global_id.xy, surface.world_position, wi, &rng) / pdf;
     }
 
     let brdf = evaluate_specular_brdf(surface.world_normal, wo, wi, surface.material.base_color, surface.material.metallic,
@@ -65,9 +70,10 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 #endif
 }
 
-fn trace_glossy_path(initial_ray_origin: vec3<f32>, initial_wi: vec3<f32>, rng: ptr<function, u32>) -> vec3<f32> {
+fn trace_glossy_path(pixel_id: vec2<u32>, initial_ray_origin: vec3<f32>, initial_wi: vec3<f32>, rng: ptr<function, u32>) -> vec3<f32> {
     var ray_origin = initial_ray_origin;
     var wi = initial_wi;
+    var end_point_previous_frame_world_position = ray_origin;
 
     // Trace up to three bounces, getting the net throughput from them
     var radiance = vec3(0.0);
@@ -77,9 +83,12 @@ fn trace_glossy_path(initial_ray_origin: vec3<f32>, initial_wi: vec3<f32>, rng: 
         let ray = trace_ray(ray_origin, wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
         if ray.kind == RAY_QUERY_INTERSECTION_NONE { break; }
         let ray_hit = resolve_ray_hit_full(ray);
+
+        ray_origin = ray_hit.world_position;
+        end_point_previous_frame_world_position = ray_hit.previous_frame_world_position;
         let wo = -wi;
 
-        if ray_hit.material.roughness > 0.1 && i != 0u { 
+        if ray_hit.material.roughness > 0.1 && i != 0u {
             // Surface is very rough, terminate path in the world cache
             let diffuse_brdf = ray_hit.material.base_color / PI;
             radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, rng);
@@ -99,7 +108,6 @@ fn trace_glossy_path(initial_ray_origin: vec3<f32>, initial_wi: vec3<f32>, rng: 
         let wo_tangent = vec3(dot(wo, T), dot(wo, B), dot(wo, N));
         let wi_tangent = sample_ggx_vndf(wo_tangent, ray_hit.material.roughness, rng);
         wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
-        ray_origin = ray_hit.world_position;
 
         // Update throughput for next bounce
         let pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, ray_hit.material.roughness);
@@ -108,7 +116,26 @@ fn trace_glossy_path(initial_ray_origin: vec3<f32>, initial_wi: vec3<f32>, rng: 
         throughput *= (brdf * cos_theta) / pdf;
     }
 
+#ifdef SPECULAR_MOTION_VECTORS
+    let motion_vector = calculate_motion_vector(ray_origin, end_point_previous_frame_world_position);
+    textureStore(specular_motion_vectors, pixel_id, vec4(motion_vector, 0.0, 0.0));
+#endif
+
     return radiance;
+}
+
+fn calculate_motion_vector(world_position: vec3<f32>, previous_world_position: vec3<f32>) -> vec2<f32> {
+    let clip_position_t = view.unjittered_clip_from_world * vec4(world_position, 1.0);
+    let clip_position = clip_position_t.xy / clip_position_t.w;
+    let previous_clip_position_t = previous_view.clip_from_world * vec4(previous_world_position, 1.0);
+    let previous_clip_position = previous_clip_position_t.xy / previous_clip_position_t.w;
+    // These motion vectors are used as offsets to UV positions and are stored
+    // in the range -1,1 to allow offsetting from the one corner to the
+    // diagonally-opposite corner in UV coordinates, in either direction.
+    // A difference between diagonally-opposite corners of clip space is in the
+    // range -2,2, so this needs to be scaled by 0.5. And the V direction goes
+    // down where clip space y goes up, so y needs to be flipped.
+    return (clip_position - previous_clip_position) * vec2(0.5, -0.5);
 }
 
 // Don't adjust the size of this struct without also adjusting GI_RESERVOIR_STRUCT_SIZE.

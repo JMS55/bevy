@@ -58,6 +58,8 @@ pub struct SolariLightingNode {
     gi_spatial_and_shade_pipeline: CachedComputePipelineId,
     specular_gi_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    specular_gi_with_motion_vectors_pipeline: CachedComputePipelineId,
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
 }
 
@@ -110,6 +112,16 @@ impl ViewNode for SolariLightingNode {
         let view_uniforms = world.resource::<ViewUniforms>();
         let previous_view_uniforms = world.resource::<PreviousViewUniforms>();
         let frame_count = world.resource::<FrameCount>();
+
+        #[cfg(not(all(feature = "dlss", not(feature = "force_disable_dlss"))))]
+        let specular_gi_pipeline = self.specular_gi_pipeline;
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        let specular_gi_pipeline = if view_dlss_rr_textures.is_some() {
+            self.specular_gi_with_motion_vectors_pipeline
+        } else {
+            self.specular_gi_pipeline
+        };
+
         let (
             Some(decay_world_cache_pipeline),
             Some(compact_world_cache_single_block_pipeline),
@@ -142,7 +154,7 @@ impl ViewNode for SolariLightingNode {
             pipeline_cache.get_compute_pipeline(self.di_spatial_and_shade_pipeline),
             pipeline_cache.get_compute_pipeline(self.gi_initial_and_temporal_pipeline),
             pipeline_cache.get_compute_pipeline(self.gi_spatial_and_shade_pipeline),
-            pipeline_cache.get_compute_pipeline(self.specular_gi_pipeline),
+            pipeline_cache.get_compute_pipeline(specular_gi_pipeline),
             &scene_bindings.bind_group,
             view_prepass_textures.deferred_view(),
             view_prepass_textures.depth_view(),
@@ -252,8 +264,8 @@ impl ViewNode for SolariLightingNode {
         );
 
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-        if let Some(bind_group_resolve_dlss_rr_textures) = bind_group_resolve_dlss_rr_textures {
-            pass.set_bind_group(2, &bind_group_resolve_dlss_rr_textures, &[]);
+        if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
+            pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
             pass.set_pipeline(resolve_dlss_rr_textures_pipeline);
             pass.dispatch_workgroups(dx, dy, 1);
         }
@@ -324,6 +336,11 @@ impl ViewNode for SolariLightingNode {
             bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
         );
         pass.dispatch_workgroups(dx, dy, 1);
+
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
+            pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
+        }
 
         pass.set_pipeline(specular_gi_pipeline);
         pass.set_push_constants(
@@ -548,6 +565,14 @@ impl FromWorld for SolariLightingNode {
                 load_embedded_asset!(world, "specular_gi.wgsl"),
                 None,
                 vec![],
+            ),
+            #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+            specular_gi_with_motion_vectors_pipeline: create_pipeline(
+                "solari_lighting_specular_gi_with_motion_vectors_pipeline",
+                "specular_gi",
+                load_embedded_asset!(world, "specular_gi.wgsl"),
+                Some(&bind_group_layout_resolve_dlss_rr_textures),
+                vec!["SPECULAR_MOTION_VECTORS".into()],
             ),
             #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
             resolve_dlss_rr_textures_pipeline: create_pipeline(

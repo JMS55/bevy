@@ -46,7 +46,7 @@ struct WorldCacheGeometryData {
 @group(1) @binding(23) var<storage, read_write> world_cache_active_cells_count: u32;
 
 #ifndef WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER
-fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
+fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, ray_t: f32, view_position: vec3<f32>, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
     var world_position = world_position_in;
     var cell_size = get_cell_size(world_position, view_position);
 
@@ -57,6 +57,9 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
     world_position += offset.x * TBN[0] + offset.y * TBN[1];
     cell_size = get_cell_size(world_position, view_position);
 #endif
+
+    // Reduce light leaks
+    cell_size = min(cell_size, ray_t * 3.0);
 
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
     let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));

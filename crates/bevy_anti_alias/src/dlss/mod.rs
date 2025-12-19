@@ -31,11 +31,11 @@ use bevy_reflect::{reflect_remote, Reflect};
 use bevy_render::{
     camera::{MipBias, TemporalJitter},
     render_graph::{RenderGraphExt, ViewNodeRunner},
+    render_resource::TextureView,
     renderer::{
         raw_vulkan_init::{AdditionalVulkanFeatures, RawVulkanInitSettings},
         RenderDevice, RenderQueue,
     },
-    texture::CachedTexture,
     view::{prepare_view_targets, Hdr},
     ExtractSchedule, Render, RenderApp, RenderSystems,
 };
@@ -366,10 +366,10 @@ impl DlssFeature for DlssRayReconstructionFeature {
 /// Additional textures needed as inputs for [`DlssRayReconstructionFeature`].
 #[derive(Component)]
 pub struct ViewDlssRayReconstructionTextures {
-    pub diffuse_albedo: CachedTexture,
-    pub specular_albedo: CachedTexture,
-    pub normal_roughness: CachedTexture,
-    pub specular_motion_vectors: CachedTexture,
+    pub diffuse_albedo: TextureView,
+    pub specular_albedo: TextureView,
+    pub normal_roughness: TextureView,
+    pub specular_motion_vectors: TextureView,
 }
 
 #[reflect_remote(DlssPerfQualityMode)]

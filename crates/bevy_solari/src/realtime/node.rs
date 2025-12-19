@@ -14,17 +14,20 @@ use bevy_ecs::{
     query::QueryItem,
     world::{FromWorld, World},
 };
+use bevy_image::ToExtents;
 use bevy_render::{
+    camera::ExtractedCamera,
     diagnostic::RecordDiagnostics,
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_resource::{
         binding_types::{
-            storage_buffer_sized, texture_2d, texture_depth_2d, texture_storage_2d, uniform_buffer,
+            sampler, storage_buffer_sized, texture_2d, texture_depth_2d, texture_storage_2d,
+            uniform_buffer,
         },
         BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, LoadOp,
-        PipelineCache, PushConstantRange, RenderPassDescriptor, ShaderStages, StorageTextureAccess,
-        TextureFormat, TextureSampleType,
+        PipelineCache, PushConstantRange, RenderPassDescriptor, SamplerBindingType, ShaderStages,
+        StorageTextureAccess, TextureFormat, TextureSampleType,
     },
     renderer::RenderContext,
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
@@ -37,6 +40,9 @@ pub mod graph {
 
     #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
     pub struct SolariLightingNode;
+
+    #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+    pub struct SolariLightingCopyViewNode;
 }
 
 pub struct SolariLightingNode {
@@ -173,8 +179,8 @@ impl ViewNode for SolariLightingNode {
                 view_target.view,
                 s.light_tile_samples.as_entire_binding(),
                 s.light_tile_resolved_samples.as_entire_binding(),
-                &s.di_reservoirs_a.1,
-                &s.di_reservoirs_b.1,
+                &s.di_reservoirs_a,
+                &s.di_reservoirs_b,
                 s.gi_reservoirs_a.as_entire_binding(),
                 s.gi_reservoirs_b.as_entire_binding(),
                 gbuffer,
@@ -182,6 +188,8 @@ impl ViewNode for SolariLightingNode {
                 motion_vectors,
                 previous_gbuffer,
                 previous_depth_buffer,
+                &s.previous_color_buffer,
+                &s.linear_sampler,
                 view_uniforms,
                 previous_view_uniforms,
                 s.world_cache_checksums.as_entire_binding(),
@@ -211,10 +219,10 @@ impl ViewNode for SolariLightingNode {
                 &pipeline_cache
                     .get_bind_group_layout(&self.bind_group_layout_resolve_dlss_rr_textures),
                 &BindGroupEntries::sequential((
-                    &d.diffuse_albedo.default_view,
-                    &d.specular_albedo.default_view,
-                    &d.normal_roughness.default_view,
-                    &d.specular_motion_vectors.default_view,
+                    &d.diffuse_albedo,
+                    &d.specular_albedo,
+                    &d.normal_roughness,
+                    &d.specular_motion_vectors,
                 )),
             )
         });
@@ -367,6 +375,8 @@ impl FromWorld for SolariLightingNode {
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     texture_2d(TextureSampleType::Uint),
                     texture_depth_2d(),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    sampler(SamplerBindingType::Filtering),
                     uniform_buffer::<ViewUniform>(true),
                     uniform_buffer::<PreviousViewData>(true),
                     storage_buffer_sized(false, None),
@@ -538,5 +548,34 @@ impl FromWorld for SolariLightingNode {
                 vec![],
             ),
         }
+    }
+}
+
+#[derive(Default)]
+pub struct SolariLightingCopyViewNode;
+
+impl ViewNode for SolariLightingCopyViewNode {
+    type ViewQuery = (
+        &'static SolariLightingResources,
+        &'static ViewTarget,
+        &'static ExtractedCamera,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (solari_lighting_resources, view_target, camera): QueryItem<Self::ViewQuery>,
+        _world: &World,
+    ) -> Result<(), NodeRunError> {
+        render_context.command_encoder().copy_texture_to_texture(
+            view_target.main_texture().as_image_copy(),
+            solari_lighting_resources
+                .previous_color_buffer
+                .texture()
+                .as_image_copy(),
+            camera.physical_viewport_size.unwrap().to_extents(),
+        );
+        Ok(())
     }
 }

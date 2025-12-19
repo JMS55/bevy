@@ -23,7 +23,7 @@ use bevy_render::{
 };
 use bevy_shader::load_shader_library;
 use extract::extract_solari_lighting;
-use node::SolariLightingNode;
+use node::{SolariLightingCopyViewNode, SolariLightingNode};
 use prepare::prepare_solari_lighting_resources;
 use tracing::warn;
 
@@ -79,6 +79,18 @@ impl Plugin for SolariLightingPlugin {
                     Node3d::EndPrepasses,
                     node::graph::SolariLightingNode,
                     Node3d::EndMainPass,
+                ),
+            )
+            .add_render_graph_node::<ViewNodeRunner<SolariLightingCopyViewNode>>(
+                Core3d,
+                node::graph::SolariLightingCopyViewNode,
+            )
+            .add_render_graph_edges(
+                Core3d,
+                (
+                    Node3d::DlssRayReconstruction,
+                    node::graph::SolariLightingCopyViewNode,
+                    Node3d::Bloom,
                 ),
             );
     }

@@ -19,8 +19,10 @@
 @group(1) @binding(9) var motion_vectors: texture_2d<f32>;
 @group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
 @group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
-@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(12) var previous_color_buffer: texture_2d<f32>;
+@group(1) @binding(13) var linear_sampler: sampler;
+@group(1) @binding(14) var<uniform> view: View;
+@group(1) @binding(15) var<uniform> previous_view: PreviousViewUniforms;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
@@ -98,6 +100,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     reservoir.sample_point_world_normal = sample_point.world_normal;
     reservoir.confidence_weight = 1.0;
 
+    var radiance: vec3<f32>; // TODO: naga crashes if we pass &reservoir.radiance directly
+    if sample_previous_frame_color(sample_point.world_position, sample_point.world_normal, &radiance) {
+        reservoir.radiance = radiance;
+        return reservoir;
+    }
+
 #ifdef NO_WORLD_CACHE
     let direct_lighting = sample_random_light(sample_point.world_position, sample_point.world_normal, rng);
     reservoir.radiance = direct_lighting.radiance;
@@ -113,6 +121,51 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     return reservoir;
 }
 
+fn sample_previous_frame_color(world_position: vec3<f32>, world_normal: vec3<f32>, out_radiance: ptr<function, vec3<f32>>) -> bool {
+    // Check if all temporal history should assumed to be invalid
+    if bool(constants.reset) {
+        return false;
+    }
+
+    // Check if on screen this frame
+    let ndc_t = view.clip_from_world * vec4(world_position, 1.0);
+    let ndc = ndc_t.xyz / ndc_t.w;
+    let uv = ndc.xy * vec2(0.5, -0.5) + vec2(0.5);
+    if any(uv < vec2(0.0)) || any(uv >= vec2(1.0)) {
+        return false;
+    }
+
+    // Check if the pixel features on screen match the query point
+    let pixel_id = vec2<u32>(round(uv * view.main_pass_viewport.zw));
+    let screen_depth = textureLoad(depth_buffer, pixel_id, 0);
+    let screen_surface = gpixel_resolve(textureLoad(gbuffer, pixel_id, 0), screen_depth, pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
+    if pixel_dissimilar(ndc.z, world_position, screen_surface.world_position, world_normal, screen_surface.world_normal, view) {
+        return false;
+    }
+
+    // Reproject to previous frame
+    let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
+    let temporal_uv = uv - motion_vector;
+    let temporal_pixel_id_float = round(temporal_uv * view.main_pass_viewport.zw);
+
+    // Check if the off screen during the previous frame (current pixel is newly visible)
+    if any(temporal_pixel_id_float < vec2(0.0)) || any(temporal_pixel_id_float >= view.main_pass_viewport.zw) {
+        return false;
+    }
+
+    // Check if the pixel features have changed heavily between the current and previous frame
+    let temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
+    let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
+    let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, temporal_pixel_id, 0), temporal_depth, temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
+    if pixel_dissimilar(ndc.z, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
+        return false;
+    }
+
+    // Sample color
+    *(out_radiance) = textureLoad(previous_color_buffer, vec2<u32>(round(temporal_uv * view.viewport.zw)), 0).rgb / previous_view.exposure;
+    return true;
+}
+
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
@@ -123,7 +176,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
     }
 
-    let permuted_temporal_pixel_id = permute_pixel(vec2<u32>(temporal_pixel_id_float), constants.frame_index, view.viewport.zw);
+    let permuted_temporal_pixel_id = permute_pixel(vec2<u32>(temporal_pixel_id_float), constants.frame_index, view.main_pass_viewport.zw);
     var temporal = load_temporal_reservoir_inner(permuted_temporal_pixel_id, depth, world_position, world_normal);
 
     // If permuted reprojection failed (tends to happen on object edges), try point reprojection

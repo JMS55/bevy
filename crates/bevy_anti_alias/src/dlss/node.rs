@@ -125,17 +125,15 @@ impl ViewNode for DlssNode<DlssRayReconstructionFeature> {
 
         let render_resolution = resolution_override.0;
         let render_parameters = DlssRayReconstructionRenderParameters {
-            diffuse_albedo: &ray_reconstruction_textures.diffuse_albedo.default_view,
-            specular_albedo: &ray_reconstruction_textures.specular_albedo.default_view,
-            normals: &ray_reconstruction_textures.normal_roughness.default_view,
+            diffuse_albedo: &ray_reconstruction_textures.diffuse_albedo,
+            specular_albedo: &ray_reconstruction_textures.specular_albedo,
+            normals: &ray_reconstruction_textures.normal_roughness,
             roughness: None,
             color: &view_target.source,
             depth: &prepass_depth_texture.texture.default_view,
             motion_vectors: &prepass_motion_vectors_texture.texture.default_view,
             specular_guide: DlssRayReconstructionSpecularGuide::SpecularMotionVectors(
-                &ray_reconstruction_textures
-                    .specular_motion_vectors
-                    .default_view,
+                &ray_reconstruction_textures.specular_motion_vectors,
             ),
             screen_space_subsurface_scattering_guide: None, // TODO
             bias: None,                                     // TODO

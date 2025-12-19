@@ -11,7 +11,7 @@
 @group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<Reservoir>;
 @group(1) @binding(7) var gbuffer: texture_2d<u32>;
 @group(1) @binding(8) var depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
+@group(1) @binding(14) var<uniform> view: View;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 

@@ -89,7 +89,7 @@ pub struct DepthPrepassDoubleBuffer;
 #[require(DeferredPrepass)]
 pub struct DeferredPrepassDoubleBuffer;
 
-/// View matrices from the previous frame.
+/// View data from the previous frame.
 ///
 /// Useful for temporal rendering techniques that need access to last frame's camera data.
 #[derive(Component, ShaderType, Clone)]
@@ -99,6 +99,7 @@ pub struct PreviousViewData {
     pub clip_from_view: Mat4,
     pub world_from_clip: Mat4,
     pub view_from_clip: Mat4,
+    pub exposure: f32,
 }
 
 #[derive(Resource, Default)]

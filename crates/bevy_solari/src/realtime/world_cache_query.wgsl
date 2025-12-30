@@ -19,6 +19,8 @@ const WORLD_CACHE_MAX_SEARCH_STEPS: u32 = 3u;
 const WORLD_CACHE_POSITION_BASE_CELL_SIZE: f32 = 0.25;
 /// How fast the world cache transitions between LODs as a function of distance to the camera
 const WORLD_CACHE_POSITION_LOD_SCALE: f32 = 8.0;
+/// Size of a small cache cell for rays shorter than the typical cell size
+const WORLD_CACHE_SHORT_RAY_CELL_SIZE: f32 = 0.03;
 
 /// Marker value for an empty cell
 const WORLD_CACHE_EMPTY_CELL: u32 = 0u;
@@ -46,17 +48,21 @@ struct WorldCacheGeometryData {
 @group(1) @binding(23) var<storage, read_write> world_cache_active_cells_count: u32;
 
 #ifndef WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER
-fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
+fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, ray_t: f32, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
     var world_position = world_position_in;
     var cell_size = get_cell_size(world_position, view_position);
 
-    // https://tomclabault.github.io/blog/2025/regir, jitter_world_position_tangent_plane
-#ifdef JITTER_WORLD_CACHE
-    let TBN = orthonormalize(world_normal);
-    let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
-    world_position += offset.x * TBN[0] + offset.y * TBN[1];
-    cell_size = get_cell_size(world_position, view_position);
-#endif
+    if ray_t < cell_size {
+        // Prevent light leaks
+        cell_size = WORLD_CACHE_SHORT_RAY_CELL_SIZE;
+    } else {
+        // Jitter query point, which essentially blurs the cache a bit so it's not so grid-like
+        // https://tomclabault.github.io/blog/2025/regir, jitter_world_position_tangent_plane
+        let TBN = orthonormalize(world_normal);
+        let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
+        world_position += offset.x * TBN[0] + offset.y * TBN[1];
+        cell_size = get_cell_size(world_position, view_position);
+    }
 
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
     let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));

@@ -49,6 +49,8 @@ pub struct SolariLightingResources {
     pub di_reservoirs_b: (Texture, TextureView),
     pub gi_reservoirs_a: Buffer,
     pub gi_reservoirs_b: Buffer,
+    pub specular_gi_reservoirs_a: Buffer,
+    pub specular_gi_reservoirs_b: Buffer,
     pub world_cache_checksums: Buffer,
     pub world_cache_life: Buffer,
     pub world_cache_radiance: Buffer,
@@ -148,6 +150,9 @@ pub fn prepare_solari_lighting_resources(
         let gi_reservoirs_a = gi_reservoirs("solari_lighting_gi_reservoirs_a");
         let gi_reservoirs_b = gi_reservoirs("solari_lighting_gi_reservoirs_b");
 
+        let specular_gi_reservoirs_a = gi_reservoirs("solari_lighting_specular_gi_reservoirs_a");
+        let specular_gi_reservoirs_b = gi_reservoirs("solari_lighting_specular_gi_reservoirs_b");
+
         let world_cache_checksums = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_world_cache_checksums"),
             size: WORLD_CACHE_SIZE * size_of::<u32>() as u64,
@@ -232,6 +237,8 @@ pub fn prepare_solari_lighting_resources(
             di_reservoirs_b,
             gi_reservoirs_a,
             gi_reservoirs_b,
+            specular_gi_reservoirs_a,
+            specular_gi_reservoirs_b,
             world_cache_checksums,
             world_cache_life,
             world_cache_radiance,

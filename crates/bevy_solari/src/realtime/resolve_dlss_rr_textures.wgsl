@@ -2,9 +2,9 @@
 #import bevy_render::view::View
 #import bevy_solari::gbuffer_utils::gpixel_resolve
 
-@group(1) @binding(7) var gbuffer: texture_2d<u32>;
-@group(1) @binding(8) var depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
+@group(1) @binding(9) var gbuffer: texture_2d<u32>;
+@group(1) @binding(10) var depth_buffer: texture_depth_2d;
+@group(1) @binding(14) var<uniform> view: View;
 
 @group(2) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;
 @group(2) @binding(1) var specular_albedo: texture_storage_2d<rgba8unorm, write>;

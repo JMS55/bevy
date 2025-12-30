@@ -19,7 +19,8 @@ use bevy_render::{
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_resource::{
         binding_types::{
-            storage_buffer_sized, texture_2d, texture_depth_2d, texture_storage_2d, uniform_buffer,
+            storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_depth_2d,
+            texture_storage_2d, uniform_buffer,
         },
         BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, LoadOp,
@@ -177,6 +178,16 @@ impl ViewNode for SolariLightingNode {
                 &s.di_reservoirs_b.1,
                 s.gi_reservoirs_a.as_entire_binding(),
                 s.gi_reservoirs_b.as_entire_binding(),
+                if frame_count.0 % 2 == 0 {
+                    s.specular_gi_reservoirs_a.as_entire_binding()
+                } else {
+                    s.specular_gi_reservoirs_b.as_entire_binding()
+                },
+                if frame_count.0 % 2 == 0 {
+                    s.specular_gi_reservoirs_b.as_entire_binding()
+                } else {
+                    s.specular_gi_reservoirs_a.as_entire_binding()
+                },
                 gbuffer,
                 depth_buffer,
                 motion_vectors,
@@ -374,6 +385,8 @@ impl FromWorld for SolariLightingNode {
                     texture_storage_2d(TextureFormat::Rgba32Uint, StorageTextureAccess::ReadWrite),
                     texture_storage_2d(TextureFormat::Rgba32Uint, StorageTextureAccess::ReadWrite),
                     storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
+                    storage_buffer_read_only_sized(false, None),
                     storage_buffer_sized(false, None),
                     texture_2d(TextureSampleType::Uint),
                     texture_depth_2d(),

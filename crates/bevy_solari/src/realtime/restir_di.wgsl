@@ -17,13 +17,13 @@
 @group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSamplePacked>;
 @group(1) @binding(3) var di_reservoirs_a: texture_storage_2d<rgba32uint, read_write>;
 @group(1) @binding(4) var di_reservoirs_b: texture_storage_2d<rgba32uint, read_write>;
-@group(1) @binding(7) var gbuffer: texture_2d<u32>;
-@group(1) @binding(8) var depth_buffer: texture_depth_2d;
-@group(1) @binding(9) var motion_vectors: texture_2d<f32>;
-@group(1) @binding(10) var previous_gbuffer: texture_2d<u32>;
-@group(1) @binding(11) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(12) var<uniform> view: View;
-@group(1) @binding(13) var<uniform> previous_view: PreviousViewUniforms;
+@group(1) @binding(9) var gbuffer: texture_2d<u32>;
+@group(1) @binding(10) var depth_buffer: texture_depth_2d;
+@group(1) @binding(11) var motion_vectors: texture_2d<f32>;
+@group(1) @binding(12) var previous_gbuffer: texture_2d<u32>;
+@group(1) @binding(13) var previous_depth_buffer: texture_depth_2d;
+@group(1) @binding(14) var<uniform> view: View;
+@group(1) @binding(15) var<uniform> previous_view: PreviousViewUniforms;
 struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 

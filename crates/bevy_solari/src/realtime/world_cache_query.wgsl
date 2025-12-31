@@ -11,16 +11,14 @@ const WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT: u32 = 32u;
 const WORLD_CACHE_MAX_GI_RAY_DISTANCE: f32 = 50.0;
 
 /// Maximum amount of frames a cell can live for without being queried
-const WORLD_CACHE_CELL_LIFETIME: u32 = 30u;
+const WORLD_CACHE_CELL_LIFETIME: u32 = 10u;
 /// Maximum amount of attempts to find a cache entry after a hash collision
 const WORLD_CACHE_MAX_SEARCH_STEPS: u32 = 3u;
 
 /// Size of a cache cell at the lowest LOD in meters
-const WORLD_CACHE_POSITION_BASE_CELL_SIZE: f32 = 0.25;
+const WORLD_CACHE_POSITION_BASE_CELL_SIZE: f32 = 0.15;
 /// How fast the world cache transitions between LODs as a function of distance to the camera
-const WORLD_CACHE_POSITION_LOD_SCALE: f32 = 8.0;
-/// Size of a small cache cell for rays shorter than the typical cell size
-const WORLD_CACHE_SHORT_RAY_CELL_SIZE: f32 = 0.03;
+const WORLD_CACHE_POSITION_LOD_SCALE: f32 = 15.0;
 
 /// Marker value for an empty cell
 const WORLD_CACHE_EMPTY_CELL: u32 = 0u;
@@ -54,14 +52,16 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
 
     if ray_t < cell_size {
         // Prevent light leaks
-        cell_size = WORLD_CACHE_SHORT_RAY_CELL_SIZE;
+        cell_size = WORLD_CACHE_POSITION_BASE_CELL_SIZE;
     } else {
+#ifdef JITTER_WORLD_CACHE
         // Jitter query point, which essentially blurs the cache a bit so it's not so grid-like
         // https://tomclabault.github.io/blog/2025/regir, jitter_world_position_tangent_plane
         let TBN = orthonormalize(world_normal);
         let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
         world_position += offset.x * TBN[0] + offset.y * TBN[1];
         cell_size = get_cell_size(world_position, view_position);
+#endif
     }
 
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));

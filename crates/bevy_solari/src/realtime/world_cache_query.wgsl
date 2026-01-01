@@ -53,16 +53,16 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
     if ray_t < cell_size {
         // Prevent light leaks
         cell_size = WORLD_CACHE_POSITION_BASE_CELL_SIZE * floor(ray_t / WORLD_CACHE_POSITION_BASE_CELL_SIZE);
-    } else {
-#ifdef JITTER_WORLD_CACHE
-        // Jitter query point, which essentially blurs the cache a bit so it's not so grid-like
-        // https://tomclabault.github.io/blog/2025/regir, jitter_world_position_tangent_plane
-        let TBN = orthonormalize(world_normal);
-        let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
-        world_position += offset.x * TBN[0] + offset.y * TBN[1];
-        cell_size = get_cell_size(world_position, view_position);
-#endif
     }
+
+#ifdef JITTER_WORLD_CACHE
+    // Jitter query point, which essentially blurs the cache a bit so it's not so grid-like
+    // https://tomclabault.github.io/blog/2025/regir, jitter_world_position_tangent_plane
+    let TBN = orthonormalize(world_normal);
+    let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
+    world_position += offset.x * TBN[0] + offset.y * TBN[1];
+    cell_size = get_cell_size(world_position, view_position);
+#endif
 
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
     let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));

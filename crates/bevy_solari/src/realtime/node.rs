@@ -351,6 +351,14 @@ impl ViewNode for SolariLightingNode {
         pass.dispatch_workgroups(dx, dy, 1);
         d.end(&mut pass);
 
+        drop(pass);
+
+        diagnostics.record_u32(
+            render_context.command_encoder(),
+            &s.world_cache_active_cells_count.slice(..),
+            "solari_lighting/world_cache_active_cells_count",
+        );
+
         Ok(())
     }
 }

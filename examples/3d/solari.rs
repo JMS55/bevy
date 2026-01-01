@@ -603,4 +603,16 @@ fn update_performance_text(
     );
     text.push_str(&format!("{:17}     TODO\n", "DLSS-RR"));
     text.push_str(&format!("\n{:17}  {total:.2} ms", "Total"));
+
+    if let Some(world_cache_active_cells_count) = diagnostics
+        .get(&DiagnosticPath::new(
+            "render/solari_lighting/world_cache_active_cells_count",
+        ))
+        .and_then(Diagnostic::average)
+    {
+        text.push_str(&format!(
+            "\n\nWorld cache cells {}",
+            world_cache_active_cells_count as u32
+        ));
+    }
 }

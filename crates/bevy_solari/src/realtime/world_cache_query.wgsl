@@ -52,7 +52,7 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
 
     if ray_t < cell_size {
         // Prevent light leaks
-        cell_size = WORLD_CACHE_POSITION_BASE_CELL_SIZE * floor(ray_t / WORLD_CACHE_POSITION_BASE_CELL_SIZE);
+        cell_size = WORLD_CACHE_POSITION_BASE_CELL_SIZE;
     }
 
 #ifdef JITTER_WORLD_CACHE

@@ -24,30 +24,39 @@ struct PushConstants { frame_index: u32, reset: u32 }
 var<push_constant> constants: PushConstants;
 
 @compute @workgroup_size(64, 1, 1)
-fn sample_radiance(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) active_cell_id: vec3<u32>) {
-    if active_cell_id.x < world_cache_active_cells_count {
-        let cell_index = world_cache_active_cell_indices[active_cell_id.x];
-        let geometry_data = world_cache_geometry_data[cell_index];
-        var rng = cell_index + constants.frame_index;
+fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) active_cell_id: vec3<u32>) {
+    if active_cell_id.x >= world_cache_active_cells_count { return; }
 
-        // TODO: Initialize newly active cells with data from an adjacent LOD
+    let cell_index = world_cache_active_cell_indices[active_cell_id.x];
+    let geometry_data = world_cache_geometry_data[cell_index];
+    var rng = cell_index + constants.frame_index;
 
-        var new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
+    let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
 
-#ifndef NO_MULTIBOUNCE
-        if rand_f(&rng) < 0.3 { // TODO: Base on LOD level
-            let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
-            let ray = trace_ray(geometry_data.world_position, ray_direction, RAY_T_MIN, WORLD_CACHE_MAX_GI_RAY_DISTANCE, RAY_FLAG_NONE);
-            if ray.kind != RAY_QUERY_INTERSECTION_NONE {
-                let ray_hit = resolve_ray_hit_full(ray);
-                let cell_life = atomicLoad(&world_cache_life[cell_index]);
-                new_radiance += ray_hit.material.base_color * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, cell_life, &rng);
-            }
+    world_cache_active_cells_new_radiance[active_cell_id.x] = new_radiance;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) active_cell_id: vec3<u32>) {
+    if active_cell_id.x >= world_cache_active_cells_count { return; }
+
+    let cell_index = world_cache_active_cell_indices[active_cell_id.x];
+    let geometry_data = world_cache_geometry_data[cell_index];
+    var rng = cell_index + constants.frame_index;
+
+    var new_radiance = world_cache_active_cells_new_radiance[active_cell_id.x];
+
+    if rand_f(&rng) < 0.3 { // TODO: Base on LOD level
+        let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
+        let ray = trace_ray(geometry_data.world_position, ray_direction, RAY_T_MIN, WORLD_CACHE_MAX_GI_RAY_DISTANCE, RAY_FLAG_NONE);
+        if ray.kind != RAY_QUERY_INTERSECTION_NONE {
+            let ray_hit = resolve_ray_hit_full(ray);
+            let cell_life = atomicLoad(&world_cache_life[cell_index]);
+            new_radiance += ray_hit.material.base_color * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, cell_life, &rng);
         }
-#endif
-
-        world_cache_active_cells_new_radiance[active_cell_id.x] = new_radiance;
     }
+
+    world_cache_active_cells_new_radiance[active_cell_id.x] = new_radiance;
 }
 
 @compute @workgroup_size(64, 1, 1)

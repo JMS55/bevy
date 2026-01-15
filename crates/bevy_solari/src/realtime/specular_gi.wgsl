@@ -112,8 +112,10 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
         // Should not perform NEE for mirror-like surfaces
         surface_perfect_mirror = ray_hit.material.roughness <= 0.001 && ray_hit.material.metallic > 0.9999;
 
-        // https://d1qx31qr3h6wln.cloudfront.net/publications/mueller21realtime.pdf#subsection.3.4, equation (3)
-        path_spread += sqrt((ray.t * ray.t) / (p_bounce * wo_tangent.z));
+        if primary_surface.material.roughness > 0.001 {
+            // https://d1qx31qr3h6wln.cloudfront.net/publications/mueller21realtime.pdf#subsection.3.4, equation (3)
+            path_spread += sqrt((ray.t * ray.t) / (p_bounce * wo_tangent.z));
+        }
 
         // Primary surface replacement for perfect mirrors
         // https://developer.nvidia.com/blog/rendering-perfect-reflections-and-refractions-in-path-traced-games/#primary_surface_replacement
@@ -128,7 +130,7 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
         }
 #endif
 
-        if i != 0u && !surface_perfect_mirror && (path_spread * path_spread > a0 * get_cell_size(ray_hit.world_position, view.world_position)) {
+        if i != 0u && (path_spread * path_spread > a0 * get_cell_size(ray_hit.world_position, view.world_position)) {
             // Path spread is wide enough, terminate path in the world cache
             let diffuse_brdf = ray_hit.material.base_color / PI;
             radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);

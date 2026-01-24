@@ -98,6 +98,7 @@ fn mis_weight_defensive_pairwise(sample: GIReservoir, state: GIResamplingState, 
     let defense_ratio = state.noncanonical_confidence_weight_sum * state.inverse_confidence_weight_sum;
     let noncanonical_weight = (numerator * defense_ratio) / (denominator1 + denominator2);
 
+    // TODO: Wrong, need to use canonical sample but apply non-canonical surface properties
     let defense_ratio2 = sample.confidence_weight * state.inverse_confidence_weight_sum;
     let partial_canonical_weight = (denominator2 * defense_ratio2) / (denominator1 + denominator2);
 

@@ -53,9 +53,3 @@ fn permute_pixel(pixel_id: vec2<u32>, frame_index: u32, view_size: vec2<f32>) ->
     shifted_pixel_id -= offset;
     return min(shifted_pixel_id, vec2<u32>(view_size - 1.0));
 }
-
-fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, search_radius: f32, rng: ptr<function, u32>) -> vec2<u32> {
-    var spatial_id = vec2<f32>(center_pixel_id) + sample_disk(search_radius, rng);
-    spatial_id = clamp(spatial_id, vec2(0.0), view.main_pass_viewport.zw - 1.0);
-    return vec2<u32>(spatial_id);
-}

@@ -91,16 +91,19 @@ fn finish_resampling(state: GIResamplingState) -> GIReservoir {
     reutrn state.reservoir;
 }
 
+// https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf#subsection.7.1.3
+// Algorithm 7.8, returning vec2(m_i(y), partial_m_c(y))
 fn mis_weight_defensive_pairwise(sample: GIReservoir, state: GIResamplingState, canonical_target_function: f32, jacobian: f32) -> vec2<f32> {
-    let numerator = sample.confidence_weight * sample.target_function;
-    let denominator1 = state.noncanonical_confidence_weight_sum * sample.target_function;
-    let denominator2 = state.canonical_confidence_weight * (canonical_target_function / jacobian);
+    let target_function_from_sample = sample.target_function / jacobian;
+    let numerator = sample.confidence_weight * target_function_from_sample;
+    let denominator_left = state.noncanonical_confidence_weight_sum * target_function_from_sample;
+    let denominator_right = state.canonical_confidence_weight * canonical_target_function;
+    let inverse_denominator = 1.0 / (denominator_left + denominator_right);
     let defense_ratio = state.noncanonical_confidence_weight_sum * state.inverse_confidence_weight_sum;
-    let noncanonical_weight = (numerator * defense_ratio) / (denominator1 + denominator2);
+    let noncanonical_weight = defense_ratio * numerator * inverse_denominator;
 
-    // TODO: Wrong, need to use canonical sample but apply non-canonical surface properties
-    let defense_ratio2 = sample.confidence_weight * state.inverse_confidence_weight_sum;
-    let partial_canonical_weight = (denominator2 * defense_ratio2) / (denominator1 + denominator2);
+    let canonical_defense_ratio = sample.confidence_weight * state.inverse_confidence_weight_sum;
+    let partial_canonical_weight = canonical_defense_ratio * denominator_right * inverse_denominator;
 
     return vec2(noncanonical_weight, partial_canonical_weight);
 }

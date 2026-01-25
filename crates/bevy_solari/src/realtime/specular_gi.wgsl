@@ -7,10 +7,10 @@ enable wgpu_ray_query;
 #import bevy_render::view::View
 #import bevy_solari::brdf::{evaluate_brdf, evaluate_specular_brdf}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, ResolvedGPixel}
+#import bevy_solari::realtime_bindings::{view_output, gi_reservoirs_a, gbuffer, depth_buffer, view, constants}
 #import bevy_solari::sampling::{sample_random_light, random_emissive_light_pdf, sample_ggx_vndf, ggx_vndf_pdf, power_heuristic}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, ResolvedRayHitFull, RAY_T_MIN, RAY_T_MAX, MIRROR_ROUGHNESS_THRESHOLD}
 #import bevy_solari::world_cache::{query_world_cache, get_cell_size, WORLD_CACHE_CELL_LIFETIME}
-#import bevy_solari::realtime_bindings::{view_output, gi_reservoirs_a, gbuffer, depth_buffer, view, constants}
 #ifdef DLSS_RR_GUIDE_BUFFERS
 #import bevy_solari::realtime_bindings::{diffuse_albedo, specular_albedo, normal_roughness, specular_motion_vectors, previous_view}
 #import bevy_solari::resolve_dlss_rr_textures::env_brdf_approx2

@@ -7,8 +7,8 @@ enable wgpu_ray_query;
 #import bevy_pbr::rgb9e5::{vec3_to_rgb9e5_, rgb9e5_to_vec3_}
 #import bevy_pbr::utils::{octahedral_encode, octahedral_decode}
 #import bevy_render::view::View
-#import bevy_solari::sampling::{generate_random_light_sample, LightSample, ResolvedLightSample}
 #import bevy_solari::realtime_bindings::{light_tile_samples, light_tile_resolved_samples, view, constants, ResolvedLightSamplePacked}
+#import bevy_solari::sampling::{generate_random_light_sample, LightSample, ResolvedLightSample}
 
 @compute @workgroup_size(1024, 1, 1)
 fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(local_invocation_index) sample_index: u32) {

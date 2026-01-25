@@ -1,3 +1,10 @@
+#define_import_path bevy_solari::gi_reservoir
+
+#import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
+#import bevy_pbr::utils::rand_f
+#import bevy_render::maths::PI
+#import bevy_solari::gbuffer_utils::ResolvedGPixel
+
 // Don't adjust the size of this struct without also adjusting `prepare::GI_RESERVOIR_STRUCT_SIZE`.
 struct GIReservoir {
     sample_point_world_position: vec3<f32>,
@@ -29,10 +36,9 @@ struct GIResamplingState {
     noncanonical_confidence_weight_sum: f32,
     inverse_confidence_weight_sum: f32,
     canonical_partial_mis_weight_sum: f32,
-    rng: u32,
 }
 
-fn new_resampling_state(canonical_surface: ResolvedGPixel, canonical_confidence_weight: f32, noncanonical_confidence_weight_sum: f32, rng: u32) -> GIResamplingState {
+fn new_resampling_state(canonical_surface: ResolvedGPixel, canonical_confidence_weight: f32, noncanonical_confidence_weight_sum: f32) -> GIResamplingState {
     return GIResamplingState(
         empty_gi_reservoir(),
         canonical_surface.world_position,
@@ -43,52 +49,51 @@ fn new_resampling_state(canonical_surface: ResolvedGPixel, canonical_confidence_
         noncanonical_confidence_weight_sum,
         1.0 / (canonical_confidence_weight + noncanonical_confidence_weight_sum),
         0.0,
-        rng,
     );
 }
 
-fn add_noncanonical_sample(sample: GIReservoir, sample_world_position: vec3<f32>, state: GIResamplingState) -> GIResamplingState {
+fn add_noncanonical_sample(sample: GIReservoir, sample_world_position: vec3<f32>, state: ptr<function, GIResamplingState>, rng: ptr<function, u32>) {
+    if sample.confidence_weight == 0.0 { return; }
+
     let jacobian = jacobian(sample_world_position, state.canonical_world_position, sample.sample_point_world_position, sample.sample_point_world_normal);
     let cos_theta = saturate(dot(normalize(sample.sample_point_world_position - state.canonical_world_position), state.canonical_world_normal));
     let target_function = luminance(sample.radiance * state.canonical_diffuse_brdf * cos_theta);
-    let mis_weight = mis_weight_defensive_pairwise_noncanonical(sample, state, target_function, jacobian);
+    let mis_weight = mis_weight_defensive_pairwise(sample, *state, target_function, jacobian);
     let resampling_weight = mis_weight.x * target_function * sample.unbiased_contribution_weight * jacobian;
 
     state.weight_sum += resampling_weight;
     state.reservoir.confidence_weight += sample.confidence_weight;
     state.canonical_partial_mis_weight_sum += mis_weight.y;
 
-    if rand_f(&state.rng) < resampling_weight / state.weight_sum {
+    if rand_f(rng) < resampling_weight / state.weight_sum {
         state.reservoir.sample_point_world_position = sample.sample_point_world_position;
         state.reservoir.sample_point_world_normal = sample.sample_point_world_normal;
         state.reservoir.radiance = sample.radiance;
-        state.target_function = target_function;
+        state.reservoir.target_function = target_function;
     }
-
-    return state;
 }
 
-fn add_canonical_sample(sample: GIReservoir, state: GIResamplingState) -> GIResamplingState {
+fn add_canonical_sample(sample: GIReservoir, state: ptr<function, GIResamplingState>, rng: ptr<function, u32>) {
+    if sample.confidence_weight == 0.0 { return; }
+
     let mis_weight = (state.canonical_confidence_weight * state.inverse_confidence_weight_sum) + state.canonical_partial_mis_weight_sum;
     let resampling_weight = mis_weight * sample.target_function * sample.unbiased_contribution_weight;
 
     state.weight_sum += resampling_weight;
     state.reservoir.confidence_weight += sample.confidence_weight;
 
-    if rand_f(&state.rng) < resampling_weight / state.weight_sum {
+    if rand_f(rng) < resampling_weight / state.weight_sum {
         state.reservoir.sample_point_world_position = sample.sample_point_world_position;
         state.reservoir.sample_point_world_normal = sample.sample_point_world_normal;
         state.reservoir.radiance = sample.radiance;
-        state.target_function = sample.target_function;
+        state.reservoir.target_function = sample.target_function;
     }
-
-    return state;
 }
 
-fn finish_resampling(state: GIResamplingState) -> GIReservoir {
-    let inverse_target_function = select(0.0, 1.0 / sample.target_function, sample.target_function > 0.0);
+fn finish_resampling(state: ptr<function, GIResamplingState>) -> GIReservoir {
+    let inverse_target_function = select(0.0, 1.0 / state.reservoir.target_function, state.reservoir.target_function > 0.0);
     state.reservoir.unbiased_contribution_weight = state.weight_sum * inverse_target_function;
-    reutrn state.reservoir;
+    return state.reservoir;
 }
 
 // https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf#subsection.7.1.3

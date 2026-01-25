@@ -2,8 +2,9 @@ enable wgpu_ray_query;
 
 #define_import_path bevy_solari::realtime_bindings
 
-#import bevy_render::view::View
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
+#import bevy_render::view::View
+#import bevy_solari::gi_reservoir::GIReservoir
 #import bevy_solari::sampling::LightSample
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
@@ -11,8 +12,8 @@ enable wgpu_ray_query;
 @group(1) @binding(2) var<storage, read_write> light_tile_resolved_samples: array<ResolvedLightSamplePacked>;
 @group(1) @binding(3) var di_reservoirs_a: texture_storage_2d<rgba32uint, read_write>;
 @group(1) @binding(4) var di_reservoirs_b: texture_storage_2d<rgba32uint, read_write>;
-@group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<Reservoir>;
-@group(1) @binding(6) var<storage, read_write> gi_reservoirs_b: array<Reservoir>;
+@group(1) @binding(5) var<storage, read_write> gi_reservoirs_a: array<GIReservoir>;
+@group(1) @binding(6) var<storage, read_write> gi_reservoirs_b: array<GIReservoir>;
 @group(1) @binding(7) var gbuffer: texture_2d<u32>;
 @group(1) @binding(8) var depth_buffer: texture_depth_2d;
 @group(1) @binding(9) var motion_vectors: texture_2d<f32>;
@@ -54,16 +55,6 @@ struct ResolvedLightSamplePacked {
     world_normal: u32,
     radiance: u32,
     inverse_pdf: f32,
-}
-
-// Don't adjust the size of this struct without also adjusting `prepare::GI_RESERVOIR_STRUCT_SIZE`.
-struct Reservoir {
-    sample_point_world_position: vec3<f32>,
-    weight_sum: f32,
-    radiance: vec3<f32>,
-    confidence_weight: f32,
-    sample_point_world_normal: vec3<f32>,
-    unbiased_contribution_weight: f32,
 }
 
 struct WorldCacheGeometryData {

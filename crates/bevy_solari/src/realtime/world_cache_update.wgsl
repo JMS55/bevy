@@ -4,15 +4,6 @@ enable wgpu_ray_query;
 #import bevy_pbr::utils::{rand_f, rand_range_u, sample_cosine_hemisphere}
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
-#import bevy_solari::sampling::{calculate_resolved_light_contribution, trace_light_visibility}
-#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN}
-#import bevy_solari::world_cache::{
-    WORLD_CACHE_MAX_TEMPORAL_SAMPLES,
-    WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT,
-    WORLD_CACHE_MAX_GI_RAY_DISTANCE,
-    WORLD_CACHE_CELL_UPDATES_SOFT_CAP,
-    query_world_cache,
-}
 #import bevy_solari::realtime_bindings::{
     light_tile_resolved_samples,
     view,
@@ -24,6 +15,15 @@ enable wgpu_ray_query;
     world_cache_radiance,
     world_cache_luminance_deltas,
     world_cache_active_cells_new_radiance,
+}
+#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN}
+#import bevy_solari::sampling::{calculate_resolved_light_contribution, trace_light_visibility}
+#import bevy_solari::world_cache::{
+    WORLD_CACHE_MAX_TEMPORAL_SAMPLES,
+    WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT,
+    WORLD_CACHE_MAX_GI_RAY_DISTANCE,
+    WORLD_CACHE_CELL_UPDATES_SOFT_CAP,
+    query_world_cache,
 }
 
 @compute @workgroup_size(64, 1, 1)

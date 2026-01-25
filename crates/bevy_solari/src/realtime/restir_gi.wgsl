@@ -86,7 +86,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let spatial_reservoir = gi_reservoirs_b[spatial_pixel_index];
 
         let jacobian = jacobian(spatial_surface.world_position, primary_surface.world_position, spatial_reservoir.sample_point_world_position, spatial_reservoir.sample_point_world_normal);
-        if jacobian < 1.0 / 8.0 || jacobian > 8.0 {
+        if jacobian < 1.0 / 4.0 || jacobian > 4.0 {
             continue;
         }
 
@@ -110,7 +110,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let spatial_reservoir = gi_reservoirs_b[spatial_pixel_index];
 
         let jacobian = jacobian(spatial_surface.world_position, primary_surface.world_position, spatial_reservoir.sample_point_world_position, spatial_reservoir.sample_point_world_normal);
-        if jacobian < 1.0 / 8.0 || jacobian > 8.0 {
+        if jacobian < 1.0 / 4.0 || jacobian > 4.0 {
             continue;
         }
 
@@ -205,7 +205,7 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, prima
     let temporal_reservoir = gi_reservoirs_a[temporal_pixel_index];
 
     let jacobian = jacobian(temporal_surface.world_position, primary_surface.world_position, temporal_reservoir.sample_point_world_position, temporal_reservoir.sample_point_world_normal);
-    if jacobian < 1.0 / 8.0 || jacobian > 8.0 {
+    if jacobian < 1.0 / 4.0 || jacobian > 4.0 {
         return NeighborInfo(empty_gi_reservoir(), vec3(0.0));
     }
 

@@ -105,10 +105,10 @@ fn mis_weight_defensive_pairwise(sample: GIReservoir, state: GIResamplingState, 
     let denominator_right = state.canonical_confidence_weight * canonical_target_function;
     let inverse_denominator = 1.0 / (denominator_left + denominator_right);
     let defense_ratio = state.noncanonical_confidence_weight_sum * state.inverse_confidence_weight_sum;
-    let noncanonical_weight = defense_ratio * numerator * inverse_denominator;
+    let noncanonical_weight = max(0.0, defense_ratio * numerator * inverse_denominator);
 
     let canonical_defense_ratio = sample.confidence_weight * state.inverse_confidence_weight_sum;
-    let partial_canonical_weight = canonical_defense_ratio * denominator_right * inverse_denominator;
+    let partial_canonical_weight = max(0.0, canonical_defense_ratio * denominator_right * inverse_denominator);
 
     return vec2(noncanonical_weight, partial_canonical_weight);
 }

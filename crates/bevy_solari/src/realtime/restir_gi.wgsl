@@ -72,13 +72,15 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // TODO: Cache valid neighbors
 
     var rng_copy = rng;
-    for (var i = 0u; i < spatial_count; i += 1u) {
-        let spatial_pixel_id = get_neighbor_pixel_id(global_id.xy, SPATIAL_REUSE_RADIUS_PIXELS, &rng_copy);
+    var search_radius = SPATIAL_REUSE_RADIUS_PIXELS;
+    var spatial_successes = 0u;
+    for (var i = 0u; i < 32u; i += 1u) {
+        let spatial_pixel_id = get_neighbor_pixel_id(global_id.xy, search_radius, &rng_copy);
 
         let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
         let spatial_surface = gpixel_resolve(textureLoad(gbuffer, spatial_pixel_id, 0), spatial_depth, spatial_pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
         if pixel_dissimilar(depth, primary_surface.world_position, spatial_surface.world_position, primary_surface.world_normal, spatial_surface.world_normal, view) {
-            // search_radius /= 2.0; // TODO
+            search_radius /= 2.0;
             continue;
         }
 
@@ -90,19 +92,24 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
             continue;
         }
 
+        spatial_successes += 1u;
         spatial_confidence_weight_sum += spatial_reservoir.confidence_weight;
+
+        if spatial_successes == spatial_count { break; }
     }
 
     var resampling_state = new_resampling_state(primary_surface, input_reservoir.confidence_weight, spatial_confidence_weight_sum);
 
     rng_copy = rng;
-    for (var i = 0u; i < spatial_count; i += 1u) {
-        let spatial_pixel_id = get_neighbor_pixel_id(global_id.xy, SPATIAL_REUSE_RADIUS_PIXELS, &rng_copy);
+    search_radius = SPATIAL_REUSE_RADIUS_PIXELS;
+    spatial_successes = 0u;
+    for (var i = 0u; i < 32u; i += 1u) {
+        let spatial_pixel_id = get_neighbor_pixel_id(global_id.xy, search_radius, &rng_copy);
 
         let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
         let spatial_surface = gpixel_resolve(textureLoad(gbuffer, spatial_pixel_id, 0), spatial_depth, spatial_pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
         if pixel_dissimilar(depth, primary_surface.world_position, spatial_surface.world_position, primary_surface.world_normal, spatial_surface.world_normal, view) {
-            // search_radius /= 2.0;
+            search_radius /= 2.0;
             continue;
         }
 
@@ -114,7 +121,10 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
             continue;
         }
 
+        spatial_successes += 1u;
         add_noncanonical_sample(spatial_reservoir, spatial_surface.world_position, &resampling_state, &rng);
+
+        if spatial_successes == spatial_count { break; }
     }
 
     add_canonical_sample(input_reservoir, &resampling_state, &rng);

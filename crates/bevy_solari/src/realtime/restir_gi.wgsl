@@ -8,7 +8,7 @@ enable wgpu_ray_query;
 #import bevy_render::maths::PI
 #import bevy_solari::brdf::evaluate_diffuse_brdf
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, pixel_dissimilar, permute_pixel, ResolvedGPixel}
-#import bevy_solari::gi_reservoir::{GIReservoir, empty_gi_reservoir, new_resampling_state, add_noncanonical_sample, add_canonical_sample, finish_resampling}
+#import bevy_solari::gi_reservoir::{GIReservoir, empty_gi_reservoir, new_resampling_state, add_noncanonical_sample, add_canonical_sample, finish_resampling, jacobian}
 #import bevy_solari::realtime_bindings::{view_output, gi_reservoirs_a, gi_reservoirs_b, gbuffer, depth_buffer, motion_vectors, previous_gbuffer, previous_depth_buffer, view, previous_view, constants}
 #import bevy_solari::sampling::{sample_random_light, trace_point_visibility}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
@@ -82,10 +82,13 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
             continue;
         }
 
-        // TODO: Validate jacobian
-
         let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
         let spatial_reservoir = gi_reservoirs_b[spatial_pixel_index];
+
+        let jacobian = jacobian(spatial_surface.world_position, primary_surface.world_position, spatial_reservoir.sample_point_world_position, spatial_reservoir.sample_point_world_normal);
+        if jacobian < 1.0 / 8.0 || jacobian > 8.0 {
+            continue;
+        }
 
         spatial_confidence_weight_sum += spatial_reservoir.confidence_weight;
     }
@@ -105,6 +108,11 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
         let spatial_reservoir = gi_reservoirs_b[spatial_pixel_index];
+
+        let jacobian = jacobian(spatial_surface.world_position, primary_surface.world_position, spatial_reservoir.sample_point_world_position, spatial_reservoir.sample_point_world_normal);
+        if jacobian < 1.0 / 8.0 || jacobian > 8.0 {
+            continue;
+        }
 
         add_noncanonical_sample(spatial_reservoir, spatial_surface.world_position, &resampling_state, &rng);
     }
@@ -195,6 +203,11 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, prima
 
     let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.main_pass_viewport.z);
     let temporal_reservoir = gi_reservoirs_a[temporal_pixel_index];
+
+    let jacobian = jacobian(temporal_surface.world_position, primary_surface.world_position, temporal_reservoir.sample_point_world_position, temporal_reservoir.sample_point_world_normal);
+    if jacobian < 1.0 / 8.0 || jacobian > 8.0 {
+        return NeighborInfo(empty_gi_reservoir(), vec3(0.0));
+    }
 
     return NeighborInfo(temporal_reservoir, temporal_surface.world_position);
 }

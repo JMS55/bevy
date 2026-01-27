@@ -24,6 +24,9 @@ enable wgpu_ray_query;
     world_cache_radiance,
     world_cache_luminance_deltas,
     world_cache_active_cells_new_radiance,
+    world_cache_sampling_probabilities,
+    world_cache_sampling_light_ids1,
+    world_cache_sampling_light_ids2,
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -31,6 +34,28 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     if active_cell_id.x >= world_cache_active_cells_count { return; }
 
     let cell_index = world_cache_active_cell_indices[active_cell_id.x];
+
+    // var sampling_probabilities: array<f32, 8u>;
+    // var sampling_light_ids1: array<u32, 8u>;
+    // var sampling_light_ids2: array<u32, 8u>;
+    // for (var i = cell_index * 8u; i < cell_index * 8u + 8u; i += 1u) {
+    //     sampling_probabilities = world_cache_sampling_probabilities[i];
+    //     sampling_light_ids1 = previous_frame_light_id_translations[world_cache_sampling_light_ids1[i]];
+    //     sampling_light_ids2 = previous_frame_light_id_translations[world_cache_sampling_light_ids2[i]];
+    // }
+
+    // TODO:
+    // Remove backfacing emissive contribution
+    //
+    // Remove despawned lights from entries
+    // 95%: RIS over all 8 entries
+    // 5%: RIS over light tiles
+    // Test visibility
+    // If in list: Update sample count + 1, visibility + result
+    // If not in list, and is visible: kick out worse sample
+    // Store radiance as part of new estimate for cell
+    // (New dispatch) build alias table for DI/GI
+
     let geometry_data = world_cache_geometry_data[cell_index];
     var rng = cell_index + constants.frame_index;
 

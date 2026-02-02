@@ -36,8 +36,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     var rng = cell_index + constants.frame_index;
 
     var good_lights: array<u32, 8u>;
-    var worst_good_light_luminance = 3.402823466e38;
-    var worst_good_light_index = 8u;
+    var good_light_target_functions: array<f32, 8u>;
     var good_reservoir = empty_reservoir();
     var weight_sum = 0.0;
     for (var i = 0u; i < 8u; i += 1u) {
@@ -58,6 +57,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, geometry_data.world_position, geometry_data.world_normal);
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, geometry_data.world_normal));
         let target_function = luminance(contribution);
+        good_light_target_functions[i] = target_function;
         let mis_weight = 1.0 / 8.0;
         let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
         weight_sum += resampling_weight;
@@ -69,10 +69,6 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
             good_reservoir.good_light_index = i;
         }
 
-        if target_function < worst_good_light_luminance {
-            worst_good_light_luminance = target_function;
-            worst_good_light_index = i;
-        }
     }
     good_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / good_reservoir.sample_target_function, good_reservoir.sample_target_function > 0.0);
 
@@ -119,8 +115,20 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     if combined_reservoir.good_light_index < 8u {
         // TODO: Update sample count + 1, visibility + result
-    } else if combined_reservoir.unbiased_contribution_weight > 0.0 && combined_reservoir.target_function < worst_good_light_luminance {
-        good_lights[worst_good_light_index] = combined_reservoir.sample.light_id;
+    } else if combined_reservoir.unbiased_contribution_weight {
+        // TODO: Can probably do this while doing RIS over the 8 lights
+        var worst_index = 8u;
+        var worst_target_function = 3.402823466e38;
+        for (var i = 0u; i < 8u; i += 1u) {
+            let t = good_light_target_functions[i];
+            if combined_reservoir.target_function > t && t < worst_target_function {
+                worst_index = i;
+                worst_target_function = t;
+            }
+        }
+        if worst_index != 8u {
+            good_lights[worst_index] = combined_reservoir.sample.light_id;
+        }
     }
 
     for (var i = 0u; i < 8u; i += 1u) {

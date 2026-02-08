@@ -194,11 +194,16 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
     return SampleCachedLightsResult(good_reservoir, worst_light_index);
 }
 
-fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir, rng: ptr<function, u32>) -> Reservoir {
+fn combine_reservoirs(good_reservoir_in: Reservoir, random_reservoir_in: Reservoir, rng: ptr<function, u32>) -> Reservoir {
+    var good_reservoir = good_reservoir_in;
+    var random_reservoir = random_reservoir_in;
+    good_reservoir.sample_target_function *= 0.9;
+    random_reservoir.sample_target_function *= 1.0 - 0.9;
+
     var combined_reservoir = empty_reservoir();
     let mis_weight = 1.0 / 2.0;
-    let good_resampling_weight = 0.9 * mis_weight * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
-    let random_resampling_weight = (1.0 - 0.9) * mis_weight * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
+    let good_resampling_weight = mis_weight * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
+    let random_resampling_weight = mis_weight * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
     let weight_sum = good_resampling_weight + random_resampling_weight;
     if rand_f(rng) < random_resampling_weight / weight_sum {
         combined_reservoir = random_reservoir;

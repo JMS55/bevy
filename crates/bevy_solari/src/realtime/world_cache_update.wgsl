@@ -38,8 +38,8 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     var rng = cell_index + constants.frame_index;
 
     let random_reservoir = sample_random_lights(geometry_data.world_position, geometry_data.world_normal, workgroup_id, &rng);
-    let sample_cached_lights_result = sample_cached_lights(geometry_data.world_position, geometry_data.world_normal, random_reservoir.sample_target_function, &rng);
-    let combined_reservoir = combine_reservoirs(sample_cached_lights_result.reservoir, random_reservoir);
+    let sample_cached_lights_result = sample_cached_lights(geometry_data.world_position, geometry_data.world_normal, cell_index, random_reservoir.sample_target_function, &rng);
+    var combined_reservoir = combine_reservoirs(sample_cached_lights_result.reservoir, random_reservoir, &rng);
 
     var visibility = 0.0;
     if combined_reservoir.unbiased_contribution_weight > 0.0 {
@@ -48,7 +48,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     if visibility > 0.0 && sample_cached_lights_result.worst_light_index != 8u {
         combined_reservoir.good_light_index = sample_cached_lights_result.worst_light_index;
-        world_cache_sampling_weights[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.sample.light_id;
+        world_cache_sampling_light_ids[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.sample;
     }
 
     if combined_reservoir.good_light_index < 8u {
@@ -144,7 +144,7 @@ struct SampleCachedLightsResult {
     worst_light_index: u32,
 }
 
-fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, random_reservoir_target_function: f32, rng: ptr<function, u32>) -> Reservoir {
+fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell_index: u32, random_reservoir_target_function: f32, rng: ptr<function, u32>) -> SampleCachedLightsResult {
     var good_reservoir = empty_reservoir();
     var weight_sum = 0.0;
     var worst_light_index = 8u;
@@ -163,7 +163,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, rand
         let triangle_id = light & 0xFFFFu;
         light = (light_id << 16u) | triangle_id;
 
-        let seed = rand_u(&rng);
+        let seed = rand_u(rng);
         let light_sample = LightSample(light, seed);
         let resolved_light_sample = resolve_light_sample(light_sample, light_sources[light_id]);
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
@@ -175,7 +175,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, rand
         let resampling_weight = mis_weight * (target_function * light_inverse_pdf * light_contribution.inverse_pdf);
         weight_sum += resampling_weight;
 
-        if rand_f(&rng) < resampling_weight / weight_sum {
+        if rand_f(rng) < resampling_weight / weight_sum {
             good_reservoir.sample = light;
             good_reservoir.sample_contribution = contribution;
             good_reservoir.sample_target_function = target_function;
@@ -194,13 +194,13 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, rand
     return SampleCachedLightsResult(good_reservoir, worst_light_index);
 }
 
-fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir) -> Reservoir {
+fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir, rng: ptr<function, u32>) -> Reservoir {
     var combined_reservoir = empty_reservoir();
     let mis_weight = 1.0 / 2.0;
     let good_resampling_weight = 0.9 * mis_weight * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
     let random_resampling_weight = (1.0 - 0.9) * mis_weight * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
     let weight_sum = good_resampling_weight + random_resampling_weight;
-    if rand_f(&rng) < random_resampling_weight / weight_sum {
+    if rand_f(rng) < random_resampling_weight / weight_sum {
         combined_reservoir = random_reservoir;
     } else {
         combined_reservoir = good_reservoir;

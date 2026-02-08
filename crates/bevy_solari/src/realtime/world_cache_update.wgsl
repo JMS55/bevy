@@ -46,14 +46,13 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         visibility = trace_light_visibility(geometry_data.world_position, combined_reservoir.sample_world_position);
     }
 
-    if combined_reservoir.good_light_index < 8u {
-        // TODO: Update sample count + 1, visibility + result
-    } else if visibility > 0.0 && sample_cached_lights_result.worst_light_index != 8u {
+    if visibility > 0.0 && sample_cached_lights_result.worst_light_index != 8u {
         combined_reservoir.good_light_index = sample_cached_lights_result.worst_light_index;
         world_cache_sampling_weights[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.sample.light_id;
     }
 
     if combined_reservoir.good_light_index < 8u {
+        // TODO: Update sample count + 1, visibility
         world_cache_sampling_weights[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.unbiased_contribution_weight;
     }
 

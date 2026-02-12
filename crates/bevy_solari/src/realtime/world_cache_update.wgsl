@@ -26,7 +26,6 @@ enable wgpu_ray_query;
     world_cache_luminance_deltas,
     world_cache_active_cells_new_radiance,
     world_cache_sampling_light_ids,
-    world_cache_sampling_weights,
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -53,7 +52,6 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     if combined_reservoir.good_light_index < 8u {
         // TODO: Update sample count + 1, visibility
-        world_cache_sampling_weights[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.unbiased_contribution_weight;
     }
 
     // if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
@@ -165,14 +163,20 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
 
         let seed = rand_u(rng);
         let light_sample = LightSample(light, seed);
-        let resolved_light_sample = resolve_light_sample(light_sample, light_sources[light_id]);
-        let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+        let light_source = light_sources[light_id];
+        let resolved_light_sample = resolve_light_sample(light_sample, light_source);
+        var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+
+        // Remove probability of choosing the triangle, as triangle is taken from the cache
+        if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
+            let triangle_count = light_source.kind >> 1u;
+            light_contribution.inverse_pdf /= f32(triangle_count);
+        }
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
         let mis_weight = 1.0 / 8.0; // TODO: This is wrong if there are not actually 8 valid samples
-        let light_inverse_pdf = world_cache_sampling_weights[cell_index * 8u + i];
-        let resampling_weight = mis_weight * (target_function * light_inverse_pdf * light_contribution.inverse_pdf); // TODO: light_contribution.inverse_pdf has PDF of choosing the triangle, but that's already baked into light_inverse_pdf
+        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {

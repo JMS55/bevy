@@ -8,7 +8,6 @@ enable wgpu_ray_query;
     world_cache_radiance,
     world_cache_luminance_deltas,
     world_cache_sampling_light_ids,
-    world_cache_sampling_weights,
     world_cache_a,
     world_cache_b,
     world_cache_active_cell_indices,
@@ -34,7 +33,6 @@ fn decay_world_cache(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
             for (var i = 0u; i < 8u; i += 1u) {
                 world_cache_sampling_light_ids[global_id.x * 8u + i] = NULL_LIGHT_ID;
-                world_cache_sampling_weights[global_id.x * 8u + i] = 0.0;
             }
         }
     }

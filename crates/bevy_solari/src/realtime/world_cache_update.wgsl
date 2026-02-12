@@ -194,6 +194,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
     return SampleCachedLightsResult(good_reservoir, worst_light_index);
 }
 
+// TODO: Need to handle one or both reservoirs having NULL_LIGHT_ID?
 fn combine_reservoirs(good_reservoir_in: Reservoir, random_reservoir_in: Reservoir, rng: ptr<function, u32>) -> Reservoir {
     var good_reservoir = good_reservoir_in;
     var random_reservoir = random_reservoir_in;

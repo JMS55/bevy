@@ -1,11 +1,14 @@
 enable wgpu_ray_query;
 
 #import bevy_solari::world_cache::WORLD_CACHE_EMPTY_CELL
+#import bevy_solari::sampling::NULL_LIGHT_ID
 #import bevy_solari::realtime_bindings::{
     world_cache_life,
     world_cache_checksums,
     world_cache_radiance,
     world_cache_luminance_deltas,
+    world_cache_sampling_light_ids,
+    world_cache_sampling_weights,
     world_cache_a,
     world_cache_b,
     world_cache_active_cell_indices,
@@ -28,6 +31,11 @@ fn decay_world_cache(@builtin(global_invocation_id) global_id: vec3<u32>) {
             world_cache_checksums[global_id.x] = WORLD_CACHE_EMPTY_CELL;
             world_cache_radiance[global_id.x] = vec4(0.0);
             world_cache_luminance_deltas[global_id.x] = 0.0;
+
+            for (var i = 0u; i < 8u; i += 1u) {
+                world_cache_sampling_light_ids[global_id.x * 8u + i] = NULL_LIGHT_ID;
+                world_cache_sampling_weights[global_id.x * 8u + i] = 0.0;
+            }
         }
     }
 }

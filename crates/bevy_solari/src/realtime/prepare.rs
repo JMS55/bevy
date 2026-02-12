@@ -19,8 +19,8 @@ use bevy_render::texture::CachedTexture;
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
-        Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureUsages, TextureView, TextureViewDescriptor,
+        Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, TextureDescriptor,
+        TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
 };
@@ -193,12 +193,17 @@ pub fn prepare_solari_lighting_resources(
                 mapped_at_creation: false,
             });
 
-        let world_cache_sampling_light_ids = render_device.create_buffer(&BufferDescriptor {
-            label: Some("solari_lighting_world_cache_sampling_light_ids"),
-            size: 8 * WORLD_CACHE_SIZE * size_of::<u32>() as u64,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
+        // TODO: This is extremely inefficient. Initializing should really be done via a shader to minimize data upload.
+        let world_cache_sampling_light_ids =
+            render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("solari_lighting_world_cache_sampling_light_ids"),
+                contents: bytemuck::cast_slice(
+                    &std::iter::repeat(0xFFFFFFFFu32)
+                        .take(8 * WORLD_CACHE_SIZE as usize)
+                        .collect::<Vec<u32>>(),
+                ),
+                usage: BufferUsages::STORAGE,
+            });
 
         let world_cache_sampling_weights = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_world_cache_sampling_weights"),

@@ -172,7 +172,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         let target_function = luminance(contribution);
         let mis_weight = 1.0 / 8.0; // TODO: This is wrong if there are not actually 8 valid samples
         let light_inverse_pdf = world_cache_sampling_weights[cell_index * 8u + i];
-        let resampling_weight = mis_weight * (target_function * light_inverse_pdf * light_contribution.inverse_pdf);
+        let resampling_weight = mis_weight * (target_function * light_inverse_pdf * light_contribution.inverse_pdf); // TODO: light_contribution.inverse_pdf has PDF of choosing the triangle, but that's already baked into light_inverse_pdf
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {

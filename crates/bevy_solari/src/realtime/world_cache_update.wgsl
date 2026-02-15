@@ -5,7 +5,7 @@ enable wgpu_ray_query;
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
 #import bevy_solari::sampling::{LightSample, NULL_LIGHT_ID, resolve_light_sample, calculate_resolved_light_contribution, trace_light_visibility}
-#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, light_sources, previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME, RAY_T_MIN}
+#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, light_sources, previous_frame_light_id_translations, LIGHT_SOURCE_KIND_DIRECTIONAL, LIGHT_NOT_PRESENT_THIS_FRAME, RAY_T_MIN}
 #import bevy_solari::world_cache::{
     WORLD_CACHE_MAX_TEMPORAL_SAMPLES,
     WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT,
@@ -58,6 +58,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     // if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
 
+    // TODO: Need the PDF of the sample here too
     world_cache_active_cells_new_radiance[active_cell_id.x] = combined_reservoir.sample_contribution * visibility * combined_reservoir.unbiased_contribution_weight;
 }
 
@@ -111,14 +112,22 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec3<u32>, rng: ptr<function, u32>) -> Reservoir {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+    let light_count = f32(arrayLength(&light_sources));
 
     var random_reservoir = empty_reservoir();
     var weight_sum = 0.0;
-    var selected_tile_sample = 0u;
     for (var i = 0u; i < 4u; i += 1u) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
-        let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+        var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+
+        light_contribution.inverse_pdf = light_count;
+        let light_id = light_tile_samples[tile_sample].light_id;
+        let light_source = light_sources[light_id];
+        if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
+            let triangle_count = light_source.kind >> 1u;
+            light_contribution.inverse_pdf *= f32(triangle_count);
+        }
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
@@ -127,14 +136,13 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {
-            selected_tile_sample = tile_sample;
+            random_reservoir.sample = light_id;
             random_reservoir.sample_contribution = contribution;
             random_reservoir.sample_target_function = target_function;
             random_reservoir.sample_world_position = resolved_light_sample.world_position;
         }
     }
 
-    random_reservoir.sample = light_tile_samples[selected_tile_sample].light_id;
     random_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / random_reservoir.sample_target_function, random_reservoir.sample_target_function > 0.0);
 
     return random_reservoir;

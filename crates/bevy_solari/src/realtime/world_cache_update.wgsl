@@ -26,6 +26,7 @@ enable wgpu_ray_query;
     world_cache_luminance_deltas,
     world_cache_active_cells_new_radiance,
     world_cache_sampling_light_ids,
+    world_cache_sampling_weights,
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -52,6 +53,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     if combined_reservoir.good_light_index < 8u {
         // TODO: Update sample count + 1, visibility
+        world_cache_sampling_weights[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.unbiased_contribution_weight;
     }
 
     // if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
@@ -105,6 +107,7 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     world_cache_luminance_deltas[cell_index] = blended_luminance_delta;
 }
 
+// TODO: Don't use light_contribution.inverse_pdf. Instead use light_count * triangle_count
 fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec3<u32>, rng: ptr<function, u32>) -> Reservoir {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
@@ -145,6 +148,8 @@ struct SampleCachedLightsResult {
 fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell_index: u32, random_reservoir_target_function: f32, rng: ptr<function, u32>) -> SampleCachedLightsResult {
     var good_reservoir = empty_reservoir();
     var weight_sum = 0.0;
+    var valid_samples = 0.0;
+
     var worst_light_index = 8u;
     var worst_target_function = random_reservoir_target_function;
     for (var i = 0u; i < 8u; i += 1u) {
@@ -167,17 +172,11 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         let resolved_light_sample = resolve_light_sample(light_sample, light_source);
         var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
-        // Remove probability of choosing the triangle, as triangle is taken from the cache
-        if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
-            let triangle_count = light_source.kind >> 1u;
-            light_contribution.inverse_pdf /= f32(triangle_count);
-        }
-
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
-        let mis_weight = 1.0 / 8.0; // TODO: This is wrong if there are not actually 8 valid samples
-        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+        let resampling_weight = target_function * world_cache_sampling_weights[cell_index * 8u + i];
         weight_sum += resampling_weight;
+        valid_samples += 1.0;
 
         if rand_f(rng) < resampling_weight / weight_sum {
             good_reservoir.sample = light;
@@ -193,22 +192,19 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         }
     }
 
-    good_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / good_reservoir.sample_target_function, good_reservoir.sample_target_function > 0.0);
+    let d = good_reservoir.sample_target_function * valid_samples;
+    good_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / d, d > 0.0);
 
     return SampleCachedLightsResult(good_reservoir, worst_light_index);
 }
 
-// TODO: Need to handle one or both reservoirs having NULL_LIGHT_ID?
-fn combine_reservoirs(good_reservoir_in: Reservoir, random_reservoir_in: Reservoir, rng: ptr<function, u32>) -> Reservoir {
-    var good_reservoir = good_reservoir_in;
-    var random_reservoir = random_reservoir_in;
-    good_reservoir.sample_target_function *= 0.9;
-    random_reservoir.sample_target_function *= 1.0 - 0.9;
+fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir, rng: ptr<function, u32>) -> Reservoir {
+    if good_reservoir.sample == NULL_LIGHT_ID { return random_reservoir; }
+    if random_reservoir.sample == NULL_LIGHT_ID { return good_reservoir; }
 
     var combined_reservoir = empty_reservoir();
-    let mis_weight = 1.0 / 2.0;
-    let good_resampling_weight = mis_weight * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
-    let random_resampling_weight = mis_weight * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
+    let good_resampling_weight = 0.95 * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
+    let random_resampling_weight = (1.0 - 0.95) * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
     let weight_sum = good_resampling_weight + random_resampling_weight;
     if rand_f(rng) < random_resampling_weight / weight_sum {
         combined_reservoir = random_reservoir;

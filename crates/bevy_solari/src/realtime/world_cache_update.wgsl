@@ -108,7 +108,6 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     world_cache_luminance_deltas[cell_index] = blended_luminance_delta;
 }
 
-// TODO: Don't use light_contribution.inverse_pdf. Instead use light_count * triangle_count
 fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec3<u32>, rng: ptr<function, u32>) -> Reservoir {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;

@@ -48,7 +48,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     if visibility > 0.0 && sample_cached_lights_result.worst_light_index != 8u {
         combined_reservoir.good_light_index = sample_cached_lights_result.worst_light_index;
-        world_cache_sampling_light_ids[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.sample;
+        world_cache_sampling_light_ids[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.sample.light_id;
     }
 
     if combined_reservoir.good_light_index < 8u {
@@ -58,8 +58,8 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     // if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
 
-    // TODO: Need the PDF of the sample here too
-    world_cache_active_cells_new_radiance[active_cell_id.x] = combined_reservoir.sample_contribution * visibility * combined_reservoir.unbiased_contribution_weight;
+    let sample_inverse_pdf = resolve_light_sample(combined_reservoir.sample, light_sources[combined_reservoir.sample.light_id >> 16u]).inverse_pdf;
+    world_cache_active_cells_new_radiance[active_cell_id.x] = combined_reservoir.sample_contribution * sample_inverse_pdf * visibility * combined_reservoir.unbiased_contribution_weight;
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -121,8 +121,8 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
         var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
         light_contribution.inverse_pdf = light_count;
-        let light_id = light_tile_samples[tile_sample].light_id;
-        let light_source = light_sources[light_id];
+        let sample = light_tile_samples[tile_sample];
+        let light_source = light_sources[sample.light_id];
         if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
             let triangle_count = light_source.kind >> 1u;
             light_contribution.inverse_pdf *= f32(triangle_count);
@@ -135,7 +135,7 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {
-            random_reservoir.sample = light_id;
+            random_reservoir.sample = sample;
             random_reservoir.sample_contribution = contribution;
             random_reservoir.sample_target_function = target_function;
             random_reservoir.sample_world_position = resolved_light_sample.world_position;
@@ -186,7 +186,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         valid_samples += 1.0;
 
         if rand_f(rng) < resampling_weight / weight_sum {
-            good_reservoir.sample = light;
+            good_reservoir.sample = light_sample;
             good_reservoir.sample_contribution = contribution;
             good_reservoir.sample_target_function = target_function;
             good_reservoir.sample_world_position = resolved_light_sample.world_position;
@@ -206,8 +206,8 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
 }
 
 fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir, rng: ptr<function, u32>) -> Reservoir {
-    if good_reservoir.sample == NULL_LIGHT_ID { return random_reservoir; }
-    if random_reservoir.sample == NULL_LIGHT_ID { return good_reservoir; }
+    if good_reservoir.sample.light_id == NULL_LIGHT_ID { return random_reservoir; }
+    if random_reservoir.sample.light_id == NULL_LIGHT_ID { return good_reservoir; }
 
     var combined_reservoir = empty_reservoir();
     let good_resampling_weight = 0.95 * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
@@ -225,7 +225,7 @@ fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir, rn
 }
 
 struct Reservoir {
-    sample: u32,
+    sample: LightSample,
     sample_contribution: vec3<f32>,
     sample_target_function: f32,
     sample_world_position: vec4<f32>,
@@ -235,7 +235,7 @@ struct Reservoir {
 
 fn empty_reservoir() -> Reservoir {
     return Reservoir(
-        NULL_LIGHT_ID,
+        LightSample(NULL_LIGHT_ID, 0u),
         vec3(0.0),
         0.0,
         vec4(0.0),

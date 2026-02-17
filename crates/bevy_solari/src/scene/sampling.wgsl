@@ -131,6 +131,11 @@ fn generate_random_light_sample(rng: ptr<function, u32>) -> GenerateRandomLightS
     var resolved_light_sample = resolve_light_sample(light_sample, light_source);
     resolved_light_sample.inverse_pdf *= f32(light_count);
 
+    if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
+        let triangle_count = light_source.kind >> 1u;
+        resolved_light_sample.inverse_pdf *= f32(triangle_count);
+    }
+
     return GenerateRandomLightSampleResult(light_sample, resolved_light_sample);
 }
 
@@ -163,7 +168,6 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
             directional_light.inverse_pdf,
         );
     } else {
-        let triangle_count = light_source.kind >> 1u;
         let triangle_id = light_sample.light_id & 0xFFFFu;
         let barycentrics = triangle_barycentrics(light_sample.seed);
         let triangle_data = resolve_triangle_data_full(light_source.id, triangle_id, barycentrics);
@@ -172,7 +176,7 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
             vec4(triangle_data.world_position, 1.0),
             triangle_data.world_normal,
             triangle_data.material.emissive.rgb,
-            f32(triangle_count) * triangle_data.triangle_area,
+            triangle_data.triangle_area,
         );
     }
 }

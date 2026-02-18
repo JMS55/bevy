@@ -122,7 +122,7 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
 
         light_contribution.inverse_pdf = light_count;
         let sample = light_tile_samples[tile_sample];
-        let light_source = light_sources[sample.light_id];
+        let light_source = light_sources[sample.light_id >> 16u];
         if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
             let triangle_count = light_source.kind >> 1u;
             light_contribution.inverse_pdf *= f32(triangle_count);

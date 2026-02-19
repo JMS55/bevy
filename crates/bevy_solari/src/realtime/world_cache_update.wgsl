@@ -209,9 +209,12 @@ fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir, rn
     if good_reservoir.sample.light_id == NULL_LIGHT_ID { return random_reservoir; }
     if random_reservoir.sample.light_id == NULL_LIGHT_ID { return good_reservoir; }
 
+    let random_unbiased_contribution_weight = min(random_reservoir.unbiased_contribution_weight, 0.1 * good_reservoir.unbiased_contribution_weight);
+
     var combined_reservoir = empty_reservoir();
-    let good_resampling_weight = 0.95 * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
-    let random_resampling_weight = (1.0 - 0.95) * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
+    let mis_weight = 0.5;
+    let good_resampling_weight = mis_weight * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
+    let random_resampling_weight = mis_weight * (random_reservoir.sample_target_function * random_unbiased_contribution_weight);
     let weight_sum = good_resampling_weight + random_resampling_weight;
     if rand_f(rng) < random_resampling_weight / weight_sum {
         combined_reservoir = random_reservoir;

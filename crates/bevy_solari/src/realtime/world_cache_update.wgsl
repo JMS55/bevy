@@ -27,6 +27,7 @@ enable wgpu_ray_query;
     world_cache_active_cells_new_radiance,
     world_cache_sampling_light_ids,
     world_cache_sampling_weights,
+    world_cache_sampling_counts,
 }
 
 // TODO: Factor cell albedo into resampling?
@@ -55,8 +56,10 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     }
 
     if combined_reservoir.good_light_index < 8u {
-        // TODO: Update sample count + 1, visibility
-        world_cache_sampling_weights[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.unbiased_contribution_weight;
+        // TODO: Update visibility
+        let i = cell_index * 8u + combined_reservoir.good_light_index;
+        world_cache_sampling_weights[i] = combined_reservoir.unbiased_contribution_weight;
+        world_cache_sampling_counts[i] = u32(combined_reservoir.confidence_weight);
     }
 
     // if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
@@ -118,7 +121,7 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
 
     var random_reservoir = empty_reservoir();
     var weight_sum = 0.0;
-    for (var i = 0u; i < 4u; i += 1u) {
+    for (var i = 0u; i < 16u; i += 1u) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
         var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
@@ -133,7 +136,7 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
-        let mis_weight = 1.0 / 4.0;
+        let mis_weight = 1.0 / 16.0;
         let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
         weight_sum += resampling_weight;
 
@@ -147,6 +150,8 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
 
     random_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / random_reservoir.sample_target_function, random_reservoir.sample_target_function > 0.0);
 
+    random_reservoir.confidence_weight = 16.0;
+
     return random_reservoir;
 }
 
@@ -158,7 +163,6 @@ struct SampleCachedLightsResult {
 fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell_index: u32, random_reservoir_target_function: f32, rng: ptr<function, u32>) -> SampleCachedLightsResult {
     var good_reservoir = empty_reservoir();
     var weight_sum = 0.0;
-    var valid_samples = 0.0;
 
     var worst_light_index = 8u;
     var worst_target_function = random_reservoir_target_function;
@@ -184,11 +188,12 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         let resolved_light_sample = resolve_light_sample(light_sample, light_source);
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
+        let confidence_weight = min(320.0, f32(world_cache_sampling_counts[cell_index * 8u + i]));
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
-        let resampling_weight = target_function * world_cache_sampling_weights[cell_index * 8u + i];
+        let resampling_weight = confidence_weight * target_function * world_cache_sampling_weights[cell_index * 8u + i];
         weight_sum += resampling_weight;
-        valid_samples += 1.0;
+        good_reservoir.confidence_weight += confidence_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {
             good_reservoir.sample = light_sample;
@@ -204,7 +209,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         }
     }
 
-    let d = good_reservoir.sample_target_function * valid_samples;
+    let d = good_reservoir.sample_target_function * good_reservoir.confidence_weight;
     good_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / d, d > 0.0);
 
     return SampleCachedLightsResult(good_reservoir, worst_light_index);
@@ -215,9 +220,10 @@ fn combine_reservoirs(good_reservoir: Reservoir, random_reservoir: Reservoir, rn
     if random_reservoir.sample.light_id == NULL_LIGHT_ID { return good_reservoir; }
 
     var combined_reservoir = empty_reservoir();
-    let good_mis_weight = 0.9;
-    let good_resampling_weight = good_mis_weight * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
-    let random_resampling_weight = (1.0 - good_mis_weight) * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
+    combined_reservoir.confidence_weight = good_reservoir.confidence_weight + random_reservoir.confidence_weight;
+
+    let good_resampling_weight = (good_reservoir.confidence_weight / combined_reservoir.confidence_weight) * (good_reservoir.sample_target_function * good_reservoir.unbiased_contribution_weight);
+    let random_resampling_weight = (random_reservoir.confidence_weight / combined_reservoir.confidence_weight) * (random_reservoir.sample_target_function * random_reservoir.unbiased_contribution_weight);
     let weight_sum = good_resampling_weight + random_resampling_weight;
     if rand_f(rng) < random_resampling_weight / weight_sum {
         combined_reservoir = random_reservoir;
@@ -236,6 +242,7 @@ struct Reservoir {
     sample_target_function: f32,
     sample_world_position: vec4<f32>,
     unbiased_contribution_weight: f32,
+    confidence_weight: f32,
     good_light_index: u32,
 }
 
@@ -245,6 +252,7 @@ fn empty_reservoir() -> Reservoir {
         vec3(0.0),
         0.0,
         vec4(0.0),
+        0.0,
         0.0,
         8u,
     );

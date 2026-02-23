@@ -57,6 +57,7 @@ pub struct SolariLightingResources {
     pub world_cache_active_cells_new_radiance: Buffer,
     pub world_cache_sampling_light_ids: Buffer,
     pub world_cache_sampling_weights: Buffer,
+    pub world_cache_sampling_counts: Buffer,
     pub world_cache_a: Buffer,
     pub world_cache_b: Buffer,
     pub world_cache_active_cell_indices: Buffer,
@@ -212,6 +213,13 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let world_cache_sampling_counts = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_world_cache_sampling_counts"),
+            size: 8 * WORLD_CACHE_SIZE * size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         let world_cache_a = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_world_cache_a"),
             size: WORLD_CACHE_SIZE * size_of::<u32>() as u64,
@@ -261,6 +269,7 @@ pub fn prepare_solari_lighting_resources(
             world_cache_active_cells_new_radiance,
             world_cache_sampling_light_ids,
             world_cache_sampling_weights,
+            world_cache_sampling_counts,
             world_cache_a,
             world_cache_b,
             world_cache_active_cell_indices,

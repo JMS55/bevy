@@ -150,7 +150,7 @@ fn sample_random_lights(world_position: vec3<f32>, world_normal: vec3<f32>, work
 
     random_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / random_reservoir.sample_target_function, random_reservoir.sample_target_function > 0.0);
 
-    random_reservoir.confidence_weight = 16.0;
+    random_reservoir.confidence_weight = 1.0;
 
     return random_reservoir;
 }
@@ -188,7 +188,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         let resolved_light_sample = resolve_light_sample(light_sample, light_source);
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
-        let confidence_weight = min(320.0, f32(world_cache_sampling_counts[cell_index * 8u + i]));
+        let confidence_weight = f32(world_cache_sampling_counts[cell_index * 8u + i]);
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
         let resampling_weight = confidence_weight * target_function * world_cache_sampling_weights[cell_index * 8u + i];
@@ -211,6 +211,8 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
 
     let d = good_reservoir.sample_target_function * good_reservoir.confidence_weight;
     good_reservoir.unbiased_contribution_weight = weight_sum * select(0.0, 1.0 / d, d > 0.0);
+
+    good_reservoir.confidence_weight = min(8.0 * 2.0, good_reservoir.confidence_weight);
 
     return SampleCachedLightsResult(good_reservoir, worst_light_index);
 }

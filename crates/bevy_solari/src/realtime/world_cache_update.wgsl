@@ -29,6 +29,8 @@ enable wgpu_ray_query;
     world_cache_sampling_weights,
 }
 
+// TODO: Factor cell albedo into resampling?
+
 @compute @workgroup_size(64, 1, 1)
 fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     if active_cell_id.x >= world_cache_active_cells_count { return; }
@@ -46,6 +48,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         visibility = trace_light_visibility(geometry_data.world_position, combined_reservoir.sample_world_position);
     }
 
+    // TODO: Only needs to be done if chose random light
     if visibility > 0.0 && sample_cached_lights_result.worst_light_index != 8u {
         combined_reservoir.good_light_index = sample_cached_lights_result.worst_light_index;
         world_cache_sampling_light_ids[cell_index * 8u + combined_reservoir.good_light_index] = combined_reservoir.sample.light_id;
@@ -179,7 +182,7 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
         let light_sample = LightSample(light, seed);
         let light_source = light_sources[light_id];
         let resolved_light_sample = resolve_light_sample(light_sample, light_source);
-        var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+        let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);

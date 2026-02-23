@@ -162,12 +162,14 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
     for (var i = 0u; i < 8u; i += 1u) {
         var light = world_cache_sampling_light_ids[cell_index * 8u + i];
         if light == NULL_LIGHT_ID {
+            worst_light_index = i;
             continue;
         }
 
         let light_id = previous_frame_light_id_translations[light >> 16u];
         if light_id == LIGHT_NOT_PRESENT_THIS_FRAME {
             world_cache_sampling_light_ids[cell_index * 8u + i] = NULL_LIGHT_ID;
+            worst_light_index = i;
             continue;
         }
         let triangle_id = light & 0xFFFFu;

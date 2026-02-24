@@ -57,9 +57,9 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     if combined_reservoir.good_light_index < 8u {
         // TODO: Update visibility
-        let i = cell_index * 8u + combined_reservoir.good_light_index;
-        world_cache_sampling_weights[i] = combined_reservoir.unbiased_contribution_weight;
-        world_cache_sampling_counts[i] = u32(combined_reservoir.confidence_weight);
+        let idx = cell_index * 8u + combined_reservoir.good_light_index;
+        world_cache_sampling_weights[idx] = combined_reservoir.unbiased_contribution_weight;
+        world_cache_sampling_counts[idx] = u32(combined_reservoir.confidence_weight);
     }
 
     // if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
@@ -175,7 +175,10 @@ fn sample_cached_lights(world_position: vec3<f32>, world_normal: vec3<f32>, cell
 
         let light_id = previous_frame_light_id_translations[light >> 16u];
         if light_id == LIGHT_NOT_PRESENT_THIS_FRAME {
-            world_cache_sampling_light_ids[cell_index * 8u + i] = NULL_LIGHT_ID;
+            let idx = cell_index * 8u + i;
+            world_cache_sampling_light_ids[idx] = NULL_LIGHT_ID;
+            world_cache_sampling_weights[idx] = 0.0;
+            world_cache_sampling_counts[idx] = 0u;
             worst_light_index = i;
             continue;
         }

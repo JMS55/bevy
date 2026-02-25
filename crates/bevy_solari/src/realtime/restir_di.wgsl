@@ -5,7 +5,7 @@ enable wgpu_ray_query;
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
-#import bevy_pbr::utils::{rand_f, rand_range_u, sample_disk}
+#import bevy_pbr::utils::{rand_f, rand_u, rand_range_u, sample_disk}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::brdf::{evaluate_brdf, evaluate_diffuse_brdf}
@@ -15,6 +15,7 @@ enable wgpu_ray_query;
 #import bevy_solari::scene_bindings::{light_sources, previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME}
 #import bevy_solari::specular_gi::SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD
 #import bevy_solari::realtime_bindings::{view_output, light_tile_samples, light_tile_resolved_samples, di_reservoirs_a, di_reservoirs_b, gbuffer, depth_buffer, motion_vectors, previous_gbuffer, previous_depth_buffer, view, previous_view, constants, ResolvedLightSamplePacked}
+#import bevy_solari::world_cache::{query_world_cache_light, WORLD_CACHE_CELL_LIFETIME}
 
 const INITIAL_SAMPLES = 8u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
@@ -95,7 +96,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
+fn generate_initial_reservoir_old(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -132,6 +133,59 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
         reservoir.unbiased_contribution_weight *= trace_light_visibility(world_position, light_sample_world_position);
+    }
+
+    reservoir.confidence_weight = 1.0;
+    return reservoir;
+}
+
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
+    var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
+    let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+
+    var reservoir = empty_reservoir();
+    // var weight_sum = 0.0;
+    // let mis_weight = 1.0 / f32(INITIAL_SAMPLES);
+
+    // var reservoir_target_function = 0.0;
+    // var light_sample_world_position = vec4(0.0);
+    // var selected_tile_sample = 0u;
+    // for (var i = 0u; i < INITIAL_SAMPLES; i++) {
+    //     let tile_sample = light_tile_start + rand_range_u(1024u, rng);
+    //     let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+    //     let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+
+    //     let target_function = luminance(light_contribution.radiance * diffuse_brdf * saturate(dot(light_contribution.wi, world_normal)));
+    //     let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+
+    //     weight_sum += resampling_weight;
+
+    //     if rand_f(rng) < resampling_weight / weight_sum {
+    //         reservoir_target_function = target_function;
+    //         light_sample_world_position = resolved_light_sample.world_position;
+    //         selected_tile_sample = tile_sample;
+    //     }
+    // }
+
+    // if reservoir_target_function != 0.0 {
+    //     reservoir.sample = light_tile_samples[selected_tile_sample];
+    // }
+
+    // if reservoir_valid(reservoir) {
+    //     let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
+    //     reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
+
+    //     reservoir.unbiased_contribution_weight *= trace_light_visibility(world_position, light_sample_world_position);
+    // }
+
+    let r = query_world_cache_light(world_position, world_normal, view.world_position, distance(view.world_position, world_position), WORLD_CACHE_CELL_LIFETIME, rng);
+    reservoir.sample = LightSample(r.light_id, rand_u(rng));
+    reservoir.unbiased_contribution_weight = r.inverse_pdf;
+
+    if reservoir_valid(reservoir) {
+        let resolved_light_sample = resolve_light_sample(reservoir.sample, light_sources[reservoir.sample.light_id >> 16u]);
+        reservoir.unbiased_contribution_weight *= resolved_light_sample.inverse_pdf;
+        reservoir.unbiased_contribution_weight *= trace_light_visibility(world_position, resolved_light_sample.world_position);
     }
 
     reservoir.confidence_weight = 1.0;

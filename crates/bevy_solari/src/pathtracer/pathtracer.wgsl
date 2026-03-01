@@ -65,7 +65,7 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     mis_weight = power_heuristic(1.0 / direct_lighting.inverse_pdf, pdf_of_bounce);
                 }
 
-                let direct_lighting_brdf = evaluate_brdf(ray_hit.world_normal, wo, direct_lighting.wi, ray_hit.material);
+                let direct_lighting_brdf = evaluate_brdf(ray_hit.world_normal, wo, direct_lighting.wi, ray_hit.material, ray_hit.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD);
                 radiance += mis_weight * throughput * direct_lighting.radiance * direct_lighting.inverse_pdf * direct_lighting_brdf;
             }
 
@@ -78,11 +78,11 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             bounce_was_perfect_reflection = next_bounce.perfectly_specular_bounce;
 
             // Update throughput for next bounce
-            let brdf = evaluate_brdf(ray_hit.world_normal, wo, next_bounce.wi, ray_hit.material);
+            let brdf = evaluate_brdf(ray_hit.world_normal, wo, next_bounce.wi, ray_hit.material, false);
             throughput *= brdf / next_bounce.pdf;
 
             // Russian roulette for early termination
-            let p = luminance(throughput);
+            let p = min(1.0, luminance(throughput));
             if rand_f(&rng) > p { break; }
             throughput /= p;
         } else { break; }

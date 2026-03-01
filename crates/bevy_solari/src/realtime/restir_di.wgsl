@@ -80,13 +80,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 #endif
 
     let wo = normalize(view.world_position - surface.world_position);
-    var brdf: vec3<f32>;
     // If the surface is very smooth, let specular GI handle the specular lobe
-    if surface.material.roughness <= SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
-        brdf = evaluate_diffuse_brdf(surface.world_normal, merge_result.wi, surface.material.base_color, surface.material.metallic);
-    } else {
-        brdf = evaluate_brdf(surface.world_normal, wo, merge_result.wi, surface.material);
-    }
+    let skip_specular = surface.material.roughness <= SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD;
+    let brdf = evaluate_brdf(surface.world_normal, wo, merge_result.wi, surface.material, skip_specular);
 
     var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color *= brdf;

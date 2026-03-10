@@ -34,7 +34,14 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     let geometry_data = world_cache_geometry_data[cell_index];
     var rng = cell_index + constants.frame_index;
 
-    if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
+    for (i = 0u; i < 128u; i++) {
+        // Pick random light
+        // Compute weight (_not_ a PDF)
+        // Store in list
+    }
+    // Build CDF or alias table
+
+    // if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
 
     let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
 

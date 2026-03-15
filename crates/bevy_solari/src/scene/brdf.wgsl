@@ -1,6 +1,6 @@
 #define_import_path bevy_solari::brdf
 
-#import bevy_pbr::lighting::{F_AB, D_GGX, V_SmithGGXCorrelated, fresnel, specular_multiscatter}
+#import bevy_pbr::lighting::{F_AB, D_GGX, V_SmithGGXCorrelated, specular_multiscatter}
 #import bevy_pbr::pbr_functions::{calculate_diffuse_color, calculate_F0}
 #import bevy_render::maths::PI
 #import bevy_solari::scene_bindings::{ResolvedMaterial, MIRROR_ROUGHNESS_THRESHOLD}
@@ -34,4 +34,8 @@ fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>,
     let Vs = V_SmithGGXCorrelated(material.roughness, NdotV, NdotL);
     let F_ab = F_AB(material.perceptual_roughness, NdotV);
     return specular_multiscatter(D, Vs, F, F0, F_ab, 1.0) * NdotL;
+}
+
+fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
+    return f0 + (1.0 - f0) * pow(1.0 - LdotH, 5.0);
 }

@@ -5,7 +5,7 @@ enable wgpu_ray_query;
 #import bevy_pbr::utils::{rand_f, rand_vec2f, sample_cosine_hemisphere}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
-#import bevy_solari::brdf::evaluate_brdf
+#import bevy_solari::brdf::{evaluate_diffuse_brdf, evaluate_specular_brdf}
 #import bevy_solari::sampling::{sample_random_light, random_emissive_light_pdf, sample_ggx_vndf, ggx_vndf_pdf, power_heuristic}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, ResolvedRayHitFull, RAY_T_MIN, RAY_T_MAX, MIRROR_ROUGHNESS_THRESHOLD}
 
@@ -47,6 +47,7 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let ray_hit = resolve_ray_hit_full(ray);
             let wo = -ray_direction;
 
+            // Emissive contribution
             var mis_weight = 1.0;
             if !bounce_was_perfect_reflection {
                 let p_light = random_emissive_light_pdf(ray_hit);
@@ -54,31 +55,36 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
             radiance += mis_weight * throughput * ray_hit.material.emissive;
 
-            // Sample direct lighting, but only if the surface is not mirror-like
-            let is_perfectly_specular = ray_hit.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD && ray_hit.material.metallic > 0.9999;
-            if !is_perfectly_specular {
-                let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, &rng);
-
-                mis_weight = 1.0;
-                if direct_lighting.brdf_rays_can_hit {
-                    let pdf_of_bounce = brdf_pdf(wo, direct_lighting.wi, ray_hit);
-                    mis_weight = power_heuristic(1.0 / direct_lighting.inverse_pdf, pdf_of_bounce);
-                }
-
-                let direct_lighting_brdf = evaluate_brdf(ray_hit.world_normal, wo, direct_lighting.wi, ray_hit.material);
-                radiance += mis_weight * throughput * direct_lighting.radiance * direct_lighting.inverse_pdf * direct_lighting_brdf;
+            // Sample direct lighting (NEE)
+            let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, &rng);
+            mis_weight = 1.0;
+            if direct_lighting.brdf_rays_can_hit {
+                let pdf_of_bounce = brdf_pdf(wo, direct_lighting.wi, ray_hit);
+                mis_weight = power_heuristic(1.0 / direct_lighting.inverse_pdf, pdf_of_bounce);
             }
+            var direct_lighting_brdf = evaluate_diffuse_brdf(wo, direct_lighting.wi, ray_hit.world_normal, ray_hit.material);
+            if ray_hit.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
+                direct_lighting_brdf += evaluate_specular_brdf(wo, direct_lighting.wi, ray_hit.world_normal, ray_hit.material);
+            }
+            radiance += mis_weight * throughput * direct_lighting.radiance * direct_lighting.inverse_pdf * direct_lighting_brdf;
 
             // Sample new ray direction from the material BRDF for next bounce
             let next_bounce = importance_sample_next_bounce(wo, ray_hit, &rng);
+            if next_bounce.pdf == 0.0 { break; }
             ray_direction = next_bounce.wi;
             ray_origin = ray_hit.world_position;
             ray_t_min = RAY_T_MIN;
             p_bounce = next_bounce.pdf;
-            bounce_was_perfect_reflection = next_bounce.perfectly_specular_bounce;
+            bounce_was_perfect_reflection = next_bounce.specular_lobe_selected && ray_hit.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD;
 
             // Update throughput for next bounce
-            let brdf = evaluate_brdf(ray_hit.world_normal, wo, next_bounce.wi, ray_hit.material);
+            var brdf = evaluate_diffuse_brdf(wo, next_bounce.wi, ray_hit.world_normal, ray_hit.material);
+            let specular_brdf = evaluate_specular_brdf(wo, next_bounce.wi, ray_hit.world_normal, ray_hit.material);
+            if ray_hit.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
+                brdf += specular_brdf;
+            } else if next_bounce.specular_lobe_selected {
+                brdf = specular_brdf;
+            }
             throughput *= brdf / next_bounce.pdf;
 
             // Russian roulette for early termination
@@ -100,14 +106,10 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
 struct NextBounce {
     wi: vec3<f32>,
     pdf: f32,
-    perfectly_specular_bounce: bool,
+    specular_lobe_selected: bool,
 }
 
 fn importance_sample_next_bounce(wo: vec3<f32>, ray_hit: ResolvedRayHitFull, rng: ptr<function, u32>) -> NextBounce {
-    let is_perfectly_specular = ray_hit.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD && ray_hit.material.metallic > 0.9999;
-    if is_perfectly_specular {
-        return NextBounce(reflect(-wo, ray_hit.world_normal), 1.0, true);
-    }
     let diffuse_weight = mix(mix(0.4, 0.9, ray_hit.material.perceptual_roughness), 0.0, ray_hit.material.metallic);
     let specular_weight = 1.0 - diffuse_weight;
 
@@ -120,20 +122,23 @@ fn importance_sample_next_bounce(wo: vec3<f32>, ray_hit: ResolvedRayHitFull, rng
 
     var wi: vec3<f32>;
     var wi_tangent: vec3<f32>;
-    let diffuse_selected = rand_f(rng) < diffuse_weight;
-    if diffuse_selected {
+    let specular_lobe_selected = rand_f(rng) >= diffuse_weight;
+    if specular_lobe_selected {
+        wi_tangent = sample_ggx_vndf(wo_tangent, ray_hit.material.roughness, rng);
+        if wi_tangent.z <= 0.0 {
+            return NextBounce(vec3(0.0), 0.0, true);
+        }
+        wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
+    } else {
         wi = sample_cosine_hemisphere(ray_hit.world_normal, rng);
         wi_tangent = vec3(dot(wi, T), dot(wi, B), dot(wi, N));
-    } else {
-        wi_tangent = sample_ggx_vndf(wo_tangent, ray_hit.material.roughness, rng);
-        wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
     }
 
     let diffuse_pdf = dot(wi, ray_hit.world_normal) / PI;
     let specular_pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, ray_hit.material.roughness);
     let pdf = (diffuse_weight * diffuse_pdf) + (specular_weight * specular_pdf);
 
-    return NextBounce(wi, pdf, false);
+    return NextBounce(wi, pdf, specular_lobe_selected);
 }
 
 fn brdf_pdf(wo: vec3<f32>, wi: vec3<f32>, ray_hit: ResolvedRayHitFull) -> f32 {

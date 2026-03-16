@@ -10,7 +10,7 @@ fn evaluate_diffuse_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>, 
 
     let H = normalize(wi + wo);
     let LdotH = saturate(dot(wi, H));
-    let F0 = calculate_F0(material.base_color, material.metallic, material.reflectance);
+    let F0 = calculate_F0(material.base_color, material.metallic, vec3(material.reflectance));
     let F = fresnel(F0, LdotH);
 
     return diffuse_color * saturate(dot(world_normal, wi)) * (1.0 - F);
@@ -23,7 +23,7 @@ fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>,
     let LdotH = saturate(dot(wi, H));
     let NdotV = max(dot(world_normal, wo), 0.0001);
 
-    let F0 = calculate_F0(material.base_color, material.metallic, material.reflectance);
+    let F0 = calculate_F0(material.base_color, material.metallic, vec3(material.reflectance));
     let F = fresnel(F0, LdotH);
 
     if material.roughness <= MIRROR_ROUGHNESS_THRESHOLD {

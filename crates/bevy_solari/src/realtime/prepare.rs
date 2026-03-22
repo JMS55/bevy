@@ -54,6 +54,8 @@ pub struct SolariLightingResources {
     pub world_cache_radiance: Buffer,
     pub world_cache_geometry_data: Buffer,
     pub world_cache_luminance_deltas: Buffer,
+    pub world_cache_good_lights: Buffer,
+    pub world_cache_good_light_weights: Buffer,
     pub world_cache_active_cells_new_radiance: Buffer,
     pub world_cache_a: Buffer,
     pub world_cache_b: Buffer,
@@ -183,6 +185,20 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let world_cache_good_lights = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_world_cache_good_lights"),
+            size: WORLD_CACHE_SIZE * 128 * size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let world_cache_good_light_weights = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_world_cache_good_light_weights"),
+            size: WORLD_CACHE_SIZE * 128 * size_of::<f32>() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         let world_cache_active_cells_new_radiance =
             render_device.create_buffer(&BufferDescriptor {
                 label: Some("solari_lighting_world_cache_active_cells_new_radiance"),
@@ -237,6 +253,8 @@ pub fn prepare_solari_lighting_resources(
             world_cache_radiance,
             world_cache_geometry_data,
             world_cache_luminance_deltas,
+            world_cache_good_lights,
+            world_cache_good_light_weights,
             world_cache_active_cells_new_radiance,
             world_cache_a,
             world_cache_b,

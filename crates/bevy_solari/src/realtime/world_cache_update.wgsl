@@ -1,11 +1,11 @@
 enable wgpu_ray_query;
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::utils::{rand_f, rand_range_u, sample_cosine_hemisphere}
+#import bevy_pbr::utils::{rand_f, rand_u, rand_range_u, sample_cosine_hemisphere}
 #import bevy_render::view::View
 #import bevy_solari::presample_light_tiles::{ResolvedLightSamplePacked, unpack_resolved_light_sample}
-#import bevy_solari::sampling::{calculate_resolved_light_contribution, trace_light_visibility}
-#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN}
+#import bevy_solari::sampling::{resolve_light_sample, calculate_resolved_light_contribution, trace_light_visibility, LightSample}
+#import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, LIGHT_SOURCE_KIND_DIRECTIONAL, light_sources, directional_lights, transforms, material_ids, materials}
 #import bevy_solari::world_cache::{
     WORLD_CACHE_MAX_TEMPORAL_SAMPLES,
     WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT,
@@ -23,6 +23,8 @@ enable wgpu_ray_query;
     world_cache_geometry_data,
     world_cache_radiance,
     world_cache_luminance_deltas,
+    world_cache_good_lights,
+    world_cache_good_light_weights,
     world_cache_active_cells_new_radiance,
 }
 
@@ -34,11 +36,73 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     let geometry_data = world_cache_geometry_data[cell_index];
     var rng = cell_index + constants.frame_index;
 
-    if rand_f(&rng) >= f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count) { return; }
+    // Build list of lights and their weights
+    let base_index = active_cell_id.x * 128u;
+    let light_count = arrayLength(&light_sources);
+    var total_weight = 0.0;
+    for (var i = base_index; i < base_index + 128u; i++) {
+        let light_id = rand_range_u(light_count, &rng);
+        let light_source = light_sources[light_id];
 
-    let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
+        var weight: f32;
+        if light_source.kind == LIGHT_SOURCE_KIND_DIRECTIONAL {
+            let directional_light = directional_lights[light_source.id];
+            weight = luminance(directional_light.luminance) * 0.01;
+        } else {
+            let light_world_position = transforms[light_source.id][3u].xyz;
+            let material_id = material_ids[light_source.id];
+            let emission = luminance(materials[material_id].emissive.rgb); // TODO: Handle emissive texture
+            let d = geometry_data.world_position - light_world_position;
+            let distance2 = max(dot(d, d), 0.00001);
+            weight = emission / distance2;
+        }
 
-    world_cache_active_cells_new_radiance[active_cell_id.x] = new_radiance;
+        total_weight += weight;
+        world_cache_good_lights[i] = light_id;
+        world_cache_good_light_weights[i] = weight;
+    }
+
+    // Build CDF
+    world_cache_good_light_weights[base_index] /= total_weight;
+    for (var i = base_index + 1u; i < base_index + 128u; i++) {
+        world_cache_good_light_weights[i] = world_cache_good_light_weights[i - 1u] + (world_cache_good_light_weights[i] / total_weight);
+    }
+
+    // Sample CDF
+    let r = rand_f(&rng);
+    var chosen_i = base_index + 127u;
+    var light_weight = world_cache_good_light_weights[chosen_i];
+    for (var i = base_index; i < base_index + 127u; i++) {
+        let weight = world_cache_good_light_weights[i];
+        if r < weight {
+            chosen_i = i;
+            light_weight = weight;
+            break;
+        }
+    }
+    let light_id = world_cache_good_lights[chosen_i];
+    if chosen_i > base_index {
+        light_weight -= world_cache_good_light_weights[chosen_i - 1u];
+    }
+
+    // Pick random point on light
+    let light_source = light_sources[light_id];
+    var triangle_id = 0u;
+    if light_source.kind != LIGHT_SOURCE_KIND_DIRECTIONAL {
+        let triangle_count = light_source.kind >> 1u;
+        triangle_id = rand_range_u(triangle_count, &rng);
+    }
+    let seed = rand_u(&rng);
+    let light_sample = LightSample((light_id << 16u) | triangle_id, seed);
+
+    // Compute light contribution
+    var resolved_light_sample = resolve_light_sample(light_sample, light_source);
+    resolved_light_sample.inverse_pdf /= light_weight;
+    var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, geometry_data.world_position, geometry_data.world_normal);
+    light_contribution.radiance *= resolved_light_sample.inverse_pdf;
+    light_contribution.radiance *= trace_light_visibility(geometry_data.world_position, resolved_light_sample.world_position);
+
+    world_cache_active_cells_new_radiance[active_cell_id.x] = light_contribution.radiance;
 }
 
 @compute @workgroup_size(64, 1, 1)

@@ -97,7 +97,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     // Compute light contribution
     var resolved_light_sample = resolve_light_sample(light_sample, light_source);
-    resolved_light_sample.inverse_pdf /= light_weight;
+    resolved_light_sample.inverse_pdf /= 128.0 * light_weight;
     var light_contribution = calculate_resolved_light_contribution(resolved_light_sample, geometry_data.world_position, geometry_data.world_normal);
     light_contribution.radiance *= resolved_light_sample.inverse_pdf;
     light_contribution.radiance *= trace_light_visibility(geometry_data.world_position, resolved_light_sample.world_position);

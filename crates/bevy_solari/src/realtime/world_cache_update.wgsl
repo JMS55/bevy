@@ -37,10 +37,11 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     var rng = cell_index + constants.frame_index;
 
     // Build list of lights and their weights
-    let base_index = active_cell_id.x * 128u;
-    let light_count = arrayLength(&light_sources);
     var total_weight = 0.0;
-    for (var i = base_index; i < base_index + 128u; i++) {
+    var good_lights: array<u32, 128>;
+    var good_light_weights: array<f32, 128u>;
+    let light_count = arrayLength(&light_sources);
+    for (var i = 0u; i < 128u; i++) {
         let light_id = rand_range_u(light_count, &rng);
         let light_source = light_sources[light_id];
 
@@ -58,31 +59,38 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         }
 
         total_weight += weight;
-        world_cache_good_lights[i] = light_id;
-        world_cache_good_light_weights[i] = weight;
+        good_lights[i] = light_id;
+        good_light_weights[i] = weight;
     }
 
     // Build CDF
-    world_cache_good_light_weights[base_index] /= total_weight;
-    for (var i = base_index + 1u; i < base_index + 128u; i++) {
-        world_cache_good_light_weights[i] = world_cache_good_light_weights[i - 1u] + (world_cache_good_light_weights[i] / total_weight);
+    good_light_weights[0u] /= total_weight;
+    for (var i = 1u; i < 128u; i++) {
+        good_light_weights[i] = good_light_weights[i - 1u] + (good_light_weights[i] / total_weight);
+    }
+
+    // Store CDF to global memory
+    let base_index = active_cell_id.x * 128u;
+    for (var i = 0u; i < 128u; i++) {
+        world_cache_good_lights[base_index + i] = good_lights[i];
+        world_cache_good_light_weights[base_index + i] = good_light_weights[i];
     }
 
     // Sample CDF
     let r = rand_f(&rng);
-    var chosen_i = base_index + 127u;
-    var light_weight = world_cache_good_light_weights[chosen_i];
-    for (var i = base_index; i < base_index + 127u; i++) {
-        let weight = world_cache_good_light_weights[i];
+    var chosen_i = 127u;
+    var light_weight = good_light_weights[chosen_i];
+    for (var i = 0u; i < 127u; i++) {
+        let weight = good_light_weights[i];
         if r < weight {
             chosen_i = i;
             light_weight = weight;
             break;
         }
     }
-    let light_id = world_cache_good_lights[chosen_i];
-    if chosen_i > base_index {
-        light_weight -= world_cache_good_light_weights[chosen_i - 1u];
+    let light_id = good_lights[chosen_i];
+    if chosen_i > 0u {
+        light_weight -= good_light_weights[chosen_i - 1u];
     }
 
     // Pick random point on light

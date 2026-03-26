@@ -12,6 +12,7 @@ fn power_heuristic(f: f32, g: f32) -> f32 {
 }
 
 fn balance_heuristic(f: f32, g: f32) -> f32 {
+    // Need to guard against NaNs since ReSTIR reservoirs can have UCW=0
     if f == 0.0 {
         return 0.0;
     }
@@ -45,7 +46,7 @@ fn sample_ggx_vndf(wi_tangent: vec3<f32>, roughness: f32, rng: ptr<function, u32
 }
 
 fn ggx_vndf_sample_invalid(ray_tangent: vec3<f32>) -> bool {
-    return ray_tangent.z <= 0.0 || isnan(ray_tangent.x) || isnan(ray_tangent.y) || isnan(ray_tangent.z);
+    return !(ray_tangent.z > 0.0);
 }
 
 // https://gpuopen.com/download/Bounded_VNDF_Sampling_for_Smith-GGX_Reflections.pdf (Listing 2)
@@ -168,17 +169,16 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
 
         // Rotate the ray so that the cone it was sampled from is aligned with the light direction
         direction_to_light = orthonormalize(directional_light.direction_to_light) * direction_to_light;
-#else
-        let direction_to_light = directional_light.direction_to_light;
+# else let direction_to_light = directional_light.direction_to_light;
 #endif
 
         return ResolvedLightSample(
-            vec4(direction_to_light, 0.0),
-            -direction_to_light,
-            directional_light.luminance,
-            directional_light.inverse_pdf,
-        );
-    } else {
+        vec4(direction_to_light, 0.0),
+        -direction_to_light,
+        directional_light.luminance,
+        directional_light.inverse_pdf,
+    );
+} else {
         let triangle_count = light_source.kind >> 1u;
         let triangle_id = light_sample.light_id & 0xFFFFu;
         let barycentrics = triangle_barycentrics(light_sample.seed);

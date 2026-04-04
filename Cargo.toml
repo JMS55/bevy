@@ -5409,3 +5409,12 @@ name = "Light Probe Blending"
 description = "Demonstrates blending between multiple reflection probes"
 category = "3D Rendering"
 wasm = false
+
+[patch.crates-io]
+wgpu = { git = "https://github.com/jms55/wgpu", branch = "debug2" }
+wgpu-hal = { git = "https://github.com/jms55/wgpu", branch = "debug2" }
+wgpu-core = { git = "https://github.com/jms55/wgpu", branch = "debug2" }
+wgpu-types = { git = "https://github.com/jms55/wgpu", branch = "debug2" }
+wgpu-naga-bridge = { git = "https://github.com/jms55/wgpu", branch = "debug2" }
+naga = { git = "https://github.com/jms55/wgpu", branch = "debug2" }
+naga_oil = { git = "https://github.com/jms55/naga_oil", branch = "debug2" }

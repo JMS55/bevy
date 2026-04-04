@@ -289,7 +289,7 @@ impl<ShaderModule, RenderDevice> ShaderCache<ShaderModule, RenderDevice> {
                             })
                             .collect::<std::collections::HashMap<_, _>>();
 
-                        let naga = self
+                        let (naga, _) = self
                             .composer
                             .make_naga_module(naga_oil::compose::NagaModuleDescriptor {
                                 shader_defs,

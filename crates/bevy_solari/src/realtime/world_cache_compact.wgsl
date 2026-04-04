@@ -2,7 +2,7 @@ enable wgpu_ray_query;
 
 #import bevy_solari::world_cache::WORLD_CACHE_EMPTY_CELL
 #import bevy_solari::realtime_bindings::{
-    world_cache_life,
+    // world_cache_life,
     world_cache_checksums,
     world_cache_radiance,
     world_cache_luminance_deltas,
@@ -16,6 +16,9 @@ enable wgpu_ray_query;
 
 var<workgroup> w1: array<u32, 1024u>;
 var<workgroup> w2: array<u32, 1024u>;
+
+@group(1) @binding(15) var<storage, read_write> world_cache_life: array<u32, #{WORLD_CACHE_SIZE}>;
+
 
 @compute @workgroup_size(1024, 1, 1)
 fn decay_world_cache(@builtin(global_invocation_id) global_id: vec3<u32>) {

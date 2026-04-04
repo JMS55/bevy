@@ -128,7 +128,7 @@ fn load_module(
         }
         ShaderCacheSource::Wgsl(src) => ShaderSource::Wgsl(Cow::Owned(src)),
         #[cfg(not(feature = "decoupled_naga"))]
-        ShaderCacheSource::Naga(src) => ShaderSource::Naga(Cow::Owned(src)),
+        ShaderCacheSource::Naga(src, source) => ShaderSource::Naga(Cow::Owned(src), source),
     };
     let module_descriptor = ShaderModuleDescriptor {
         label: None,

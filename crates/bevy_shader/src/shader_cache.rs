@@ -29,9 +29,9 @@ pub enum ShaderCacheSource<'a> {
     SpirV(&'a [u8]),
     /// WGSL module as a string slice.
     Wgsl(String),
-    /// Naga module with optional combined source for debug info.
+    /// Naga module with optional combined source and file path for debug info.
     #[cfg(not(feature = "decoupled_naga"))]
-    Naga(naga::Module, Option<String>),
+    Naga(naga::Module, Option<String>, Option<String>),
 }
 
 /// An id of a pipeline, typically in the [`PipelineCache`](https://docs.rs/bevy/latest/bevy/render/render_resource/struct.PipelineCache.html)
@@ -299,7 +299,11 @@ impl<ShaderModule, RenderDevice> ShaderCache<ShaderModule, RenderDevice> {
 
                         #[cfg(not(feature = "decoupled_naga"))]
                         {
-                            ShaderCacheSource::Naga(naga, Some(combined_source))
+                            ShaderCacheSource::Naga(
+                                naga,
+                                Some(combined_source),
+                                Some(shader.path.clone()),
+                            )
                         }
 
                         #[cfg(feature = "decoupled_naga")]

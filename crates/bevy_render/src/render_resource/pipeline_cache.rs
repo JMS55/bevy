@@ -119,19 +119,21 @@ fn load_module(
     shader_source: ShaderCacheSource,
     validate_shader: &ValidateShader,
 ) -> Result<WgpuWrapper<ShaderModule>, ShaderCacheError> {
-    let shader_source = match shader_source {
+    let (shader_source, label) = match shader_source {
         #[cfg(feature = "shader_format_spirv")]
-        ShaderCacheSource::SpirV(data) => wgpu::util::make_spirv(data),
+        ShaderCacheSource::SpirV(data) => (wgpu::util::make_spirv(data), None),
         #[cfg(not(feature = "shader_format_spirv"))]
         ShaderCacheSource::SpirV(_) => {
             unimplemented!("Enable feature \"shader_format_spirv\" to use SPIR-V shaders")
         }
-        ShaderCacheSource::Wgsl(src) => ShaderSource::Wgsl(Cow::Owned(src)),
+        ShaderCacheSource::Wgsl(src) => (ShaderSource::Wgsl(Cow::Owned(src)), None),
         #[cfg(not(feature = "decoupled_naga"))]
-        ShaderCacheSource::Naga(src, source) => ShaderSource::Naga(Cow::Owned(src), source),
+        ShaderCacheSource::Naga(src, source, label) => {
+            (ShaderSource::Naga(Cow::Owned(src), source), label)
+        }
     };
     let module_descriptor = ShaderModuleDescriptor {
-        label: None,
+        label: label.as_deref(),
         source: shader_source,
     };
 

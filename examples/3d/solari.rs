@@ -589,6 +589,10 @@ fn update_performance_text(
     };
 
     (add_diagnostic)(
+        "Light grid",
+        "render/solari_lighting/build_light_grid/elapsed_gpu",
+    );
+    (add_diagnostic)(
         "Light tiles",
         "render/solari_lighting/presample_light_tiles/elapsed_gpu",
     );

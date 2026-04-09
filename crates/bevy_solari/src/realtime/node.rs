@@ -26,7 +26,6 @@ use bevy_render::{
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 use bevy_shader::{Shader, ShaderDefVal};
-use bevy_utils::default;
 
 /// Resource holding the Solari lighting pipeline configuration.
 #[derive(Resource)]
@@ -42,6 +41,7 @@ pub struct SolariLightingPipelines {
     sample_di_for_world_cache_pipeline: CachedComputePipelineId,
     sample_gi_for_world_cache_pipeline: CachedComputePipelineId,
     blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
+    build_light_grid_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
     di_initial_and_temporal_pipeline: CachedComputePipelineId,
     di_spatial_and_shade_pipeline: CachedComputePipelineId,
@@ -128,6 +128,7 @@ pub fn solari_lighting(
         Some(sample_di_for_world_cache_pipeline),
         Some(sample_gi_for_world_cache_pipeline),
         Some(blend_new_world_cache_samples_pipeline),
+        Some(build_light_grid_pipeline),
         Some(presample_light_tiles_pipeline),
         Some(di_initial_and_temporal_pipeline),
         Some(di_spatial_and_shade_pipeline),
@@ -151,6 +152,7 @@ pub fn solari_lighting(
         pipeline_cache.get_compute_pipeline(pipelines.sample_di_for_world_cache_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.sample_gi_for_world_cache_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.blend_new_world_cache_samples_pipeline),
+        pipeline_cache.get_compute_pipeline(pipelines.build_light_grid_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.presample_light_tiles_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.di_initial_and_temporal_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.di_spatial_and_shade_pipeline),
@@ -208,6 +210,7 @@ pub fn solari_lighting(
             s.world_cache_b.as_entire_binding(),
             s.world_cache_active_cell_indices.as_entire_binding(),
             s.world_cache_active_cells_count.as_entire_binding(),
+            s.light_grid_cells.as_entire_binding(),
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -234,6 +237,18 @@ pub fn solari_lighting(
 
     // Choice of number here is arbitrary
     let frame_index = frame_count.0.wrapping_mul(5782582);
+
+    let light_grid = &solari_lighting.light_grid;
+    let push_constants: [u32; 8] = [
+        frame_index,
+        solari_lighting.reset as u32,
+        light_grid.cell_size.to_bits(),
+        light_grid.cells_per_axis.x,
+        light_grid.cells_per_axis.y,
+        light_grid.cells_per_axis.z,
+        light_grid.max_lights_per_cell,
+        light_grid.contribution_threshold.to_bits(),
+    ];
 
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
@@ -277,12 +292,17 @@ pub fn solari_lighting(
         pass.dispatch_workgroups(dx, dy, 1);
     }
 
+    let d = diagnostics.time_span(&mut pass, "solari_lighting/build_light_grid");
+    pass.set_pipeline(build_light_grid_pipeline);
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
+    let total_cells =
+        light_grid.cells_per_axis.x * light_grid.cells_per_axis.y * light_grid.cells_per_axis.z;
+    pass.dispatch_workgroups(total_cells.div_ceil(64), 1, 1);
+    d.end(&mut pass);
+
     let d = diagnostics.time_span(&mut pass, "solari_lighting/presample_light_tiles");
     pass.set_pipeline(presample_light_tiles_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
     d.end(&mut pass);
 
@@ -305,20 +325,14 @@ pub fn solari_lighting(
     pass.set_bind_group(2, None, &[]);
 
     pass.set_pipeline(sample_di_for_world_cache_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups_indirect(
         &solari_lighting_resources.world_cache_active_cells_dispatch,
         0,
     );
 
     pass.set_pipeline(sample_gi_for_world_cache_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups_indirect(
         &solari_lighting_resources.world_cache_active_cells_dispatch,
         0,
@@ -335,17 +349,11 @@ pub fn solari_lighting(
     let d = diagnostics.time_span(&mut pass, "solari_lighting/direct_lighting");
 
     pass.set_pipeline(di_initial_and_temporal_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups(dx, dy, 1);
 
     pass.set_pipeline(di_spatial_and_shade_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups(dx, dy, 1);
 
     d.end(&mut pass);
@@ -353,17 +361,11 @@ pub fn solari_lighting(
     let d = diagnostics.time_span(&mut pass, "solari_lighting/diffuse_indirect_lighting");
 
     pass.set_pipeline(gi_initial_and_temporal_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups(dx, dy, 1);
 
     pass.set_pipeline(gi_spatial_and_shade_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups(dx, dy, 1);
 
     d.end(&mut pass);
@@ -374,10 +376,7 @@ pub fn solari_lighting(
         pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
     }
     pass.set_pipeline(specular_gi_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
+    pass.set_immediates(0, bytemuck::cast_slice(&push_constants));
     pass.dispatch_workgroups(dx, dy, 1);
     d.end(&mut pass);
 
@@ -419,6 +418,7 @@ pub fn init_solari_lighting_pipelines(
                 texture_depth_2d(),
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer::<PreviousViewData>(true),
+                storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
@@ -474,11 +474,11 @@ pub fn init_solari_lighting_pipelines(
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(label.into()),
             layout,
-            immediate_size: 8,
+            immediate_size: 32,
             shader,
             shader_defs,
             entry_point: Some(entry_point.into()),
-            ..default()
+            ..Default::default()
         })
     };
 
@@ -535,6 +535,13 @@ pub fn init_solari_lighting_pipelines(
             "solari_lighting_blend_new_world_cache_samples_pipeline",
             "blend_new_samples",
             load_embedded_asset!(asset_server.as_ref(), "world_cache_update.wgsl"),
+            None,
+            vec![],
+        ),
+        build_light_grid_pipeline: create_pipeline(
+            "solari_lighting_build_light_grid_pipeline",
+            "build_light_grid",
+            load_embedded_asset!(asset_server.as_ref(), "build_light_grid.wgsl"),
             None,
             vec![],
         ),

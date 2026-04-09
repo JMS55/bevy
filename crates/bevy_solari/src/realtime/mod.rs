@@ -15,6 +15,7 @@ use bevy_core_pipeline::{
     schedule::{Core3d, Core3dSystems},
 };
 use bevy_ecs::{component::Component, reflect::ReflectComponent, schedule::IntoScheduleConfigs};
+use bevy_math::UVec3;
 use bevy_pbr::DefaultOpaqueRendererMethod;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
@@ -36,6 +37,7 @@ impl Plugin for SolariLightingPlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "gbuffer_utils.wgsl");
         load_shader_library!(app, "realtime_bindings.wgsl");
+        embedded_asset!(app, "build_light_grid.wgsl");
         load_shader_library!(app, "presample_light_tiles.wgsl");
         embedded_asset!(app, "restir_di.wgsl");
         embedded_asset!(app, "restir_gi.wgsl");
@@ -93,6 +95,9 @@ impl Plugin for SolariLightingPlugin {
     DepthPrepassDoubleBuffer
 )]
 pub struct SolariLighting {
+    /// Configuration for the 3D grid used to improve light sampling.
+    pub light_grid: SolariLightGrid,
+
     /// Set to true to delete the saved temporal history (past frames).
     ///
     /// Useful for preventing ghosting when the history is no longer
@@ -106,7 +111,44 @@ pub struct SolariLighting {
 impl Default for SolariLighting {
     fn default() -> Self {
         Self {
+            light_grid: SolariLightGrid::default(),
             reset: true, // No temporal history on the first frame
+        }
+    }
+}
+
+/// Configuration for the 3D grid used to cluster lights for efficient sampling.
+///
+/// The grid is centered on the camera and divided into uniform cells, each tracking
+/// which lights contribute to that region. This allows the raytracer to quickly
+/// determine which lights are relevant for a given point in the scene.
+#[derive(Reflect, Clone)]
+#[reflect(Default, Clone)]
+pub struct SolariLightGrid {
+    /// The length of the side of each grid cell, in meters.
+    pub cell_size: f32,
+
+    /// The number of cells along each axis of the grid.
+    pub cells_per_axis: UVec3,
+
+    /// The maximum number of lights that can be stored per cell.
+    ///
+    /// Lights beyond this limit will be ignored for that cell, leading to missing light contributions.
+    pub max_lights_per_cell: u32,
+
+    /// The minimum light contribution threshold for a light to be included in a cell, in lux.
+    ///
+    /// Lights whose contribution to a cell falls below this value are culled.
+    pub contribution_threshold: f32,
+}
+
+impl Default for SolariLightGrid {
+    fn default() -> Self {
+        Self {
+            cell_size: 2.0,
+            cells_per_axis: UVec3::splat(32),
+            max_lights_per_cell: 32,
+            contribution_threshold: 0.01,
         }
     }
 }

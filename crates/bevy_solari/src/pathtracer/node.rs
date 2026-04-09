@@ -13,7 +13,6 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice, ViewQuery},
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
-use bevy_utils::default;
 
 /// Resource holding the pathtracer pipeline configuration.
 #[derive(Resource)]
@@ -51,7 +50,7 @@ pub fn init_pathtracer_pipelines(
             bind_group_layout.clone(),
         ],
         shader: load_embedded_asset!(asset_server.as_ref(), "pathtracer.wgsl"),
-        ..default()
+        ..Default::default()
     });
 
     commands.insert_resource(PathtracerPipelines {

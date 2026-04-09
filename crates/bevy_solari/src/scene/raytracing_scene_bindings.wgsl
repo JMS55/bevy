@@ -65,6 +65,13 @@ struct LightSource {
 const LIGHT_SOURCE_KIND_EMISSIVE_MESH = 0u;
 const LIGHT_SOURCE_KIND_DIRECTIONAL = 1u;
 
+struct LocalLight {
+    aabb_min: vec3<f32>,
+    luminance: f32,
+    aabb_max: vec3<f32>,
+    light_id: u32,
+}
+
 struct DirectionalLight {
     direction_to_light: vec3<f32>,
     cos_theta_max: f32,
@@ -85,8 +92,9 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(8) var<storage> geometry_ids: array<InstanceGeometryIds>;
 @group(0) @binding(9) var<storage> material_ids: array<u32>; // TODO: Store material_id in instance_custom_index instead?
 @group(0) @binding(10) var<storage> light_sources: array<LightSource>;
-@group(0) @binding(11) var<storage> directional_lights: array<DirectionalLight>;
-@group(0) @binding(12) var<storage> previous_frame_light_id_translations: array<u32>;
+@group(0) @binding(11) var<storage> local_lights: array<LocalLight>;
+@group(0) @binding(12) var<storage> directional_lights: array<DirectionalLight>;
+@group(0) @binding(13) var<storage> previous_frame_light_id_translations: array<u32>;
 
 const RAY_T_MIN = 0.001f;
 const RAY_T_MAX = 100000.0f;

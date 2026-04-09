@@ -9,11 +9,10 @@ use bevy_ecs::query::Has;
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::With,
     system::{Commands, Query, Res},
 };
 use bevy_image::ToExtents;
-use bevy_math::UVec2;
+use bevy_math::{UVec2, UVec3};
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 use bevy_render::texture::CachedTexture;
 use bevy_render::{
@@ -60,38 +59,44 @@ pub struct SolariLightingResources {
     pub world_cache_active_cell_indices: Buffer,
     pub world_cache_active_cells_count: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    pub light_grid_cells: Buffer,
     pub view_size: UVec2,
+    pub light_grid_cells_per_axis: UVec3,
+    pub light_grid_max_lights_per_cell: u32,
 }
 
 pub fn prepare_solari_lighting_resources(
-    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))] query: Query<
-        (
-            Entity,
-            &ExtractedCamera,
-            Option<&SolariLightingResources>,
-            Option<&MainPassResolutionOverride>,
-        ),
-        With<SolariLighting>,
-    >,
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] query: Query<
-        (
-            Entity,
-            &ExtractedCamera,
-            Option<&SolariLightingResources>,
-            Option<&MainPassResolutionOverride>,
-            Has<Dlss<DlssRayReconstructionFeature>>,
-        ),
-        With<SolariLighting>,
-    >,
+    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))] query: Query<(
+        Entity,
+        &SolariLighting,
+        &ExtractedCamera,
+        Option<&SolariLightingResources>,
+        Option<&MainPassResolutionOverride>,
+    )>,
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] query: Query<(
+        Entity,
+        &SolariLighting,
+        &ExtractedCamera,
+        Option<&SolariLightingResources>,
+        Option<&MainPassResolutionOverride>,
+        Has<Dlss<DlssRayReconstructionFeature>>,
+    )>,
     render_device: Res<RenderDevice>,
     mut commands: Commands,
 ) {
     for query_item in &query {
         #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
-        let (entity, camera, solari_lighting_resources, resolution_override) = query_item;
-        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-        let (entity, camera, solari_lighting_resources, resolution_override, has_dlss_rr) =
+        let (entity, solari_lighting, camera, solari_lighting_resources, resolution_override) =
             query_item;
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        let (
+            entity,
+            solari_lighting,
+            camera,
+            solari_lighting_resources,
+            resolution_override,
+            has_dlss_rr,
+        ) = query_item;
 
         let Some(mut view_size) = camera.physical_viewport_size else {
             continue;
@@ -100,7 +105,12 @@ pub fn prepare_solari_lighting_resources(
             view_size = *resolution_override;
         }
 
-        if solari_lighting_resources.map(|r| r.view_size) == Some(view_size) {
+        let light_grid = &solari_lighting.light_grid;
+        if let Some(r) = solari_lighting_resources
+            && r.view_size == view_size
+            && r.light_grid_cells_per_axis == light_grid.cells_per_axis
+            && r.light_grid_max_lights_per_cell == light_grid.max_lights_per_cell
+        {
             continue;
         }
 
@@ -225,6 +235,17 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let total_light_count = light_grid.max_lights_per_cell as u64
+            * light_grid.cells_per_axis.x as u64
+            * light_grid.cells_per_axis.y as u64
+            * light_grid.cells_per_axis.z as u64;
+        let light_grid_cells = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_light_grid_cells"),
+            size: total_light_count.div_ceil(2) * (size_of::<u32>() as u64),
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         commands.entity(entity).insert(SolariLightingResources {
             light_tile_samples,
             light_tile_resolved_samples,
@@ -243,7 +264,10 @@ pub fn prepare_solari_lighting_resources(
             world_cache_active_cell_indices,
             world_cache_active_cells_count,
             world_cache_active_cells_dispatch,
+            light_grid_cells,
             view_size,
+            light_grid_cells_per_axis: light_grid.cells_per_axis,
+            light_grid_max_lights_per_cell: light_grid.max_lights_per_cell,
         });
 
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]

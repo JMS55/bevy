@@ -1,5 +1,6 @@
 use super::RaytracingMesh3d;
 use bevy_asset::{AssetId, Assets};
+use bevy_camera::primitives::Aabb;
 use bevy_derive::Deref;
 use bevy_ecs::{
     resource::Resource,
@@ -18,11 +19,12 @@ pub fn extract_raytracing_scene(
             &MeshMaterial3d<StandardMaterial>,
             &GlobalTransform,
             Option<&PreviousGlobalTransform>,
+            Option<&Aabb>,
         )>,
     >,
     mut commands: Commands,
 ) {
-    for (render_entity, mesh, material, transform, previous_frame_transform) in &instances {
+    for (render_entity, mesh, material, transform, previous_frame_transform, aabb) in &instances {
         let mut commands = commands.entity(render_entity);
 
         match previous_frame_transform.cloned() {
@@ -34,6 +36,10 @@ pub fn extract_raytracing_scene(
             )),
             None => commands.insert((mesh.clone(), material.clone(), *transform)),
         };
+
+        if let Some(aabb) = aabb {
+            commands.insert(*aabb);
+        }
     }
 }
 

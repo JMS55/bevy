@@ -35,6 +35,7 @@ enable wgpu_ray_query;
 @group(1) @binding(21) var<storage, read_write> world_cache_b: array<u32, 1024u>;
 @group(1) @binding(22) var<storage, read_write> world_cache_active_cell_indices: array<u32, #{WORLD_CACHE_SIZE}>;
 @group(1) @binding(23) var<storage, read_write> world_cache_active_cells_count: u32;
+@group(1) @binding(24) var<storage, read_write> light_grid_cells: array<u32>;
 
 #ifdef DLSS_RR_GUIDE_BUFFERS
 @group(2) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;
@@ -43,7 +44,16 @@ enable wgpu_ray_query;
 @group(2) @binding(3) var specular_motion_vectors: texture_storage_2d<rg16float, write>;
 #endif
 
-struct PushConstants { frame_index: u32, reset: u32 }
+struct PushConstants {
+    frame_index: u32,
+    reset: u32,
+    light_grid_cell_size: f32,
+    light_grid_cells_per_axis_x: u32,
+    light_grid_cells_per_axis_y: u32,
+    light_grid_cells_per_axis_z: u32,
+    light_grid_max_lights_per_cell: u32,
+    light_grid_contribution_threshold: f32,
+}
 var<immediate> constants: PushConstants;
 
 // Don't adjust the size of this struct without also adjusting `prepare::RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE`.

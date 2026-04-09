@@ -1,11 +1,13 @@
 use super::{blas::BlasManager, extract::StandardMaterialAssets, RaytracingMesh3d};
 use bevy_asset::{AssetId, Handle};
+use bevy_camera::primitives::Aabb;
 use bevy_color::{ColorToComponents, LinearRgba};
 use bevy_ecs::{
     entity::{Entity, EntityHashMap},
     resource::Resource,
     system::{Query, Res, ResMut},
 };
+use bevy_log::warn_once;
 use bevy_math::{ops::cos, Mat4, Vec3};
 use bevy_pbr::{
     ExtractedDirectionalLight, MeshMaterial3d, PreviousGlobalTransform, StandardMaterial,
@@ -41,6 +43,7 @@ pub fn prepare_raytracing_scene_bindings(
         &MeshMaterial3d<StandardMaterial>,
         &GlobalTransform,
         Option<&PreviousGlobalTransform>,
+        Option<&Aabb>,
     )>,
     directional_lights_query: Query<(Entity, &ExtractedDirectionalLight)>,
     mesh_allocator: Res<MeshAllocator>,
@@ -83,6 +86,7 @@ pub fn prepare_raytracing_scene_bindings(
     let mut geometry_ids = StorageBufferList::<GpuInstanceGeometryIds>::default();
     let mut material_ids = StorageBufferList::<u32>::default();
     let mut light_sources = StorageBufferList::<GpuLightSource>::default();
+    let mut local_lights = StorageBufferList::<GpuLocalLight>::default();
     let mut directional_lights = StorageBufferList::<GpuDirectionalLight>::default();
     let mut previous_frame_light_id_translations = StorageBufferList::<u32>::default();
 
@@ -149,7 +153,7 @@ pub fn prepare_raytracing_scene_bindings(
     }
 
     let mut instance_id = 0;
-    for (entity, mesh, material, transform, previous_frame_transform) in &instances_query {
+    for (entity, mesh, material, transform, previous_frame_transform, aabb) in &instances_query {
         let Some(blas) = blas_manager.get(&mesh.id()) else {
             continue;
         };
@@ -201,12 +205,32 @@ pub fn prepare_raytracing_scene_bindings(
         material_ids.get_mut().push(material_id);
 
         if material.emissive != Vec3::ZERO {
+            let light_id = light_sources.get().len() as u32;
             light_sources
                 .get_mut()
                 .push(GpuLightSource::new_emissive_mesh_light(
                     instance_id as u32,
                     (index_slice.range.len() / 3) as u32,
                 ));
+
+            local_lights.get_mut().push(match aabb {
+                Some(aabb) => {
+                    GpuLocalLight::from_aabb(aabb, &transform, material.emissive, light_id)
+                }
+                None => {
+                    warn_once!(
+                        "Emissive mesh entity {entity} is missing an Aabb component. \
+                        Light grid culling will treat it as a point light, which \
+                        underestimates the contribution of large emissive meshes \
+                        and may cause them to be missing from nearby grid cells."
+                    );
+                    GpuLocalLight::from_point(
+                        transform.col(3).truncate(),
+                        material.emissive,
+                        light_id,
+                    )
+                }
+            });
 
             this_frame_entity_to_light_id.insert(entity, light_sources.get().len() as u32 - 1);
             raytracing_scene_bindings
@@ -257,6 +281,7 @@ pub fn prepare_raytracing_scene_bindings(
     geometry_ids.write_buffer(&render_device, &render_queue);
     material_ids.write_buffer(&render_device, &render_queue);
     light_sources.write_buffer(&render_device, &render_queue);
+    local_lights.write_buffer(&render_device, &render_queue);
     directional_lights.write_buffer(&render_device, &render_queue);
     previous_frame_light_id_translations.write_buffer(&render_device, &render_queue);
 
@@ -281,6 +306,7 @@ pub fn prepare_raytracing_scene_bindings(
             geometry_ids.binding().unwrap(),
             material_ids.binding().unwrap(),
             light_sources.binding().unwrap(),
+            local_lights.binding().unwrap(),
             directional_lights.binding().unwrap(),
             previous_frame_light_id_translations.binding().unwrap(),
         )),
@@ -303,6 +329,7 @@ impl RaytracingSceneBindings {
                         sampler(SamplerBindingType::Filtering).count(MAX_TEXTURE_COUNT),
                         storage_buffer_read_only_sized(false, None),
                         acceleration_structure(),
+                        storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
@@ -405,6 +432,58 @@ impl GpuLightSource {
         Self {
             kind: 1,
             id: directional_light_id,
+        }
+    }
+}
+
+#[derive(ShaderType)]
+struct GpuLocalLight {
+    aabb_min: Vec3,
+    luminance: f32,
+    aabb_max: Vec3,
+    light_id: u32,
+}
+
+impl GpuLocalLight {
+    fn from_aabb(aabb: &Aabb, transform: &Mat4, emissive: Vec3, light_id: u32) -> Self {
+        let center = Vec3::from(aabb.center);
+        let half = Vec3::from(aabb.half_extents);
+        let min_local = center - half;
+        let max_local = center + half;
+
+        let corners = [
+            Vec3::new(min_local.x, min_local.y, min_local.z),
+            Vec3::new(max_local.x, min_local.y, min_local.z),
+            Vec3::new(min_local.x, max_local.y, min_local.z),
+            Vec3::new(max_local.x, max_local.y, min_local.z),
+            Vec3::new(min_local.x, min_local.y, max_local.z),
+            Vec3::new(max_local.x, min_local.y, max_local.z),
+            Vec3::new(min_local.x, max_local.y, max_local.z),
+            Vec3::new(max_local.x, max_local.y, max_local.z),
+        ];
+
+        let mut world_min = Vec3::splat(f32::MAX);
+        let mut world_max = Vec3::splat(f32::MIN);
+        for corner in corners {
+            let world = transform.transform_point3(corner);
+            world_min = world_min.min(world);
+            world_max = world_max.max(world);
+        }
+
+        Self {
+            aabb_min: world_min,
+            luminance: emissive.dot(Vec3::new(0.2126, 0.7152, 0.0722)),
+            aabb_max: world_max,
+            light_id,
+        }
+    }
+
+    fn from_point(position: Vec3, emissive: Vec3, light_id: u32) -> Self {
+        Self {
+            aabb_min: position,
+            luminance: emissive.dot(Vec3::new(0.2126, 0.7152, 0.0722)),
+            aabb_max: position,
+            light_id,
         }
     }
 }

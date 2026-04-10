@@ -1,7 +1,7 @@
 enable wgpu_ray_query;
 
-#import bevy_solari::raytracing_scene_bindings::local_lights
 #import bevy_solari::realtime_bindings::{light_grid_cells, view, constants}
+#import bevy_solari::scene_bindings::local_lights
 
 // TODO: Load local_lights into workgroup shared memory to reduce global memory traffic
 

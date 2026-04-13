@@ -3074,6 +3074,17 @@ description = "Demonstrates how to use BSN to compose scenes"
 category = "Scene"
 wasm = true
 
+[[example]]
+name = "reactive_bsn"
+path = "examples/scene/reactive_bsn.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.reactive_bsn]
+name = "Reactive BSN example"
+description = "Demonstrates reactive BSN scenes that re-render when state changes"
+category = "Scene"
+wasm = true
+
 # Shaders
 [[package.metadata.example_category]]
 name = "Shaders"

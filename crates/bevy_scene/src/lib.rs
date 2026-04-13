@@ -507,8 +507,8 @@
 pub mod prelude {
     pub use crate::{
         bsn, bsn_list, on, template_value, CommandsSceneExt, EntityCommandsSceneExt,
-        EntityWorldMutSceneExt, PatchFromTemplate, PatchTemplate, Scene, SceneList,
-        ScenePatchInstance, WorldSceneExt,
+        EntityWorldMutSceneExt, PatchFromTemplate, PatchTemplate, Scene, SceneContext,
+        SceneFactory, SceneList, ScenePatchInstance, WorldSceneExt,
     };
 }
 
@@ -517,6 +517,7 @@ pub mod macro_utils;
 
 extern crate alloc;
 
+pub mod reactive;
 mod resolved_scene;
 mod scene;
 mod scene_list;
@@ -524,6 +525,7 @@ mod scene_patch;
 mod spawn;
 
 pub use bevy_scene_macros::*;
+pub use reactive::*;
 pub use resolved_scene::*;
 pub use scene::*;
 pub use scene_list::*;
@@ -545,7 +547,7 @@ impl Plugin for ScenePlugin {
             .init_asset::<SceneListPatch>()
             .add_systems(
                 SpawnScene,
-                (resolve_scene_patches, spawn_queued)
+                (resolve_scene_patches, spawn_queued, reapply_reactive_scenes)
                     .chain()
                     .in_set(SceneSpawnerSystems::SceneSpawn)
                     .after(SceneSpawnerSystems::WorldInstanceSpawn),

@@ -1,4 +1,7 @@
-use crate::{Scene, SceneList, SceneListPatch, ScenePatch, ScenePatchInstance, SpawnSceneError};
+use crate::{
+    reactive::{SceneContext, SceneFactory},
+    Scene, SceneList, SceneListPatch, ScenePatch, ScenePatchInstance, SpawnSceneError,
+};
 use alloc::sync::Arc;
 use bevy_asset::{AssetEvent, AssetServer, Assets, Handle};
 use bevy_ecs::{message::MessageCursor, prelude::*, relationship::Relationship};
@@ -175,6 +178,32 @@ pub trait WorldSceneExt {
     /// ]);
     /// ```
     fn queue_spawn_scene_list<L: SceneList>(&mut self, scenes: L);
+
+    /// Spawns a reactive scene that re-renders every frame.
+    ///
+    /// The `factory` function is stored as a [`SceneFactory`] component on the spawned entity.
+    /// Each frame, the factory is re-invoked to produce a new [`Scene`], which is diffed against
+    /// the existing entity tree and applied with minimal changes.
+    ///
+    /// The initial render is deferred to the [`reapply_reactive_scenes`] system, so you can
+    /// chain `.insert()` calls to set up initial state before the first render.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn counter_ui(ctx: &SceneContext) -> impl Scene {
+    ///     let count = ctx.use_state_or(Counter(0)).0;
+    ///     bsn! { Text({format!("Count: {count}")}) }
+    /// }
+    ///
+    /// world.spawn_reactive_scene(counter_ui);
+    /// ```
+    ///
+    /// [`reapply_reactive_scenes`]: crate::reapply_reactive_scenes
+    fn spawn_reactive_scene(
+        &mut self,
+        factory: impl Fn(&SceneContext) -> Box<dyn Scene> + Send + Sync + 'static,
+    ) -> EntityWorldMut<'_>;
 }
 
 impl WorldSceneExt for World {
@@ -209,6 +238,14 @@ impl WorldSceneExt for World {
         self.resource_mut::<QueuedScenes>()
             .scene_list_spawns
             .push(handle);
+    }
+
+    fn spawn_reactive_scene(
+        &mut self,
+        factory: impl Fn(&SceneContext) -> Box<dyn Scene> + Send + Sync + 'static,
+    ) -> EntityWorldMut<'_> {
+        // Spawn entity with SceneFactory. Initial render is deferred to reapply_reactive_scenes.
+        self.spawn(SceneFactory::new(factory))
     }
 }
 
@@ -352,6 +389,14 @@ pub trait CommandsSceneExt {
     /// ]);
     /// ```
     fn queue_spawn_scene_list<L: SceneList>(&mut self, scenes: L);
+
+    /// Spawns a reactive scene that re-renders every frame.
+    ///
+    /// See [`WorldSceneExt::spawn_reactive_scene`] for details.
+    fn spawn_reactive_scene(
+        &mut self,
+        factory: impl Fn(&SceneContext) -> Box<dyn Scene> + Send + Sync + 'static,
+    ) -> EntityCommands<'_>;
 }
 
 impl<'w, 's> CommandsSceneExt for Commands<'w, 's> {
@@ -391,6 +436,13 @@ impl<'w, 's> CommandsSceneExt for Commands<'w, 's> {
         self.queue(move |world: &mut World| {
             world.queue_spawn_scene_list(scenes);
         });
+    }
+
+    fn spawn_reactive_scene(
+        &mut self,
+        factory: impl Fn(&SceneContext) -> Box<dyn Scene> + Send + Sync + 'static,
+    ) -> EntityCommands<'_> {
+        self.spawn(SceneFactory::new(factory))
     }
 }
 

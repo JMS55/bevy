@@ -4,6 +4,7 @@ pub use bevy_ecs_macros::FromTemplate;
 
 use crate::{
     bundle::Bundle,
+    component::Component,
     entity::Entity,
     error::{BevyError, Result},
     resource::Resource,
@@ -392,6 +393,27 @@ pub trait ErasedTemplate: Downcast + Send + Sync {
     /// Applies this template to the given `entity`.
     fn apply(&self, context: &mut TemplateContext) -> Result<(), BevyError>;
 
+    /// Applies this template, but attempts to skip the insert if the component value is unchanged.
+    /// This avoids triggering spurious [`Changed`] detection on components whose values have not
+    /// actually changed. Used by the reactive scene system during re-renders.
+    ///
+    /// The default implementation falls back to [`ErasedTemplate::apply`] (always inserts).
+    /// [`DiffableTemplate`] overrides this with [`PartialEq`]-based comparison.
+    ///
+    /// [`Changed`]: crate::query::Changed
+    fn apply_diffed(&self, context: &mut TemplateContext) -> Result<(), BevyError> {
+        self.apply(context)
+    }
+
+    /// Returns `true` if this template should be skipped during reactive scene re-application.
+    /// This is used for one-time-setup templates like observers ([`on()`]) that should only be
+    /// created during the initial spawn, not duplicated on every re-render.
+    ///
+    /// [`on()`]: https://docs.rs/bevy_scene/latest/bevy_scene/fn.on.html
+    fn skip_on_reapply(&self) -> bool {
+        false
+    }
+
     /// Clones this template. See [`Clone`].
     fn clone_template(&self) -> Box<dyn ErasedTemplate>;
 }
@@ -407,6 +429,69 @@ impl<T: Template<Output: Bundle> + Send + Sync + 'static> ErasedTemplate for T {
 
     fn clone_template(&self) -> Box<dyn ErasedTemplate> {
         Box::new(Template::clone_template(self))
+    }
+}
+
+/// A wrapper around a [`Template`] that adds [`PartialEq`]-based diffing to [`ErasedTemplate::apply_diffed`].
+///
+/// When `apply_diffed` is called, this wrapper builds the template output, compares it with the
+/// existing component value on the entity via [`PartialEq`], and only inserts if the value has
+/// changed. This prevents triggering spurious [`Changed`] detection during reactive scene re-renders.
+///
+/// This is automatically used by the scene system via the [`AutoInsert`] auto-ref specialization
+/// trick for components whose template output implements `Component + PartialEq`.
+///
+/// [`Changed`]: crate::query::Changed
+/// [`AutoInsert`]: https://docs.rs/bevy_scene/latest/bevy_scene/struct.AutoInsert.html
+pub struct DiffableTemplate<T>(pub T);
+
+impl<
+        T: Template<Output: Component + PartialEq> + Send + Sync + 'static,
+    > ErasedTemplate for DiffableTemplate<T>
+{
+    fn apply(&self, context: &mut TemplateContext) -> Result<(), BevyError> {
+        let bundle = self.0.build_template(context)?;
+        context.entity.insert(bundle);
+        Ok(())
+    }
+
+    fn apply_diffed(&self, context: &mut TemplateContext) -> Result<(), BevyError> {
+        let new_value = self.0.build_template(context)?;
+        if let Some(existing) = context.entity.get::<T::Output>() {
+            if *existing == new_value {
+                return Ok(());
+            }
+        }
+        context.entity.insert(new_value);
+        Ok(())
+    }
+
+    fn clone_template(&self) -> Box<dyn ErasedTemplate> {
+        Box::new(DiffableTemplate(self.0.clone_template()))
+    }
+}
+
+/// A wrapper around a [`Template`] that marks it as skippable during reactive scene re-application.
+///
+/// This is used for one-time-setup templates like observers that should only be created during the
+/// initial spawn, not duplicated on every re-render.
+pub struct SkipOnReapplyTemplate<T>(pub T);
+
+impl<T: Template<Output: Bundle> + Send + Sync + 'static> ErasedTemplate
+    for SkipOnReapplyTemplate<T>
+{
+    fn apply(&self, context: &mut TemplateContext) -> Result<(), BevyError> {
+        let bundle = self.0.build_template(context)?;
+        context.entity.insert(bundle);
+        Ok(())
+    }
+
+    fn skip_on_reapply(&self) -> bool {
+        true
+    }
+
+    fn clone_template(&self) -> Box<dyn ErasedTemplate> {
+        Box::new(SkipOnReapplyTemplate(self.0.clone_template()))
     }
 }
 

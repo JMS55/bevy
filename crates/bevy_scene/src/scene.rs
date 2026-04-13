@@ -2,13 +2,15 @@ use crate::{InheritSceneError, ResolvedScene, SceneList, ScenePatch};
 use bevy_asset::{Asset, AssetPath, AssetServer, Assets};
 use bevy_ecs::{
     bundle::Bundle,
+    component::Component,
     error::Result,
     event::EntityEvent,
     name::Name,
     relationship::Relationship,
     system::IntoObserverSystem,
     template::{
-        EntityScopes, FnTemplate, FromTemplate, ScopedEntityIndex, Template, TemplateContext,
+        EntityScopes, FnTemplate, FromTemplate, ScopedEntityIndex, SkipOnReapplyTemplate, Template,
+        TemplateContext,
     },
 };
 use core::{any::TypeId, marker::PhantomData};
@@ -278,6 +280,57 @@ impl<T: Template> PatchTemplate for T {
     }
 }
 
+/// Zero-sized helper that uses Rust's method resolution priority (inherent methods before trait
+/// methods after auto-ref) to automatically choose between [`DiffableTemplate`]-wrapped storage
+/// and plain storage based on whether `T::Output` implements `Component + PartialEq`.
+///
+/// When `T::Output: Component + PartialEq`, the inherent method (taking `self`) is found first,
+/// and the template is stored as a [`DiffableTemplate`] for efficient reactive re-application.
+/// Otherwise, method resolution auto-refs to `&self` and the [`InsertFallback`] trait method is
+/// used, storing the template without diffing support.
+pub struct AutoInsert<T: Template>(PhantomData<T>);
+
+impl<T: Template<Output: Component + PartialEq> + Default + Send + Sync + 'static> AutoInsert<T> {
+    /// Inherent method: preferred by method resolution when `T::Output: Component + PartialEq`.
+    /// Stores the template wrapped in [`DiffableTemplate`] for PartialEq-based diffing.
+    #[allow(dead_code, clippy::wrong_self_convention)]
+    fn get_or_insert<'a>(
+        self,
+        scene: &'a mut ResolvedScene,
+        context: &mut ResolveContext,
+    ) -> &'a mut T {
+        scene.get_or_insert_diffable_template::<T>(context)
+    }
+}
+
+/// Fallback trait for [`AutoInsert`] when `T::Output` does not implement `Component + PartialEq`.
+/// Found by method resolution after auto-ref (since this takes `&self` vs the inherent `self`).
+pub trait InsertFallback {
+    /// The [`Template`] type being inserted.
+    type T;
+
+    /// Get or insert the template into the resolved scene, without diffing support.
+    fn get_or_insert<'a>(
+        &self,
+        scene: &'a mut ResolvedScene,
+        context: &mut ResolveContext,
+    ) -> &'a mut Self::T;
+}
+
+impl<T: Template<Output: Bundle> + Default + Send + Sync + 'static> InsertFallback
+    for AutoInsert<T>
+{
+    type T = T;
+
+    fn get_or_insert<'a>(
+        &self,
+        scene: &'a mut ResolvedScene,
+        context: &mut ResolveContext,
+    ) -> &'a mut T {
+        scene.get_or_insert_template::<T>(context)
+    }
+}
+
 impl<
         F: Fn(&mut T, &mut ResolveContext) + Send + Sync + 'static,
         T: Template<Output: Bundle> + Send + Sync + Default + 'static,
@@ -288,7 +341,7 @@ impl<
         context: &mut ResolveContext,
         scene: &mut ResolvedScene,
     ) -> Result<(), ResolveSceneError> {
-        let template = scene.get_or_insert_template::<T>(context);
+        let template = AutoInsert::<T>(PhantomData).get_or_insert(scene, context);
         (self.0)(template, context);
         Ok(())
     }
@@ -491,7 +544,10 @@ impl<
         _context: &mut ResolveContext,
         scene: &mut ResolvedScene,
     ) -> Result<(), ResolveSceneError> {
-        scene.push_template(OnTemplate(self.0.clone(), PhantomData));
+        scene.push_template_erased(Box::new(SkipOnReapplyTemplate(OnTemplate(
+            self.0.clone(),
+            PhantomData,
+        ))));
         Ok(())
     }
 }

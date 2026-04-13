@@ -2,14 +2,19 @@ use crate::{ResolveContext, ScenePatch};
 use bevy_asset::{AssetId, AssetPath, Assets, Handle, UntypedAssetId};
 use bevy_ecs::{
     bundle::Bundle,
+    component::Component,
     entity::Entity,
     error::{BevyError, Result},
+    hierarchy::Children,
+    name::Name,
     relationship::Relationship,
     template::{
-        EntityScopes, ErasedTemplate, ScopedEntities, ScopedEntityIndex, Template, TemplateContext,
+        DiffableTemplate, EntityScopes, ErasedTemplate, ScopedEntities, ScopedEntityIndex,
+        Template, TemplateContext,
     },
     world::{EntityWorldMut, World},
 };
+use bevy_platform::collections::HashMap;
 use bevy_utils::TypeIdMap;
 use core::any::TypeId;
 use thiserror::Error;
@@ -39,6 +44,23 @@ impl ResolvedSceneRoot {
     pub fn apply(&self, entity: &mut EntityWorldMut) -> Result<(), ApplySceneError> {
         let mut scoped_entities = ScopedEntities::new(self.entity_scopes.entity_len());
         self.scene.apply(&mut TemplateContext::new(
+            entity,
+            &mut scoped_entities,
+            &self.entity_scopes,
+        ))
+    }
+
+    /// Re-applies this scene to an existing entity, performing diff-aware template application
+    /// and child reconciliation. Used by the reactive scene system.
+    ///
+    /// Templates that return unchanged values (via [`PartialEq`] comparison) are skipped to avoid
+    /// triggering spurious [`Changed`] detection. Templates marked with `skip_on_reapply` (like
+    /// observers) are skipped entirely. Children are reconciled by [`Name`] (keyed) or position.
+    ///
+    /// [`Changed`]: bevy_ecs::query::Changed
+    pub fn reapply(&self, entity: &mut EntityWorldMut) -> Result<(), ApplySceneError> {
+        let mut scoped_entities = ScopedEntities::new(self.entity_scopes.entity_len());
+        self.scene.reapply(&mut TemplateContext::new(
             entity,
             &mut scoped_entities,
             &self.entity_scopes,
@@ -216,6 +238,155 @@ impl ResolvedScene {
         Ok(())
     }
 
+    /// Re-applies this scene to an existing entity with diff-aware template application and
+    /// child reconciliation.
+    ///
+    /// - Templates with `skip_on_reapply` (observers) are skipped entirely
+    /// - Other templates use `apply_diffed` which skips unchanged values via [`PartialEq`]
+    /// - Children are reconciled: matched by [`Name`] first, then by position.
+    ///   Unmatched new children are spawned; unmatched old children are despawned.
+    pub fn reapply(&self, context: &mut TemplateContext) -> Result<(), ApplySceneError> {
+        // 1. Apply inherited scene (same as apply)
+        if let Some(inherited) = &self.inherited {
+            let scene_patches = context.resource::<Assets<ScenePatch>>();
+            let Some(patch) = scene_patches.get(inherited) else {
+                return Err(ApplySceneError::MissingInheritedScene {
+                    path: inherited.path().cloned(),
+                    id: inherited.id(),
+                });
+            };
+            let Some(resolved_inherited) = &patch.resolved else {
+                return Err(ApplySceneError::UnresolvedInheritedScene {
+                    path: inherited.path().cloned(),
+                    id: inherited.id(),
+                });
+            };
+            let resolved_inherited = resolved_inherited.clone();
+            resolved_inherited.reapply(context.entity).map_err(|e| {
+                ApplySceneError::InheritedSceneApplyError {
+                    inherited: inherited.path().cloned(),
+                    error: Box::new(e),
+                }
+            })?;
+        }
+
+        // 2. Set scoped entity index (same as apply)
+        if let Some(scoped_entity_index) = self.entity_indices.first().copied() {
+            context.scoped_entities.set(
+                context.entity_scopes,
+                scoped_entity_index,
+                context.entity.id(),
+            );
+        }
+
+        // 3. Re-apply templates using apply_diffed (skip observers, skip unchanged values)
+        for template in &self.templates {
+            if template.skip_on_reapply() {
+                continue;
+            }
+            template
+                .apply_diffed(context)
+                .map_err(ApplySceneError::TemplateBuildError)?;
+        }
+
+        // 4. Reconcile related entities (children, etc.)
+        for related_resolved_scenes in self.related.values() {
+            let target = context.entity.id();
+            context
+                .entity
+                .world_scope(|world| -> Result<(), ApplySceneError> {
+                    // Collect existing related entities and their names
+                    let existing_children: Vec<Entity> = world
+                        .get::<Children>(target)
+                        .map(|c| c.iter().copied().collect())
+                        .unwrap_or_default();
+
+                    let mut name_to_entity: HashMap<String, Entity> = HashMap::new();
+                    for &child in &existing_children {
+                        if let Some(name) = world.entity(child).get::<Name>() {
+                            name_to_entity.insert(name.as_str().to_string(), child);
+                        }
+                    }
+
+                    let mut matched_entities: Vec<Entity> = Vec::new();
+
+                    // Walk new child scenes and reconcile
+                    for (index, scene) in related_resolved_scenes.scenes.iter().enumerate() {
+                        // Determine if this new scene has a Name template
+                        let new_name = scene.get_name();
+
+                        // Try to match by name first, then by position
+                        let matched = new_name
+                            .as_deref()
+                            .and_then(|name| name_to_entity.remove(name))
+                            .or_else(|| {
+                                // Positional match: find existing child at this index that
+                                // hasn't been matched yet
+                                existing_children.get(index).copied().filter(|e| {
+                                    !matched_entities.contains(e)
+                                        && !name_to_entity.values().any(|v| v == e)
+                                })
+                            });
+
+                        if let Some(existing_entity) = matched {
+                            // Reapply to existing entity
+                            matched_entities.push(existing_entity);
+                            let mut entity = world.entity_mut(existing_entity);
+                            scene
+                                .reapply(&mut TemplateContext::new(
+                                    &mut entity,
+                                    context.scoped_entities,
+                                    context.entity_scopes,
+                                ))
+                                .map_err(|e| ApplySceneError::RelatedSceneError {
+                                    relationship_type_name:
+                                        related_resolved_scenes.relationship_name,
+                                    index,
+                                    error: Box::new(e),
+                                })?;
+                        } else {
+                            // Spawn new entity
+                            let mut entity = world.spawn_empty();
+                            (related_resolved_scenes.insert)(&mut entity, target);
+                            scene
+                                .apply(&mut TemplateContext::new(
+                                    &mut entity,
+                                    context.scoped_entities,
+                                    context.entity_scopes,
+                                ))
+                                .map_err(|e| ApplySceneError::RelatedSceneError {
+                                    relationship_type_name:
+                                        related_resolved_scenes.relationship_name,
+                                    index,
+                                    error: Box::new(e),
+                                })?;
+                        }
+                    }
+
+                    // Despawn unmatched old children
+                    for &child in &existing_children {
+                        if !matched_entities.contains(&child) {
+                            world.entity_mut(child).despawn();
+                        }
+                    }
+
+                    Ok(())
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Extracts the [`Name`] value from this scene's templates, if one exists.
+    /// Used during child reconciliation to match scenes by name.
+    fn get_name(&self) -> Option<String> {
+        let type_id = TypeId::of::<Name>();
+        let index = self.template_indices.get(&type_id)?;
+        let template = &self.templates[*index];
+        let name = template.downcast_ref::<Name>()?;
+        Some(name.as_str().to_string())
+    }
+
     /// This will get the [`Template`], if it already exists in this [`ResolvedScene`]. If it doesn't exist,
     /// it will use [`Default`] to create a new [`Template`].
     ///
@@ -234,6 +405,30 @@ impl ResolvedScene {
         self.get_or_insert_erased_template(context, TypeId::of::<T>(), || Box::new(T::default()))
             .downcast_mut()
             .unwrap()
+    }
+
+    /// Like [`get_or_insert_template`], but stores the template wrapped in [`DiffableTemplate`]
+    /// for [`PartialEq`]-based comparison during reactive scene re-application.
+    ///
+    /// The returned reference is to the inner `T`, not the `DiffableTemplate<T>` wrapper.
+    ///
+    /// [`get_or_insert_template`]: ResolvedScene::get_or_insert_template
+    pub fn get_or_insert_diffable_template<
+        'a,
+        T: Template<Output: Component + PartialEq> + Default + Send + Sync + 'static,
+    >(
+        &'a mut self,
+        context: &mut ResolveContext,
+    ) -> &'a mut T {
+        let erased = self.get_or_insert_erased_template(context, TypeId::of::<T>(), || {
+            Box::new(DiffableTemplate(T::default()))
+        });
+        // Check type first (immutable borrow) to avoid double mutable borrow
+        if erased.is::<DiffableTemplate<T>>() {
+            &mut erased.downcast_mut::<DiffableTemplate<T>>().unwrap().0
+        } else {
+            erased.downcast_mut::<T>().unwrap()
+        }
     }
 
     /// This will get the [`ErasedTemplate`] for the given [`TypeId`], if it already exists in this [`ResolvedScene`]. If it doesn't exist,

@@ -138,9 +138,12 @@ pub fn prepare_solari_lighting_resources(
         let di_reservoirs_b = di_reservoirs("solari_lighting_di_reservoirs_b");
 
         let gi_reservoirs = |name| {
+            // Quarter-res: one reservoir per 2x2 pixel block.
+            let quarter_w = view_size.x.div_ceil(2);
+            let quarter_h = view_size.y.div_ceil(2);
             render_device.create_buffer(&BufferDescriptor {
                 label: Some(name),
-                size: (view_size.x * view_size.y) as u64 * GI_RESERVOIR_STRUCT_SIZE,
+                size: (quarter_w * quarter_h) as u64 * GI_RESERVOIR_STRUCT_SIZE,
                 usage: BufferUsages::STORAGE,
                 mapped_at_creation: false,
             })

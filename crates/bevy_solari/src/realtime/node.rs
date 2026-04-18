@@ -350,6 +350,9 @@ pub fn solari_lighting(
 
     d.end(&mut pass);
 
+    let gi_dx = solari_lighting_resources.view_size.x.div_ceil(2).div_ceil(8);
+    let gi_dy = solari_lighting_resources.view_size.y.div_ceil(2).div_ceil(8);
+
     let d = diagnostics.time_span(&mut pass, "solari_lighting/diffuse_indirect_lighting");
 
     pass.set_pipeline(gi_initial_and_temporal_pipeline);
@@ -357,14 +360,14 @@ pub fn solari_lighting(
         0,
         bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
     );
-    pass.dispatch_workgroups(dx, dy, 1);
+    pass.dispatch_workgroups(gi_dx, gi_dy, 1);
 
     pass.set_pipeline(gi_spatial_and_shade_pipeline);
     pass.set_immediates(
         0,
         bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
     );
-    pass.dispatch_workgroups(dx, dy, 1);
+    pass.dispatch_workgroups(gi_dx, gi_dy, 1);
 
     d.end(&mut pass);
 

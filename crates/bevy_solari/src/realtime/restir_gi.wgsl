@@ -18,73 +18,79 @@ const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
 
 @compute @workgroup_size(8, 8, 1)
-fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
+fn initial_and_temporal(@builtin(global_invocation_id) quarter_id: vec3<u32>) {
+    let quad_base = quarter_id.xy * 2u;
+    var quad_rng = quarter_res_index(quarter_id.xy) * 0x9E3779B9u + constants.frame_index;
+    let quad_index = u32(rand_f(&quad_rng) * 4.0);
+    let full_res_xy = min(quad_base + vec2(quad_index / 2u, quad_index % 2u), vec2u(view.main_pass_viewport.zw) - vec2(1u));
+    if any(full_res_xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
-    let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    var rng = pixel_index + constants.frame_index;
+    let reservoir_index = quarter_res_index(quarter_id.xy);
+    var rng = (full_res_xy.x + full_res_xy.y * u32(view.main_pass_viewport.z)) + constants.frame_index;
 
-    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    let depth = textureLoad(depth_buffer, full_res_xy, 0);
     if depth == 0.0 {
-        gi_reservoirs_b[pixel_index] = empty_reservoir();
+        gi_reservoirs_b[reservoir_index] = empty_reservoir();
         return;
     }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    let surface = gpixel_resolve(textureLoad(gbuffer, full_res_xy, 0), depth, full_res_xy, view.main_pass_viewport.zw, view.world_from_clip);
     if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
-        gi_reservoirs_b[pixel_index] = empty_reservoir();
+        gi_reservoirs_b[reservoir_index] = empty_reservoir();
         return;
     }
 
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, &rng);
-    let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
+    let temporal = load_temporal_reservoir(full_res_xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
 
-    gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
+    gi_reservoirs_b[reservoir_index] = merge_result.merged_reservoir;
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
+fn spatial_and_shade(@builtin(global_invocation_id) quarter_id: vec3<u32>) {
+    let quad_base = quarter_id.xy * 2u;
+    var quad_rng = quarter_res_index(quarter_id.xy) * 0x9E3779B9u + constants.frame_index;
+    let quad_index = u32(rand_f(&quad_rng) * 4.0);
+    let full_res_xy = min(quad_base + vec2(quad_index / 2u, quad_index % 2u), vec2u(view.main_pass_viewport.zw) - vec2(1u));
+    if any(full_res_xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
-    let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    var rng = pixel_index + constants.frame_index;
+    let reservoir_index = quarter_res_index(quarter_id.xy);
+    var rng = (full_res_xy.x + full_res_xy.y * u32(view.main_pass_viewport.z)) + constants.frame_index;
 
-    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    let depth = textureLoad(depth_buffer, full_res_xy, 0);
     if depth == 0.0 {
-        gi_reservoirs_a[pixel_index] = empty_reservoir();
+        gi_reservoirs_a[reservoir_index] = empty_reservoir();
         return;
     }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    let surface = gpixel_resolve(textureLoad(gbuffer, full_res_xy, 0), depth, full_res_xy, view.main_pass_viewport.zw, view.world_from_clip);
     if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
-        gi_reservoirs_a[pixel_index] = empty_reservoir();
+        gi_reservoirs_a[reservoir_index] = empty_reservoir();
         return;
     }
 
-    let input_reservoir = gi_reservoirs_b[pixel_index];
-    let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+    let input_reservoir = gi_reservoirs_b[reservoir_index];
+    let spatial = load_spatial_reservoir(full_res_xy, depth, surface.world_position, surface.world_normal, &rng);
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.diffuse_brdf, &rng);
     var combined_reservoir = merge_result.merged_reservoir;
 
-    // More accuracy, less stability
 #ifndef BIASED_RESAMPLING
-    gi_reservoirs_a[pixel_index] = combined_reservoir;
+    gi_reservoirs_a[reservoir_index] = combined_reservoir;
 #endif
 
     combined_reservoir.unbiased_contribution_weight *= trace_point_visibility(surface.world_position + (surface.world_normal * RAY_T_MIN), combined_reservoir.sample_point_world_position);
 
-    // More stability, less accuracy (shadows extend further out than they should)
 #ifdef BIASED_RESAMPLING
-    gi_reservoirs_a[pixel_index] = combined_reservoir;
+    gi_reservoirs_a[reservoir_index] = combined_reservoir;
 #endif
 
     let wo = normalize(view.world_position - surface.world_position);
     let brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
 
-    var pixel_color = textureLoad(view_output, global_id.xy);
-    pixel_color += vec4(merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * view.exposure * brdf, 0.0);
-    textureStore(view_output, global_id.xy, pixel_color);
+    var pixel_color = textureLoad(view_output, full_res_xy);
+    pixel_color += vec4(merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * 4.0 * view.exposure * brdf, 0.0);
+    textureStore(view_output, full_res_xy, pixel_color);
 }
 
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
@@ -122,6 +128,24 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     return reservoir;
 }
 
+fn quarter_res_width() -> u32 {
+    return (u32(view.main_pass_viewport.z) + 1u) / 2u;
+}
+
+/// Quarter-res reservoir index from a quarter-res coordinate.
+fn quarter_res_index(quarter_xy: vec2<u32>) -> u32 {
+    return quarter_xy.x + quarter_xy.y * quarter_res_width();
+}
+
+/// Given a full-res pixel coordinate and frame index, return the full-res pixel
+/// that was actually written by the quarter-res dispatch for that pixel's 2x2 quad.
+fn snap_to_quad_pixel(full_res: vec2<u32>, frame: u32) -> vec2<u32> {
+    let quarter = full_res / vec2(2u);
+    var qrng = quarter_res_index(quarter) * 0x9E3779B9u + frame;
+    let qi = u32(rand_f(&qrng) * 4.0);
+    return min(quarter * 2u + vec2(qi / 2u, qi % 2u), vec2u(view.main_pass_viewport.zw) - vec2(1u));
+}
+
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
@@ -146,16 +170,19 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
 }
 
 fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
-    // Check if the pixel features have changed heavily between the current and previous frame
-    let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
-    let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, temporal_pixel_id, 0), temporal_depth, temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
+    // Snap to the pixel that was actually written last frame for this quad.
+    let prev_frame = constants.frame_index - 1u;
+    let snapped_id = snap_to_quad_pixel(temporal_pixel_id, prev_frame);
+
+    let temporal_depth = textureLoad(previous_depth_buffer, snapped_id, 0);
+    let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, snapped_id, 0), temporal_depth, snapped_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
     let temporal_diffuse_brdf = temporal_surface.material.base_color / PI;
     if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
     }
 
-    let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.main_pass_viewport.z);
-    let temporal_reservoir = gi_reservoirs_a[temporal_pixel_index];
+    // Reservoir is indexed at quarter-res.
+    let temporal_reservoir = gi_reservoirs_a[quarter_res_index(snapped_id / vec2(2u))];
 
     return NeighborInfo(temporal_reservoir, temporal_surface.world_position, temporal_surface.world_normal, temporal_diffuse_brdf);
 }
@@ -163,7 +190,9 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world
 fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> NeighborInfo {
     var search_radius = SPATIAL_REUSE_RADIUS_PIXELS;
     for (var i = 0u; i < 5u; i++) {
-        let spatial_pixel_id = get_neighbor_pixel_id(pixel_id, search_radius, rng);
+        let raw_neighbor = get_neighbor_pixel_id(pixel_id, search_radius, rng);
+        // Snap to the pixel that was actually written this frame for the neighbor's quad.
+        let spatial_pixel_id = snap_to_quad_pixel(raw_neighbor, constants.frame_index);
 
         let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
         let spatial_surface = gpixel_resolve(textureLoad(gbuffer, spatial_pixel_id, 0), spatial_depth, spatial_pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
@@ -173,8 +202,8 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
             continue;
         }
 
-        let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
-        let spatial_reservoir = gi_reservoirs_b[spatial_pixel_index];
+        // Reservoir is indexed at quarter-res.
+        let spatial_reservoir = gi_reservoirs_b[quarter_res_index(spatial_pixel_id / vec2(2u))];
         return NeighborInfo(spatial_reservoir, spatial_surface.world_position, spatial_surface.world_normal, spatial_diffuse_brdf);
     }
 

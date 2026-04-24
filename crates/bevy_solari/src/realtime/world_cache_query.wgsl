@@ -12,7 +12,7 @@ enable wgpu_ray_query;
 }
 
 /// How responsive the world cache is to changes in lighting (higher is less responsive but more stable, lower is more responsive but less stable)
-const WORLD_CACHE_MAX_TEMPORAL_SAMPLES: f32 = 64.0;
+const WORLD_CACHE_MAX_TEMPORAL_SAMPLES: f32 = 32.0;
 /// How many direct light samples each cell takes when updating each frame
 const WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT: u32 = 32u;
 /// Maximum amount of distance to trace GI rays between two cache cells

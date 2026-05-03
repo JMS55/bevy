@@ -5522,3 +5522,9 @@ name = "Light Probe Blending"
 description = "Demonstrates blending between multiple reflection probes"
 category = "3D Rendering"
 wasm = false
+
+[patch.crates-io]
+wgpu = { git = "https://github.com/JMS55/wgpu", branch = "fallback-alloc-v29" }
+wgpu-core = { git = "https://github.com/JMS55/wgpu", branch = "fallback-alloc-v29" }
+wgpu-hal = { git = "https://github.com/JMS55/wgpu", branch = "fallback-alloc-v29" }
+wgpu-types = { git = "https://github.com/JMS55/wgpu", branch = "fallback-alloc-v29" }

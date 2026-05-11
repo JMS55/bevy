@@ -3,12 +3,12 @@ enable wgpu_ray_query;
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
-#import bevy_pbr::utils::{rand_f, sample_uniform_hemisphere, uniform_hemisphere_inverse_pdf, sample_disk}
+#import bevy_pbr::utils::{rand_f, sample_uniform_hemisphere, uniform_hemisphere_inverse_pdf, sample_disk, octahedral_encode, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
 #import bevy_solari::brdf::evaluate_diffuse_brdf
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, pixel_dissimilar, permute_pixel}
-#import bevy_solari::sampling::{sample_random_light, trace_point_visibility, balance_heuristic, isnan}
+#import bevy_solari::sampling::{sample_random_light, trace_point_visibility, balance_heuristic, LightSample, NULL_LIGHT_ID, isnan}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
 #import bevy_solari::world_cache::{query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 #import bevy_solari::realtime_bindings::{view_output, gi_reservoirs_a, gi_reservoirs_b, gbuffer, depth_buffer, motion_vectors, previous_gbuffer, previous_depth_buffer, view, previous_view, constants, Reservoir}
@@ -104,7 +104,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     }
 
     reservoir.sample_point_world_position = sample_point.world_position;
-    reservoir.sample_point_world_normal = sample_point.world_normal;
+    reservoir.sample_point_world_normal = octahedral_encode(sample_point.world_normal);
     reservoir.confidence_weight = 1.0;
 
 #ifdef NO_WORLD_CACHE
@@ -216,8 +216,8 @@ fn empty_reservoir() -> Reservoir {
         0.0,
         vec3(0.0),
         0.0,
-        vec3(0.0),
-        0.0,
+        vec2(0.0),
+        LightSample(NULL_LIGHT_ID, 0u),
     );
 }
 
@@ -263,13 +263,13 @@ fn merge_reservoirs(
         canonical_world_position,
         other_world_position,
         other_reservoir.sample_point_world_position,
-        other_reservoir.sample_point_world_normal
+        octahedral_decode(other_reservoir.sample_point_world_normal)
     );
     let other_target_function_canonical_sample_jacobian = jacobian(
         other_world_position,
         canonical_world_position,
         canonical_reservoir.sample_point_world_position,
-        canonical_reservoir.sample_point_world_normal
+        octahedral_decode(canonical_reservoir.sample_point_world_normal)
     );
 
     // Don't merge samples with huge jacobians, as it explodes the variance
@@ -294,15 +294,15 @@ fn merge_reservoirs(
     // Perform resampling
     var combined_reservoir = empty_reservoir();
     combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
-    combined_reservoir.weight_sum = canonical_sample_resampling_weight + other_sample_resampling_weight;
+    let weight_sum = canonical_sample_resampling_weight + other_sample_resampling_weight;
 
-    if rand_f(rng) < other_sample_resampling_weight / combined_reservoir.weight_sum {
+    if rand_f(rng) < other_sample_resampling_weight / weight_sum {
         combined_reservoir.sample_point_world_position = other_reservoir.sample_point_world_position;
         combined_reservoir.sample_point_world_normal = other_reservoir.sample_point_world_normal;
         combined_reservoir.radiance = other_reservoir.radiance;
 
         let inverse_target_function = select(0.0, 1.0 / canonical_target_function_other_sample, canonical_target_function_other_sample > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, other_reservoir.radiance, other_sample_wi);
     } else {
@@ -311,7 +311,7 @@ fn merge_reservoirs(
         combined_reservoir.radiance = canonical_reservoir.radiance;
 
         let inverse_target_function = select(0.0, 1.0 / canonical_target_function_canonical_sample, canonical_target_function_canonical_sample > 0.0);
-        combined_reservoir.unbiased_contribution_weight = combined_reservoir.weight_sum * inverse_target_function;
+        combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
         return ReservoirMergeResult(combined_reservoir, canonical_reservoir.radiance, canonical_sample_wi);
     }

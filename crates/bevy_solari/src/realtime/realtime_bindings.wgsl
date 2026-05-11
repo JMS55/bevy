@@ -59,11 +59,11 @@ struct ResolvedLightSamplePacked {
 // Don't adjust the size of this struct without also adjusting `prepare::GI_RESERVOIR_STRUCT_SIZE`.
 struct Reservoir {
     sample_point_world_position: vec3<f32>,
-    weight_sum: f32,
+    unbiased_contribution_weight: f32,
     radiance: vec3<f32>,
     confidence_weight: f32,
-    sample_point_world_normal: vec3<f32>,
-    unbiased_contribution_weight: f32,
+    sample_point_world_normal: vec2<f32>,
+    light_sample: LightSample,
 }
 
 struct WorldCacheGeometryData {

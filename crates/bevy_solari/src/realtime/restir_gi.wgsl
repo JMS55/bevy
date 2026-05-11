@@ -107,7 +107,7 @@ fn generate_initial_gi_reservoir(world_position: vec3<f32>, world_normal: vec3<f
     let sample_point = resolve_ray_hit_full(ray);
 
     if any(sample_point.material.emissive != vec3(0.0)) {
-        return reservoir;
+        return reservoir; // TODO: Don't return empty reservoir. Instead, return a DI reservoir.
     }
 
     reservoir.sample_point_world_position = sample_point.world_position;

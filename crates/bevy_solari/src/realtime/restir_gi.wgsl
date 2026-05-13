@@ -89,9 +89,10 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let wo = normalize(view.world_position - surface.world_position);
     let brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
 
-    var pixel_color = textureLoad(view_output, global_id.xy);
-    pixel_color = vec4(merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * view.exposure * brdf, 0.0);
-    textureStore(view_output, global_id.xy, pixel_color);
+    var pixel_color = textureLoad(view_output, global_id.xy).rgb;
+    pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight * view.exposure * brdf;
+    pixel_color += surface.material.emissive;
+    textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 
 fn generate_initial_gi_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {

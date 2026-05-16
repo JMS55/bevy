@@ -68,8 +68,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let input_reservoir = gi_reservoirs_b[pixel_index];
     let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+
+    let input_reservoir = gi_reservoirs_b[pixel_index];
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.diffuse_brdf, &rng);
     var combined_reservoir = merge_result.merged_reservoir;

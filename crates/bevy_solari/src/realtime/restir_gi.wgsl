@@ -423,8 +423,6 @@ struct ReservoirContribution {
     radiance: vec3<f32>,
     target_function: f32,
     wi: vec3<f32>,
-    // Resolved sample world position for visibility tracing. w=1 for surface points (GI / area lights),
-    // w=0 for directional lights (xyz is the direction).
     sample_world_position: vec4<f32>,
 }
 

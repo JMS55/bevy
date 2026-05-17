@@ -108,7 +108,6 @@ fn quantize_normal(world_normal: vec3<f32>) -> vec3<f32> {
     return floor(world_normal * 2.0 + 0.0001);
 }
 
-// TODO: Clustering
 fn compute_key(world_position: vec3<u32>, world_normal: vec3<u32>) -> u32 {
     var key = pcg_hash(world_position.x);
     key = pcg_hash(key + world_position.y);

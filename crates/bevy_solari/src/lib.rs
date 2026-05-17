@@ -50,6 +50,7 @@ impl SolariPlugins {
     /// [`WgpuFeatures`] required for these plugins to function.
     pub fn required_wgpu_features() -> WgpuFeatures {
         WgpuFeatures::EXPERIMENTAL_RAY_QUERY
+            | WgpuFeatures::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN
             | WgpuFeatures::BUFFER_BINDING_ARRAY
             | WgpuFeatures::TEXTURE_BINDING_ARRAY
             | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING

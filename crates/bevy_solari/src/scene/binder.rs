@@ -31,6 +31,8 @@ const LIGHT_NOT_PRESENT_THIS_FRAME: u32 = u32::MAX;
 pub struct RaytracingSceneBindings {
     pub bind_group: Option<BindGroup>,
     pub bind_group_layout: BindGroupLayoutDescriptor,
+    pub(crate) tlas: Option<Tlas>,
+    pub(crate) material_count: u32,
     previous_frame_light_entities: Vec<Entity>,
 }
 
@@ -55,6 +57,7 @@ pub fn prepare_raytracing_scene_bindings(
     mut raytracing_scene_bindings: ResMut<RaytracingSceneBindings>,
 ) {
     raytracing_scene_bindings.bind_group = None;
+    raytracing_scene_bindings.tlas = None;
 
     let mut this_frame_entity_to_light_id = EntityHashMap::<u32>::default();
     let previous_frame_light_entities: Vec<_> = raytracing_scene_bindings
@@ -71,6 +74,7 @@ pub fn prepare_raytracing_scene_bindings(
     let mut textures = CachedBindingArray::new();
     let mut samplers = Vec::new();
     let mut materials = StorageBufferList::<GpuMaterial>::default();
+    let mut simplified_materials = StorageBufferList::<GpuResolvedMaterial>::default();
     let mut tlas = render_device
         .wgpu_device()
         .create_tlas(&CreateTlasDescriptor {
@@ -136,6 +140,18 @@ pub fn prepare_raytracing_scene_bindings(
             _padding: Default::default(),
         });
 
+        // TODO: Further pack? Can maybe make base_color rgb9e5, etc
+        simplified_materials.get_mut().push(GpuResolvedMaterial {
+            base_color: LinearRgba::from(material.base_color).to_vec3(),
+            _padding1: Default::default(),
+            emissive: material.emissive.to_vec3(), // TODO: Not safe to simplify emissive textures
+            reflectance: material.reflectance,
+            perceptual_roughness: material.perceptual_roughness,
+            roughness: material.perceptual_roughness * material.perceptual_roughness,
+            metallic: material.metallic,
+            _padding2: Default::default(),
+        });
+
         material_id_map.insert(*asset_id, material_id);
         material_id += 1;
     }
@@ -171,7 +187,7 @@ pub fn prepare_raytracing_scene_bindings(
         *tlas.get_mut_single(instance_id).unwrap() = Some(TlasInstance::new(
             blas,
             tlas_transform(&transform),
-            Default::default(),
+            material_id,
             0xFF,
         ));
 
@@ -253,6 +269,7 @@ pub fn prepare_raytracing_scene_bindings(
     }
 
     materials.write_buffer(&render_device, &render_queue);
+    simplified_materials.write_buffer(&render_device, &render_queue);
     transforms.write_buffer(&render_device, &render_queue);
     previous_frame_transforms.write_buffer(&render_device, &render_queue);
     geometry_ids.write_buffer(&render_device, &render_queue);
@@ -260,12 +277,6 @@ pub fn prepare_raytracing_scene_bindings(
     light_sources.write_buffer(&render_device, &render_queue);
     directional_lights.write_buffer(&render_device, &render_queue);
     previous_frame_light_id_translations.write_buffer(&render_device, &render_queue);
-
-    let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("build_tlas_command_encoder"),
-    });
-    command_encoder.build_acceleration_structures(&[], [&tlas]);
-    render_queue.submit([command_encoder.finish()]);
 
     let (dfg_view, dfg_sampler) = texture_assets
         .get(&dfg_lut.texture)
@@ -284,6 +295,7 @@ pub fn prepare_raytracing_scene_bindings(
             textures.as_slice(),
             samplers.as_slice(),
             materials.binding().unwrap(),
+            simplified_materials.binding().unwrap(),
             tlas.as_binding(),
             transforms.binding().unwrap(),
             previous_frame_transforms.binding().unwrap(),
@@ -296,6 +308,8 @@ pub fn prepare_raytracing_scene_bindings(
             dfg_sampler,
         )),
     ));
+    raytracing_scene_bindings.tlas = Some(tlas);
+    raytracing_scene_bindings.material_count = material_id;
 }
 
 impl RaytracingSceneBindings {
@@ -313,6 +327,7 @@ impl RaytracingSceneBindings {
                             .count(MAX_TEXTURE_COUNT),
                         sampler(SamplerBindingType::Filtering).count(MAX_TEXTURE_COUNT),
                         storage_buffer_read_only_sized(false, None),
+                        storage_buffer_sized(false, None),
                         acceleration_structure(),
                         storage_buffer_read_only_sized(false, None),
                         storage_buffer_read_only_sized(false, None),
@@ -326,6 +341,8 @@ impl RaytracingSceneBindings {
                     ),
                 ),
             ),
+            tlas: None,
+            material_count: 0,
             previous_frame_light_entities: Vec::new(),
         }
     }
@@ -394,6 +411,18 @@ struct GpuMaterial {
     metallic: f32,
     _padding: Vec3,
     reflectance: f32,
+}
+
+#[derive(ShaderType)]
+struct GpuResolvedMaterial {
+    base_color: Vec3,
+    _padding1: f32,
+    emissive: Vec3,
+    reflectance: f32,
+    perceptual_roughness: f32,
+    roughness: f32,
+    metallic: f32,
+    _padding2: f32,
 }
 
 #[derive(ShaderType)]

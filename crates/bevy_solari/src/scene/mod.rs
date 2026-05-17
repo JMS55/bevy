@@ -1,14 +1,17 @@
 mod binder;
 mod blas;
 mod extract;
+mod node;
 mod types;
 
+use bevy_core_pipeline::schedule::camera_driver;
 use bevy_shader::load_shader_library;
 pub use binder::RaytracingSceneBindings;
 pub use types::RaytracingMesh3d;
 
 use crate::SolariPlugins;
 use bevy_app::{App, Plugin};
+use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
     extract_resource::ExtractResourcePlugin,
@@ -18,12 +21,13 @@ use bevy_render::{
     },
     render_asset::prepare_assets,
     render_resource::BufferUsages,
-    renderer::RenderDevice,
-    ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
+    renderer::{RenderDevice, RenderGraph, RenderGraphSystems},
+    ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use binder::prepare_raytracing_scene_bindings;
 use blas::{compact_raytracing_blas, prepare_raytracing_blas, BlasManager};
 use extract::{extract_raytracing_scene, StandardMaterialAssets};
+use node::{init_raytracing_scene_pipelines, raytracing_scene_setup};
 use tracing::warn;
 
 /// Creates acceleration structures and binding arrays of resources for raytracing.
@@ -34,6 +38,7 @@ impl Plugin for RaytracingScenePlugin {
         load_shader_library!(app, "brdf.wgsl");
         load_shader_library!(app, "raytracing_scene_bindings.wgsl");
         load_shader_library!(app, "sampling.wgsl");
+        embedded_asset!(app, "simplify_materials.wgsl");
     }
 
     fn finish(&self, app: &mut App) {
@@ -61,6 +66,7 @@ impl Plugin for RaytracingScenePlugin {
             .init_gpu_resource::<BlasManager>()
             .init_gpu_resource::<StandardMaterialAssets>()
             .insert_resource(RaytracingSceneBindings::new())
+            .add_systems(RenderStartup, init_raytracing_scene_pipelines)
             .add_systems(ExtractSchedule, extract_raytracing_scene)
             .add_systems(
                 Render,
@@ -74,6 +80,12 @@ impl Plugin for RaytracingScenePlugin {
                         .after(prepare_raytracing_blas),
                     prepare_raytracing_scene_bindings.in_set(RenderSystems::PrepareBindGroups),
                 ),
+            )
+            .add_systems(
+                RenderGraph,
+                raytracing_scene_setup
+                    .in_set(RenderGraphSystems::Render)
+                    .before(camera_driver),
             );
     }
 }

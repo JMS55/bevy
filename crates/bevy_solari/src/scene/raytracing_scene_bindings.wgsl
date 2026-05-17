@@ -1,4 +1,5 @@
 enable wgpu_ray_query;
+enable wgpu_ray_query_vertex_return;
 
 #define_import_path bevy_solari::scene_bindings
 
@@ -79,16 +80,17 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(2) var textures: binding_array<texture_2d<f32>>;
 @group(0) @binding(3) var samplers: binding_array<sampler>;
 @group(0) @binding(4) var<storage> materials: array<Material>;
-@group(0) @binding(5) var tlas: acceleration_structure;
-@group(0) @binding(6) var<storage> transforms: array<mat4x4<f32>>; // TODO: Use mat3x4<f32>?
-@group(0) @binding(7) var<storage> previous_frame_transforms: array<mat4x4<f32>>; // TODO: Use mat3x4<f32>?
-@group(0) @binding(8) var<storage> geometry_ids: array<InstanceGeometryIds>;
-@group(0) @binding(9) var<storage> material_ids: array<u32>; // TODO: Store material_id in instance_custom_index instead?
-@group(0) @binding(10) var<storage> light_sources: array<LightSource>;
-@group(0) @binding(11) var<storage> directional_lights: array<DirectionalLight>;
-@group(0) @binding(12) var<storage> previous_frame_light_id_translations: array<u32>;
-@group(0) @binding(13) var brdf_dfg_lut: texture_2d<f32>;
-@group(0) @binding(14) var brdf_dfg_lut_sampler: sampler;
+@group(0) @binding(5) var<storage, read_write> simplified_materials: array<ResolvedMaterial>;
+@group(0) @binding(6) var tlas: acceleration_structure<vertex_return>;
+@group(0) @binding(7) var<storage> transforms: array<mat4x4<f32>>; // TODO: Use mat3x4<f32>?
+@group(0) @binding(8) var<storage> previous_frame_transforms: array<mat4x4<f32>>; // TODO: Use mat3x4<f32>?
+@group(0) @binding(9) var<storage> geometry_ids: array<InstanceGeometryIds>;
+@group(0) @binding(10) var<storage> material_ids: array<u32>; // TODO: Store material_id in instance_custom_index instead?
+@group(0) @binding(11) var<storage> light_sources: array<LightSource>;
+@group(0) @binding(12) var<storage> directional_lights: array<DirectionalLight>;
+@group(0) @binding(13) var<storage> previous_frame_light_id_translations: array<u32>;
+@group(0) @binding(14) var brdf_dfg_lut: texture_2d<f32>;
+@group(0) @binding(15) var brdf_dfg_lut_sampler: sampler;
 
 const RAY_T_MIN = 0.001f;
 const RAY_T_MAX = 100000.0f;
@@ -97,7 +99,7 @@ const RAY_NO_CULL = 0xFFu;
 
 fn trace_ray(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> RayIntersection {
     let ray = RayDesc(ray_flag, RAY_NO_CULL, ray_t_min, ray_t_max, ray_origin, ray_direction);
-    var rq: ray_query;
+    var rq: ray_query<vertex_return>;
     rayQueryInitialize(&rq, tlas, ray);
     rayQueryProceed(&rq);
     return rayQueryGetCommittedIntersection(&rq);
@@ -109,11 +111,13 @@ fn sample_texture(id: u32, uv: vec2<f32>) -> vec3<f32> {
 
 struct ResolvedMaterial {
     base_color: vec3<f32>,
+    _padding1: f32,
     emissive: vec3<f32>,
     reflectance: f32,
     perceptual_roughness: f32,
     roughness: f32,
     metallic: f32,
+    _padding2: f32,
 }
 
 struct ResolvedRayHitFull {

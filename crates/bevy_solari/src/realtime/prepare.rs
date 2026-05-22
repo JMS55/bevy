@@ -12,17 +12,20 @@ use bevy_ecs::{
     query::With,
     system::{Commands, Query, Res},
 };
+#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 use bevy_image::ToExtents;
 use bevy_math::UVec2;
-#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-use bevy_render::texture::CachedTexture;
 use bevy_render::{
     camera::ExtractedCamera,
-    render_resource::{
-        Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureUsages, TextureView, TextureViewDescriptor,
-    },
+    render_resource::{Buffer, BufferDescriptor, BufferUsages},
     renderer::RenderDevice,
+};
+#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+use bevy_render::{
+    render_resource::{
+        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
+    },
+    texture::CachedTexture,
 };
 
 /// Size of the `LightSample` shader struct in bytes.

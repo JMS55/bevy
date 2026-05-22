@@ -11,10 +11,9 @@ enable wgpu_ray_query;
 #import bevy_solari::sampling::{sample_random_light, trace_light_visibility, balance_heuristic, calculate_resolved_light_contribution, resolve_light_sample, LightSample, ResolvedLightSample, NULL_LIGHT_ID, isnan}
 #import bevy_solari::scene_bindings::{light_sources, previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME, trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
 #import bevy_solari::world_cache::{query_world_cache, WORLD_CACHE_CELL_LIFETIME}
-#import bevy_solari::realtime_bindings::{view_output, light_tile_samples, light_tile_resolved_samples, gi_reservoirs_a, gi_reservoirs_b, gbuffer, depth_buffer, motion_vectors, previous_gbuffer, previous_depth_buffer, view, previous_view, constants, Reservoir}
-#import bevy_solari::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD
+#import bevy_solari::realtime_bindings::{view_output, light_tile_samples, light_tile_resolved_samples, reservoirs_a, reservoirs_b, gbuffer, depth_buffer, motion_vectors, previous_gbuffer, previous_depth_buffer, view, previous_view, constants, Reservoir}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
-#import bevy_solari::specular_gi::SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD
+#import bevy_solari::specular_gi::{DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD, SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD}
 
 const INITIAL_DI_SAMPLES = 8u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
@@ -29,12 +28,12 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
-        gi_reservoirs_b[pixel_index] = empty_reservoir();
+        reservoirs_b[pixel_index] = empty_reservoir();
         return;
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
     if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
-        gi_reservoirs_b[pixel_index] = empty_reservoir();
+        reservoirs_b[pixel_index] = empty_reservoir();
         return;
     }
     let diffuse_brdf = surface.material.base_color / PI;
@@ -47,7 +46,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, diffuse_brdf,
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
 
-    gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
+    reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -59,23 +58,23 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
-        gi_reservoirs_a[pixel_index] = empty_reservoir();
+        reservoirs_a[pixel_index] = empty_reservoir();
         return;
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
     if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
-        gi_reservoirs_a[pixel_index] = empty_reservoir();
+        reservoirs_a[pixel_index] = empty_reservoir();
         return;
     }
 
     let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
 
-    let input_reservoir = gi_reservoirs_b[pixel_index];
+    let input_reservoir = reservoirs_b[pixel_index];
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.diffuse_brdf, &rng);
     var combined_reservoir = merge_result.merged_reservoir;
 
-    gi_reservoirs_a[pixel_index] = combined_reservoir;
+    reservoirs_a[pixel_index] = combined_reservoir;
 
     combined_reservoir.unbiased_contribution_weight *= trace_light_visibility(surface.world_position + (surface.world_normal * RAY_T_MIN), merge_result.selected_sample_world_position);
 
@@ -220,7 +219,7 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world
     }
 
     let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.main_pass_viewport.z);
-    let temporal_reservoir = gi_reservoirs_a[temporal_pixel_index];
+    let temporal_reservoir = reservoirs_a[temporal_pixel_index];
 
     return NeighborInfo(temporal_reservoir, temporal_surface.world_position, temporal_surface.world_normal, temporal_diffuse_brdf);
 }
@@ -237,7 +236,7 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
         }
 
         let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
-        let spatial_reservoir = gi_reservoirs_b[spatial_pixel_index];
+        let spatial_reservoir = reservoirs_b[spatial_pixel_index];
         return NeighborInfo(spatial_reservoir, spatial_surface.world_position, spatial_surface.world_normal, spatial_diffuse_brdf);
     }
 

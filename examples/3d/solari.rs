@@ -599,12 +599,8 @@ fn update_performance_text(
         "render/solari_lighting/world_cache/elapsed_gpu",
     );
     (add_diagnostic)(
-        "Direct lighting",
-        "render/solari_lighting/direct_lighting/elapsed_gpu",
-    );
-    (add_diagnostic)(
-        "Diffuse indirect",
-        "render/solari_lighting/diffuse_indirect_lighting/elapsed_gpu",
+        "Main lighting",
+        "render/solari_lighting/main_lighting/elapsed_gpu",
     );
     (add_diagnostic)(
         "Specular indirect",

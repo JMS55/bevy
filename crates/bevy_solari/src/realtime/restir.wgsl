@@ -4,11 +4,11 @@ enable wgpu_ray_query;
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::utils::{octahedral_decode, octahedral_encode, rand_f, rand_range_u, sample_disk}
 #import bevy_render::maths::PI
-#import bevy_solari::brdf::{evaluate_and_sample_brdf_uniform_diffuse, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB}
+#import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_and_sample_brdf_uniform_diffuse, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
 #import bevy_solari::realtime_bindings::{constants, depth_buffer, gbuffer, light_tile_resolved_samples, light_tile_samples, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, view, view_output}
-#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isnan, LightSample, NULL_LIGHT_ID, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
+#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
 #import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, trace_ray}
 #import bevy_solari::world_cache::{query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 
@@ -98,6 +98,13 @@ fn generate_initial_gi_reservoir(world_position: vec3<f32>, world_normal: vec3<f
     var ray_origin = world_position;
     var ray_origin_normal = world_normal;
     var current_brdf_sample = brdf_sample;
+    // Previous vertex's local frame, used by the emissive-hit MIS to evaluate the
+    // unnormalized RIS target function at the previous vertex for the direction
+    // toward the current hit. See the emissive-hit branch below for unit caveats.
+    var prev_wo = wo;
+    var prev_normal = world_normal;
+    var prev_material = material;
+    var prev_F_ab = F_ab;
     // Accumulated brdf*cos/pdf from bounces after the first. The first bounce's
     // 1/pdf is stored in unbiased_contribution_weight and its brdf is re-evaluated
     // at resampling time against the world_position→sample_point direction.
@@ -122,8 +129,26 @@ fn generate_initial_gi_reservoir(world_position: vec3<f32>, world_normal: vec3<f
         }
 
         if any(hit.material.emissive != vec3(0.0)) {
-            accumulated_radiance += throughput * hit.material.emissive;
-            break;
+            // MIS between BRDF-sampled emissive hit and the NEE that would have sampled it.
+            // The first hit is never MIS'd — there's no preceding intermediate NEE competing for it.
+            //
+            // Note on units: p_hat here is the unnormalized RIS target function (luminance of
+            // emitted radiance × prev-vertex BRDF), not a true PDF. We treat it as a proxy for
+            // RIS's effective solid-angle sampling density at the previous vertex — this is the
+            // standard biased-ReSTIR-MIS shortcut. current_brdf_sample.pdf is a real solid-angle
+            // PDF, so the heuristic's scale invariance does not perfectly hold; the resulting
+            // weight is an approximation, not a strictly unbiased combination.
+            //
+            // We intentionally do not break after an emissive hit: with MIS the BRDF strategy's
+            // contribution is downweighted, and continuing the chain lets surfaces that have both
+            // emissive and reflective components (rare, but possible) keep contributing indirect.
+            var mis_weight = 1.0;
+            if bounce != 0u {
+                let prev_brdf = evaluate_brdf(prev_wo, current_brdf_sample.wi, prev_normal, prev_material, prev_F_ab);
+                let p_hat = luminance(hit.material.emissive * prev_brdf);
+                mis_weight = power_heuristic(current_brdf_sample.pdf, p_hat);
+            }
+            accumulated_radiance += throughput * mis_weight * hit.material.emissive;
         }
 
         let is_last_bounce = bounce == GI_MAX_BOUNCES - 1u;
@@ -145,10 +170,34 @@ fn generate_initial_gi_reservoir(world_position: vec3<f32>, world_normal: vec3<f
             let resolved = resolve_light_sample(di.reservoir.light_sample, light_sources[di.reservoir.light_sample.light_id >> 16u]);
             let light_contribution = calculate_resolved_light_contribution(resolved, hit.world_position, hit.world_normal);
             let di_brdf = evaluate_brdf(next_wo, light_contribution.wi, hit.world_normal, hit.material, next_F_ab);
-            accumulated_radiance += throughput * light_contribution.radiance * di_brdf * di.reservoir.unbiased_contribution_weight;
+            // MIS between NEE and BRDF rays that could hit the same light.
+            // Only finite-area emitters (w==1) can be hit by BRDF rays.
+            var mis_weight = 1.0;
+            if light_contribution.brdf_rays_can_hit {
+                // Same shortcut as the emissive-hit branch above: p_hat is the unnormalized
+                // RIS target function (luminance of emitted radiance × BRDF, with the area
+                // geometry factor dropped so it lives in solid-angle domain), used as a proxy
+                // for ReSTIR's effective solid-angle sampling density. p_brdf is a real
+                // solid-angle PDF. Scale mismatch makes this an approximation, not strictly
+                // unbiased — but it tracks resampling well enough for screen-space ReSTIR.
+                let p_hat = luminance(resolved.radiance * di_brdf);
+                let p_brdf = brdf_pdf(next_wo, light_contribution.wi, hit.world_normal, hit.material, next_F_ab);
+                mis_weight = power_heuristic(p_hat, p_brdf);
+            }
+            accumulated_radiance += throughput * mis_weight * light_contribution.radiance * di_brdf * di.reservoir.unbiased_contribution_weight;
         }
 
-        current_brdf_sample = evaluate_and_sample_brdf_uniform_diffuse(next_wo, hit.world_normal, hit.material, next_F_ab, rng);
+        // The next iteration will treat this hit as its previous vertex.
+        prev_wo = next_wo;
+        prev_normal = hit.world_normal;
+        prev_material = hit.material;
+        prev_F_ab = next_F_ab;
+
+        // Non-first bounces use the full BRDF importance sampler. The first bounce
+        // (passed in as brdf_sample) intentionally uses uniform-diffuse sampling because
+        // its PDF feeds the spatial/temporal jacobian, and a stable PDF is more important
+        // there than tight variance on the first hop.
+        current_brdf_sample = evaluate_and_sample_brdf(next_wo, hit.world_normal, hit.material, next_F_ab, rng);
         if current_brdf_sample.pdf <= 0.0 {
             break;
         }

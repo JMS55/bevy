@@ -104,6 +104,9 @@ struct ResolvedLightSample {
 struct LightContribution {
     radiance: vec3<f32>,
     inverse_pdf: f32,
+    // Solid-angle-domain inverse PDF at the shading point, for MIS against BRDF sampling.
+    // For directional lights this equals inverse_pdf (already in solid angle).
+    inverse_solid_angle_pdf: f32,
     wi: vec3<f32>,
     brdf_rays_can_hit: bool,
 }
@@ -125,9 +128,14 @@ fn sample_random_light(ray_origin: vec3<f32>, origin_world_normal: vec3<f32>, rn
     return light_contribution;
 }
 
-fn random_emissive_light_pdf(hit: ResolvedRayHitFull) -> f32 {
+// Solid-angle-domain PDF (at the originating shading point) for sampling the emissive
+// triangle that the BRDF-sampled ray landed on. ray_distance is the distance from the
+// shading point to the hit; NdotV is the cosine between the hit's normal and the
+// direction back toward the shading point (= cos_theta_light for this sample).
+fn random_emissive_light_pdf(hit: ResolvedRayHitFull, ray_distance: f32, NdotV: f32) -> f32 {
     let light_count = arrayLength(&light_sources);
-    return 1.0 / (f32(light_count) * f32(hit.triangle_count) * hit.triangle_area);
+    let area_pdf = 1.0 / (f32(light_count) * f32(hit.triangle_count) * hit.triangle_area);
+    return area_pdf * (ray_distance * ray_distance) / NdotV;
 }
 
 fn generate_random_light_sample(rng: ptr<function, u32>) -> GenerateRandomLightSampleResult {
@@ -204,7 +212,11 @@ fn calculate_resolved_light_contribution(resolved_light_sample: ResolvedLightSam
 
     let radiance = resolved_light_sample.radiance * (cos_theta_light / light_distance_squared);
 
-    return LightContribution(radiance, resolved_light_sample.inverse_pdf, wi, resolved_light_sample.world_position.w == 1.0);
+    // For directional lights, world_position.w == 0, light_distance == 1, cos_theta_light == 1,
+    // so this collapses to inverse_pdf (which is already a solid-angle pdf for directional cones).
+    let inverse_solid_angle_pdf = resolved_light_sample.inverse_pdf * cos_theta_light / light_distance_squared;
+
+    return LightContribution(radiance, resolved_light_sample.inverse_pdf, inverse_solid_angle_pdf, wi, resolved_light_sample.world_position.w == 1.0);
 }
 
 fn resolve_and_calculate_light_contribution(light_sample: LightSample, ray_origin: vec3<f32>, origin_world_normal: vec3<f32>) -> LightContributionNoPdf {

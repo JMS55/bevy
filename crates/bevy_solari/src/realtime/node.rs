@@ -45,9 +45,6 @@ pub struct SolariLightingPipelines {
     presample_light_tiles_pipeline: CachedComputePipelineId,
     initial_and_temporal_pipeline: CachedComputePipelineId,
     spatial_and_shade_pipeline: CachedComputePipelineId,
-    specular_gi_pipeline: CachedComputePipelineId,
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    specular_gi_with_psr_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
 }
@@ -109,15 +106,6 @@ pub fn solari_lighting(
         return;
     };
 
-    #[cfg(not(all(feature = "dlss", not(feature = "force_disable_dlss"))))]
-    let specular_gi_pipeline = pipelines.specular_gi_pipeline;
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    let specular_gi_pipeline = if view_dlss_rr_textures.is_some() {
-        pipelines.specular_gi_with_psr_pipeline
-    } else {
-        pipelines.specular_gi_pipeline
-    };
-
     let (
         Some(decay_world_cache_pipeline),
         Some(compact_world_cache_single_block_pipeline),
@@ -129,7 +117,6 @@ pub fn solari_lighting(
         Some(presample_light_tiles_pipeline),
         Some(initial_and_temporal_pipeline),
         Some(spatial_and_shade_pipeline),
-        Some(specular_gi_pipeline),
         Some(scene_bind_group),
         Some(gbuffer),
         Some(depth_buffer),
@@ -150,7 +137,6 @@ pub fn solari_lighting(
         pipeline_cache.get_compute_pipeline(pipelines.presample_light_tiles_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.initial_and_temporal_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.spatial_and_shade_pipeline),
-        pipeline_cache.get_compute_pipeline(specular_gi_pipeline),
         &scene_bindings.bind_group,
         view_prepass_textures.deferred_view(),
         view_prepass_textures.depth_view(),
@@ -324,7 +310,7 @@ pub fn solari_lighting(
 
     d.end(&mut pass);
 
-    let d = diagnostics.time_span(&mut pass, "solari_lighting/main_lighting");
+    let d = diagnostics.time_span(&mut pass, "solari_lighting/lighting");
 
     pass.set_pipeline(initial_and_temporal_pipeline);
     pass.set_immediates(
@@ -340,19 +326,6 @@ pub fn solari_lighting(
     );
     pass.dispatch_workgroups(dx, dy, 1);
 
-    d.end(&mut pass);
-
-    let d = diagnostics.time_span(&mut pass, "solari_lighting/specular_indirect_lighting");
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
-        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
-    }
-    pass.set_pipeline(specular_gi_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[frame_index, solari_lighting.reset as u32]),
-    );
-    pass.dispatch_workgroups(dx, dy, 1);
     d.end(&mut pass);
 
     drop(pass);
@@ -527,21 +500,6 @@ pub fn init_solari_lighting_pipelines(
             load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
             None,
             vec![],
-        ),
-        specular_gi_pipeline: create_pipeline(
-            "solari_lighting_specular_gi_pipeline",
-            "specular_gi",
-            load_embedded_asset!(asset_server.as_ref(), "specular_gi.wgsl"),
-            None,
-            vec!["JITTER_WORLD_CACHE".into()],
-        ),
-        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-        specular_gi_with_psr_pipeline: create_pipeline(
-            "solari_lighting_specular_gi_with_psr_pipeline",
-            "specular_gi",
-            load_embedded_asset!(asset_server.as_ref(), "specular_gi.wgsl"),
-            Some(&bind_group_layout_resolve_dlss_rr_textures),
-            vec!["DLSS_RR_GUIDE_BUFFERS".into()],
         ),
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
         resolve_dlss_rr_textures_pipeline: create_pipeline(

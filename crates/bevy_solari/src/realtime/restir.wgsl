@@ -2,20 +2,18 @@
 enable wgpu_ray_query;
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::prepass_bindings::PreviousViewUniforms
-#import bevy_pbr::utils::{rand_f, rand_range_u, sample_uniform_hemisphere, uniform_hemisphere_inverse_pdf, sample_disk, octahedral_encode, octahedral_decode}
+#import bevy_pbr::utils::{octahedral_decode, octahedral_encode, rand_f, rand_range_u, sample_disk}
 #import bevy_render::maths::PI
-#import bevy_render::view::View
-#import bevy_solari::brdf::{evaluate_diffuse_brdf, evaluate_specular_brdf, F_AB}
-#import bevy_solari::gbuffer_utils::{gpixel_resolve, pixel_dissimilar, permute_pixel}
-#import bevy_solari::sampling::{sample_random_light, trace_light_visibility, balance_heuristic, calculate_resolved_light_contribution, resolve_light_sample, LightSample, ResolvedLightSample, NULL_LIGHT_ID, isnan}
-#import bevy_solari::scene_bindings::{light_sources, previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME, trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
-#import bevy_solari::world_cache::{query_world_cache, WORLD_CACHE_CELL_LIFETIME}
-#import bevy_solari::realtime_bindings::{view_output, light_tile_samples, light_tile_resolved_samples, reservoirs_a, reservoirs_b, gbuffer, depth_buffer, motion_vectors, previous_gbuffer, previous_depth_buffer, view, previous_view, constants, Reservoir}
+#import bevy_solari::brdf::{evaluate_and_sample_brdf_uniform_diffuse, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB}
+#import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
-#import bevy_solari::specular_gi::{DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD, SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD}
+#import bevy_solari::realtime_bindings::{constants, depth_buffer, gbuffer, light_tile_resolved_samples, light_tile_samples, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, view, view_output}
+#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isnan, LightSample, NULL_LIGHT_ID, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
+#import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, trace_ray}
+#import bevy_solari::world_cache::{query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 
 const INITIAL_DI_SAMPLES = 8u;
+const GI_MAX_BOUNCES = 3u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
 
@@ -32,19 +30,13 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
         return;
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
-    if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
-        reservoirs_b[pixel_index] = empty_reservoir();
-        return;
-    }
-    let diffuse_brdf = surface.material.base_color / PI;
 
-    let initial_di_reservoir = generate_initial_di_reservoir(surface.world_position, surface.world_normal, diffuse_brdf, workgroup_id.xy, &rng);
-    let initial_gi_reservoir = generate_initial_gi_reservoir(surface.world_position, surface.world_normal, diffuse_brdf, &rng);
-    let initial_reservoir = merge_initial_reservoirs(initial_di_reservoir, initial_gi_reservoir, &rng);
+    let wo = normalize(view.world_position - surface.world_position);
+    let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, &rng);
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
-    let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, diffuse_brdf,
-        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
+    let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material,
+        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, &rng);
 
     reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
@@ -62,16 +54,12 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
-    if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
-        reservoirs_a[pixel_index] = empty_reservoir();
-        return;
-    }
 
     let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
 
     let input_reservoir = reservoirs_b[pixel_index];
-    let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
-        spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.diffuse_brdf, &rng);
+    let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
+        spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, &rng);
     var combined_reservoir = merge_result.merged_reservoir;
 
     reservoirs_a[pixel_index] = combined_reservoir;
@@ -81,11 +69,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let wo = normalize(view.world_position - surface.world_position);
     let NdotV = max(dot(surface.world_normal, wo), 0.0001);
     let F_ab = F_AB(surface.material.perceptual_roughness, NdotV);
-    var brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material, F_ab);
-    // Only consider the specular lobe for DI if the surface is not smooth, else leave it for the specular GI pass to handle
-    if combined_reservoir.light_sample.light_id != NULL_LIGHT_ID && surface.material.roughness > SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
-        brdf += evaluate_specular_brdf(wo, merge_result.wi, surface.world_normal, surface.material, F_ab);
-    }
+    let brdf = evaluate_brdf(wo, merge_result.wi, surface.world_normal, surface.material, F_ab);
 
     var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color *= brdf;
@@ -94,49 +78,99 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 }
 
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
+    let NdotV = max(dot(world_normal, wo), 0.0001);
+    let F_ab = F_AB(material.perceptual_roughness, NdotV);
+    let brdf_sample = evaluate_and_sample_brdf_uniform_diffuse(wo, world_normal, material, F_ab, rng);
+    let initial_di_reservoir = generate_initial_di_reservoir(world_position, world_normal, wo, material, F_ab, workgroup_id, rng);
+    let initial_gi_reservoir = generate_initial_gi_reservoir(world_position, world_normal, wo, material, F_ab, brdf_sample, workgroup_id, rng);
+    return merge_initial_reservoirs(initial_di_reservoir, initial_gi_reservoir, rng);
+}
+
 struct InitialReservoirResult {
     reservoir: Reservoir,
     target_function: f32,
 }
 
-fn generate_initial_gi_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, rng: ptr<function, u32>) -> InitialReservoirResult {
+fn generate_initial_gi_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, brdf_sample: EvaluateAndSampleBrdfResult, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> InitialReservoirResult {
     var reservoir = empty_reservoir();
 
-    let ray_direction = sample_uniform_hemisphere(world_normal, rng);
-    let ray = trace_ray(world_position + (world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+    var ray_origin = world_position;
+    var ray_origin_normal = world_normal;
+    var current_brdf_sample = brdf_sample;
+    // Accumulated brdf*cos/pdf from bounces after the first. The first bounce's
+    // 1/pdf is stored in unbiased_contribution_weight and its brdf is re-evaluated
+    // at resampling time against the world_position→sample_point direction.
+    var throughput = vec3(1.0);
+    // Radiance leaving the first hit toward world_position, summed across the chain.
+    var accumulated_radiance = vec3(0.0);
 
-    if ray.kind == RAY_QUERY_INTERSECTION_NONE {
-        return InitialReservoirResult(reservoir, 0.0);
+    for (var bounce = 0u; bounce < GI_MAX_BOUNCES; bounce++) {
+        let ray = trace_ray(ray_origin + (ray_origin_normal * RAY_T_MIN), current_brdf_sample.wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+        if ray.kind == RAY_QUERY_INTERSECTION_NONE {
+            return InitialReservoirResult(reservoir, 0.0);
+        }
+        let hit = resolve_ray_hit_full(ray);
+
+        // The first hit is the reservoir's sample_point — the geometric reference
+        // used by the spatial/temporal jacobian. Subsequent bounces only refine
+        // the radiance leaving this point toward world_position.
+        if bounce == 0u {
+            reservoir.sample_point_world_position = hit.world_position;
+            reservoir.sample_point_world_normal = octahedral_encode(hit.world_normal);
+            reservoir.confidence_weight = 1.0;
+        }
+
+        if any(hit.material.emissive != vec3(0.0)) {
+            accumulated_radiance += throughput * hit.material.emissive;
+            break;
+        }
+
+        let is_last_bounce = bounce == GI_MAX_BOUNCES - 1u;
+        if current_brdf_sample.diffuse_selected || is_last_bounce {
+            let world_cache_radiance = query_world_cache(hit.world_position, hit.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+            accumulated_radiance += throughput * world_cache_radiance * (hit.material.base_color / PI);
+            break;
+        }
+
+        // Specular ray: continue the chain instead of terminating in the world cache.
+        // Sample direct lighting at this intermediate hit to compensate for not
+        // using the world cache (which already includes direct lighting).
+        let next_wo = -current_brdf_sample.wi;
+        let next_NdotV = max(dot(hit.world_normal, next_wo), 0.0001);
+        let next_F_ab = F_AB(hit.material.perceptual_roughness, next_NdotV);
+
+        let di = generate_initial_di_reservoir(hit.world_position, hit.world_normal, next_wo, hit.material, next_F_ab, workgroup_id, rng);
+        if di.reservoir.light_sample.light_id != NULL_LIGHT_ID {
+            let resolved = resolve_light_sample(di.reservoir.light_sample, light_sources[di.reservoir.light_sample.light_id >> 16u]);
+            let light_contribution = calculate_resolved_light_contribution(resolved, hit.world_position, hit.world_normal);
+            let di_brdf = evaluate_brdf(next_wo, light_contribution.wi, hit.world_normal, hit.material, next_F_ab);
+            accumulated_radiance += throughput * light_contribution.radiance * di_brdf * di.reservoir.unbiased_contribution_weight;
+        }
+
+        current_brdf_sample = evaluate_and_sample_brdf_uniform_diffuse(next_wo, hit.world_normal, hit.material, next_F_ab, rng);
+        if current_brdf_sample.pdf <= 0.0 {
+            break;
+        }
+        throughput *= current_brdf_sample.throughput;
+        ray_origin = hit.world_position;
+        ray_origin_normal = hit.world_normal;
+
+        // Russian roulette for early termination
+        let p = luminance(throughput);
+        if rand_f(rng) > p { break; }
+        throughput /= p;
     }
 
-    let sample_point = resolve_ray_hit_full(ray);
-
-    if any(sample_point.material.emissive != vec3(0.0)) {
-        return InitialReservoirResult(reservoir, 0.0); // TODO: Don't return empty reservoir. Instead, return a DI reservoir.
-    }
-
-    reservoir.sample_point_world_position = sample_point.world_position;
-    reservoir.sample_point_world_normal = octahedral_encode(sample_point.world_normal);
-    reservoir.confidence_weight = 1.0;
-
-#ifdef NO_WORLD_CACHE
-    let direct_lighting = sample_random_light(sample_point.world_position, sample_point.world_normal, rng);
-    reservoir.radiance = direct_lighting.radiance * saturate(dot(direct_lighting.wi, sample_point.world_normal));
-    reservoir.unbiased_contribution_weight = direct_lighting.inverse_pdf * uniform_hemisphere_inverse_pdf();
-#else
-    reservoir.radiance = query_world_cache(sample_point.world_position, sample_point.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
-    reservoir.unbiased_contribution_weight = uniform_hemisphere_inverse_pdf();
-#endif
-
-    let sample_point_diffuse_brdf = sample_point.material.base_color / PI;
-    reservoir.radiance *= sample_point_diffuse_brdf;
+    reservoir.radiance = accumulated_radiance;
+    reservoir.unbiased_contribution_weight = 1.0 / brdf_sample.pdf;
 
     let wi = normalize(reservoir.sample_point_world_position - world_position);
-    let target_function = luminance(reservoir.radiance * diffuse_brdf * saturate(dot(wi, world_normal)));
+    let target_function = luminance(reservoir.radiance * evaluate_brdf(wo, wi, world_normal, material, F_ab));
     return InitialReservoirResult(reservoir, target_function);
 }
 
-fn generate_initial_di_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> InitialReservoirResult {
+fn generate_initial_di_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> InitialReservoirResult {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -152,7 +186,7 @@ fn generate_initial_di_reservoir(world_position: vec3<f32>, world_normal: vec3<f
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
-        let target_function = luminance(light_contribution.radiance * diffuse_brdf * saturate(dot(light_contribution.wi, world_normal)));
+        let target_function = luminance(light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab));
         let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
 
         weight_sum += resampling_weight;
@@ -185,7 +219,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     var point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
 
     if bool(constants.reset) {
-        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
+        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
     }
 
     if any(temporal_pixel_id_float < vec2(0.0)) || any(temporal_pixel_id_float >= view.main_pass_viewport.zw) {
@@ -201,7 +235,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
         let triangle_id = temporal.reservoir.light_sample.light_id & 0xFFFFu;
         let light_id = previous_frame_light_id_translations[previous_light_id];
         if light_id == LIGHT_NOT_PRESENT_THIS_FRAME {
-            return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
+            return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
         }
         temporal.reservoir.light_sample.light_id = (light_id << 16u) | triangle_id;
     }
@@ -215,15 +249,14 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world
     // Check if the pixel features have changed heavily between the current and previous frame
     let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
     let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, temporal_pixel_id, 0), temporal_depth, temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
-    let temporal_diffuse_brdf = temporal_surface.material.base_color / PI;
     if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
-        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
+        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
     }
 
     let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.main_pass_viewport.z);
     let temporal_reservoir = reservoirs_a[temporal_pixel_index];
 
-    return NeighborInfo(temporal_reservoir, temporal_surface.world_position, temporal_surface.world_normal, temporal_diffuse_brdf);
+    return NeighborInfo(temporal_reservoir, temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material);
 }
 
 fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> NeighborInfo {
@@ -232,17 +265,16 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
 
         let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
         let spatial_surface = gpixel_resolve(textureLoad(gbuffer, spatial_pixel_id, 0), spatial_depth, spatial_pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
-        let spatial_diffuse_brdf = spatial_surface.material.base_color / PI;
         if pixel_dissimilar(depth, world_position, spatial_surface.world_position, world_normal, spatial_surface.world_normal, view) {
             continue;
         }
 
         let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
         let spatial_reservoir = reservoirs_b[spatial_pixel_index];
-        return NeighborInfo(spatial_reservoir, spatial_surface.world_position, spatial_surface.world_normal, spatial_diffuse_brdf);
+        return NeighborInfo(spatial_reservoir, spatial_surface.world_position, spatial_surface.world_normal, spatial_surface.material);
     }
 
-    return NeighborInfo(empty_reservoir(), world_position, world_normal, vec3(0.0));
+    return NeighborInfo(empty_reservoir(), world_position, world_normal, empty_material());
 }
 
 fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, search_radius: f32, rng: ptr<function, u32>) -> vec2<u32> {
@@ -255,7 +287,11 @@ struct NeighborInfo {
     reservoir: Reservoir,
     world_position: vec3<f32>,
     world_normal: vec3<f32>,
-    diffuse_brdf: vec3<f32>,
+    material: ResolvedMaterial,
+}
+
+fn empty_material() -> ResolvedMaterial {
+    return ResolvedMaterial(vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0);
 }
 
 fn jacobian(
@@ -330,11 +366,11 @@ fn merge_reservoirs(
     canonical_reservoir: Reservoir,
     canonical_world_position: vec3<f32>,
     canonical_world_normal: vec3<f32>,
-    canonical_diffuse_brdf: vec3<f32>,
+    canonical_material: ResolvedMaterial,
     other_reservoir: Reservoir,
     other_world_position: vec3<f32>,
     other_world_normal: vec3<f32>,
-    other_diffuse_brdf: vec3<f32>,
+    other_material: ResolvedMaterial,
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
     var canonical_resolved: ResolvedLightSample;
@@ -346,11 +382,18 @@ fn merge_reservoirs(
         other_resolved = resolve_light_sample(other_reservoir.light_sample, light_sources[other_reservoir.light_sample.light_id >> 16u]);
     }
 
+    let canonical_wo = normalize(view.world_position - canonical_world_position);
+    let canonical_NdotV = max(dot(canonical_world_normal, canonical_wo), 0.0001);
+    let canonical_F_ab = F_AB(canonical_material.perceptual_roughness, canonical_NdotV);
+    let other_wo = normalize(view.world_position - other_world_position);
+    let other_NdotV = max(dot(other_world_normal, other_wo), 0.0001);
+    let other_F_ab = F_AB(other_material.perceptual_roughness, other_NdotV);
+
     // Contributions for resampling and MIS
-    let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_diffuse_brdf);
-    let other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_world_position, canonical_world_normal, canonical_diffuse_brdf);
-    let canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_diffuse_brdf);
-    let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_world_position, other_world_normal, other_diffuse_brdf);
+    let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
+    let other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
+    let canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
+    let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
 
     // Jacobians for resampling and MIS. Light samples don't need a reprojection jacobian,
     // since resolve_and_calculate_light_contribution already accounts for the shading point's geometry.
@@ -427,14 +470,14 @@ struct ReservoirContribution {
     sample_world_position: vec4<f32>,
 }
 
-fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>) -> ReservoirContribution {
+fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> ReservoirContribution {
     if reservoir.light_sample.light_id != NULL_LIGHT_ID {
         let light_contribution = calculate_resolved_light_contribution(resolved, world_position, world_normal);
-        let target_function = luminance(light_contribution.radiance * diffuse_brdf * saturate(dot(light_contribution.wi, world_normal)));
+        let target_function = luminance(light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab));
         return ReservoirContribution(light_contribution.radiance, target_function, light_contribution.wi, resolved.world_position);
     } else if any(reservoir.radiance != vec3(0.0)) {
         let wi = normalize(reservoir.sample_point_world_position - world_position);
-        let target_function = luminance(reservoir.radiance * diffuse_brdf * saturate(dot(wi, world_normal)));
+        let target_function = luminance(reservoir.radiance * evaluate_brdf(wo, wi, world_normal, material, F_ab));
         return ReservoirContribution(reservoir.radiance, target_function, wi, vec4(reservoir.sample_point_world_position, 1.0));
     } else {
         return ReservoirContribution(vec3(0.0), 0.0, vec3(0.0), vec4(reservoir.sample_point_world_position, 1.0));

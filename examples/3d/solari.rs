@@ -598,14 +598,7 @@ fn update_performance_text(
         "World cache",
         "render/solari_lighting/world_cache/elapsed_gpu",
     );
-    (add_diagnostic)(
-        "Main lighting",
-        "render/solari_lighting/main_lighting/elapsed_gpu",
-    );
-    (add_diagnostic)(
-        "Specular indirect",
-        "render/solari_lighting/specular_indirect_lighting/elapsed_gpu",
-    );
+    (add_diagnostic)("Lighting", "render/solari_lighting/lighting/elapsed_gpu");
     (add_diagnostic)("DLSS-RR", "render/dlss_ray_reconstruction/elapsed_gpu");
     text.push_str(&format!("{:17}  {total:.2} ms\n", "Total"));
 

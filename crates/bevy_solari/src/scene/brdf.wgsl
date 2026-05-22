@@ -5,7 +5,7 @@ enable wgpu_ray_query;
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::lighting::{D_GGX, V_SmithGGXCorrelated, specular_multiscatter}
 #import bevy_pbr::pbr_functions::calculate_F0_dielectric
-#import bevy_pbr::utils::{rand_f, sample_cosine_hemisphere}
+#import bevy_pbr::utils::{rand_f, sample_cosine_hemisphere, sample_uniform_hemisphere}
 #import bevy_render::maths::{PI, orthonormalize}
 #import bevy_solari::sampling::{sample_ggx_vndf, ggx_vndf_pdf, ggx_vndf_sample_invalid}
 #import bevy_solari::scene_bindings::{ResolvedMaterial, MIRROR_ROUGHNESS_THRESHOLD, brdf_dfg_lut, brdf_dfg_lut_sampler}
@@ -14,6 +14,7 @@ struct EvaluateAndSampleBrdfResult {
     wi: vec3<f32>,
     throughput: vec3<f32>,
     pdf: f32,
+    diffuse_selected: bool,
 }
 
 struct LobeReflectances {
@@ -40,7 +41,7 @@ fn evaluate_and_sample_brdf(
     rng: ptr<function, u32>,
 ) -> EvaluateAndSampleBrdfResult {
     let NdotV = dot(world_normal, wo);
-    if NdotV < 0.0001 { return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0); }
+    if NdotV < 0.0001 { return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false); }
     let F0_metal = material.base_color;
     let F0_dielectric = calculate_F0_dielectric(vec3(material.reflectance));
     let rho = lobe_reflectances(F0_metal, F0_dielectric, material, F_ab);
@@ -63,7 +64,7 @@ fn evaluate_and_sample_brdf(
     } else {
         wi_tangent = sample_ggx_vndf(wo_tangent, material.roughness, rng);
         if ggx_vndf_sample_invalid(wi_tangent) {
-            return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0);
+            return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false);
         }
         wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
 
@@ -72,7 +73,8 @@ fn evaluate_and_sample_brdf(
             return EvaluateAndSampleBrdfResult(
                 wi,
                 evaluate_specular_brdf(wo, wi, world_normal, material, F_ab) / specular_weight,
-                bitcast<f32>(0x7F800000u) // INF
+                bitcast<f32>(0x7F800000u), // INF
+                false,
             );
         }
     }
@@ -81,7 +83,62 @@ fn evaluate_and_sample_brdf(
     let specular_pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, material.roughness);
     let pdf = (diffuse_weight * diffuse_pdf) + (specular_weight * specular_pdf);
     let throughput = evaluate_brdf(wo, wi, world_normal, material, F_ab) / pdf;
-    return EvaluateAndSampleBrdfResult(wi, throughput, pdf);
+    return EvaluateAndSampleBrdfResult(wi, throughput, pdf, diffuse_selected);
+}
+
+// Same as evaluate_and_sample_brdf, except the diffuse lobe is sampled uniformly over the hemisphere
+// instead of cosine-weighted, and mirror-specular samples report a finite pdf of 1.
+fn evaluate_and_sample_brdf_uniform_diffuse(
+    wo: vec3<f32>,
+    world_normal: vec3<f32>,
+    material: ResolvedMaterial,
+    F_ab: vec2<f32>,
+    rng: ptr<function, u32>,
+) -> EvaluateAndSampleBrdfResult {
+    let NdotV = dot(world_normal, wo);
+    if NdotV < 0.0001 { return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false); }
+    let F0_metal = material.base_color;
+    let F0_dielectric = calculate_F0_dielectric(vec3(material.reflectance));
+    let rho = lobe_reflectances(F0_metal, F0_dielectric, material, F_ab);
+    let specular_weight = luminance(rho.specular) / luminance(rho.specular + rho.diffuse);
+    let diffuse_weight = 1.0 - specular_weight;
+
+    let TBN = orthonormalize(world_normal);
+    let T = TBN[0];
+    let B = TBN[1];
+    let N = TBN[2];
+
+    let wo_tangent = vec3(dot(wo, T), dot(wo, B), dot(wo, N));
+
+    var wi: vec3<f32>;
+    var wi_tangent: vec3<f32>;
+    let diffuse_selected = rand_f(rng) < diffuse_weight;
+    if diffuse_selected {
+        wi = sample_uniform_hemisphere(world_normal, rng);
+        wi_tangent = vec3(dot(wi, T), dot(wi, B), dot(wi, N));
+    } else {
+        wi_tangent = sample_ggx_vndf(wo_tangent, material.roughness, rng);
+        if ggx_vndf_sample_invalid(wi_tangent) {
+            return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false);
+        }
+        wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
+
+        // Mirror specular is a delta function; report pdf = 1
+        if material.roughness <= MIRROR_ROUGHNESS_THRESHOLD {
+            return EvaluateAndSampleBrdfResult(
+                wi,
+                evaluate_specular_brdf(wo, wi, world_normal, material, F_ab) / specular_weight,
+                1.0,
+                false,
+            );
+        }
+    }
+
+    let diffuse_pdf = 1.0 / (2.0 * PI);
+    let specular_pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, material.roughness);
+    let pdf = (diffuse_weight * diffuse_pdf) + (specular_weight * specular_pdf);
+    let throughput = evaluate_brdf(wo, wi, world_normal, material, F_ab) / pdf;
+    return EvaluateAndSampleBrdfResult(wi, throughput, pdf, diffuse_selected);
 }
 
 fn evaluate_brdf(

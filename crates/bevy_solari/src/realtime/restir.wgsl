@@ -337,6 +337,10 @@ fn merge_initial_reservoirs(
     var merged = empty_reservoir();
     merged.confidence_weight = di.reservoir.confidence_weight + gi.reservoir.confidence_weight;
 
+    if weight_sum <= 0.0 {
+        return merged;
+    }
+
     if rand_f(rng) < gi_weight / weight_sum {
         merged.sample_point_world_position = gi.reservoir.sample_point_world_position;
         merged.sample_point_world_normal = gi.reservoir.sample_point_world_normal;

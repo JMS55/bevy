@@ -6,7 +6,7 @@ enable wgpu_ray_query;
 #import bevy_pbr::utils::{rand_f, rand_range_u, sample_uniform_hemisphere, uniform_hemisphere_inverse_pdf, sample_disk, octahedral_encode, octahedral_decode}
 #import bevy_render::maths::PI
 #import bevy_render::view::View
-#import bevy_solari::brdf::{evaluate_diffuse_brdf, evaluate_specular_brdf}
+#import bevy_solari::brdf::{evaluate_diffuse_brdf, evaluate_specular_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, pixel_dissimilar, permute_pixel}
 #import bevy_solari::sampling::{sample_random_light, trace_light_visibility, balance_heuristic, calculate_resolved_light_contribution, resolve_light_sample, LightSample, ResolvedLightSample, NULL_LIGHT_ID, isnan}
 #import bevy_solari::scene_bindings::{light_sources, previous_frame_light_id_translations, LIGHT_NOT_PRESENT_THIS_FRAME, trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX}
@@ -79,10 +79,12 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     combined_reservoir.unbiased_contribution_weight *= trace_light_visibility(surface.world_position + (surface.world_normal * RAY_T_MIN), merge_result.selected_sample_world_position);
 
     let wo = normalize(view.world_position - surface.world_position);
-    var brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
+    let NdotV = max(dot(surface.world_normal, wo), 0.0001);
+    let F_ab = F_AB(surface.material.perceptual_roughness, NdotV);
+    var brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material, F_ab);
     // Only consider the specular lobe for DI if the surface is not smooth, else leave it for the specular GI pass to handle
     if combined_reservoir.light_sample.light_id != NULL_LIGHT_ID && surface.material.roughness > SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
-        brdf += evaluate_specular_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
+        brdf += evaluate_specular_brdf(wo, merge_result.wi, surface.world_normal, surface.material, F_ab);
     }
 
     var pixel_color = merge_result.selected_sample_radiance * combined_reservoir.unbiased_contribution_weight;

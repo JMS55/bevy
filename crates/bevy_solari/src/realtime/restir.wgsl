@@ -123,7 +123,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var wi_to_x2 = vec3(0.0);
     var primary_brdf_at_x2 = vec3(0.0);
 
-    for (var bounce = 0u; bounce < 3u; bounce++) {
+    for (var bounce = 0u; bounce < GI_MAX_BOUNCES; bounce++) {
         let NdotV = max(dot(n, v), 0.0001);
         let F_ab = F_AB(m.perceptual_roughness, NdotV);
 
@@ -146,11 +146,15 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             var di_selected_light_sample = LightSample(NULL_LIGHT_ID, 0u);
             var di_selected_world_position = vec4(0.0);
             var di_selected_wi = vec3(0.0);
+            // Only used by the bounce >= 1 path (where they're folded into L_at_rc).
+            // At bounce 0 we only need the LightSample identity since the merge re-
+            // resolves the light fresh each frame.
             var di_selected_radiance = vec3(0.0);
             var di_selected_brdf_current = vec3(0.0);
             var di_selected_inverse_solid_angle_pdf = 0.0;
             var di_selected_brdf_rays_can_hit = false;
             let internal_mis = 1.0 / f32(INITIAL_DI_SAMPLES);
+            let need_gi_fields = bounce > 0u;
             for (var i = 0u; i < INITIAL_DI_SAMPLES; i++) {
                 let tile_sample = light_tile_start + rand_range_u(1024u, rng);
                 let resolved = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
@@ -164,10 +168,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                     di_selected_light_sample = light_tile_samples[tile_sample];
                     di_selected_world_position = resolved.world_position;
                     di_selected_wi = lc.wi;
-                    di_selected_radiance = lc.radiance;
-                    di_selected_brdf_current = brdf_current;
                     di_selected_inverse_solid_angle_pdf = lc.inverse_solid_angle_pdf;
                     di_selected_brdf_rays_can_hit = lc.brdf_rays_can_hit;
+                    if need_gi_fields {
+                        di_selected_radiance = lc.radiance;
+                        di_selected_brdf_current = brdf_current;
+                    }
                 }
             }
 
@@ -455,9 +461,6 @@ struct ReservoirMergeResult {
     // inside `reservoir_contribution`; visibility folded in for the "other" branch).
     // Shade time just multiplies by `unbiased_contribution_weight`.
     selected_sample_brdf_radiance: vec3<f32>,
-    wi: vec3<f32>,
-    // Resolved sample world position (vec4 with w=1 for surface points/area lights, w=0 for directional).
-    selected_sample_world_position: vec4<f32>,
 }
 
 fn merge_reservoirs(
@@ -538,7 +541,7 @@ fn merge_reservoirs(
 
     // Don't merge samples with huge jacobians, as it explodes the variance
     if other_sample_at_canonical_jacobian > 8.0 || canonical_sample_at_other_jacobian > 8.0 {
-        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance, canonical_sample_at_canonical.wi, canonical_sample_at_canonical.sample_world_position);
+        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
     }
 
     // Resampling weight for canonical sample
@@ -569,7 +572,7 @@ fn merge_reservoirs(
         let inverse_target_function = select(0.0, 1.0 / other_sample_at_canonical.target_function, other_sample_at_canonical.target_function > 0.0);
         combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
-        return ReservoirMergeResult(combined_reservoir, other_sample_at_canonical.brdf_radiance, other_sample_at_canonical.wi, other_sample_at_canonical.sample_world_position);
+        return ReservoirMergeResult(combined_reservoir, other_sample_at_canonical.brdf_radiance);
     } else {
         combined_reservoir.sample_point_world_position = canonical_reservoir.sample_point_world_position;
         combined_reservoir.sample_point_world_normal = canonical_reservoir.sample_point_world_normal;
@@ -579,7 +582,7 @@ fn merge_reservoirs(
         let inverse_target_function = select(0.0, 1.0 / canonical_sample_at_canonical.target_function, canonical_sample_at_canonical.target_function > 0.0);
         combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
-        return ReservoirMergeResult(combined_reservoir, canonical_sample_at_canonical.brdf_radiance, canonical_sample_at_canonical.wi, canonical_sample_at_canonical.sample_world_position);
+        return ReservoirMergeResult(combined_reservoir, canonical_sample_at_canonical.brdf_radiance);
     }
 }
 
@@ -588,7 +591,6 @@ struct ReservoirContribution {
     // target_function = luminance(brdf_radiance).
     brdf_radiance: vec3<f32>,
     target_function: f32,
-    wi: vec3<f32>,
     sample_world_position: vec4<f32>,
 }
 
@@ -596,12 +598,12 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
     if reservoir.light_sample.light_id != NULL_LIGHT_ID {
         let light_contribution = calculate_resolved_light_contribution(resolved, world_position, world_normal);
         let brdf_radiance = light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab);
-        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), light_contribution.wi, resolved.world_position);
+        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), resolved.world_position);
     } else if any(reservoir.radiance != vec3(0.0)) {
         let wi = normalize(reservoir.sample_point_world_position - world_position);
         let brdf_radiance = reservoir.radiance * evaluate_brdf(wo, wi, world_normal, material, F_ab);
-        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), wi, vec4(reservoir.sample_point_world_position, 1.0));
+        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), vec4(reservoir.sample_point_world_position, 1.0));
     } else {
-        return ReservoirContribution(vec3(0.0), 0.0, vec3(0.0), vec4(reservoir.sample_point_world_position, 1.0));
+        return ReservoirContribution(vec3(0.0), 0.0, vec4(reservoir.sample_point_world_position, 1.0));
     }
 }

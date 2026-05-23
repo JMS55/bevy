@@ -140,55 +140,92 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // do the work. Pure dielectrics always run NEE.
         let p_nee = mix(1.0, m.perceptual_roughness, m.metallic);
         if rand_f(rng) < p_nee {
-            let nee_sample = generate_random_light_sample(rng);
-            var nee = calculate_resolved_light_contribution(nee_sample.resolved_light_sample, ray_origin, n);
-            nee.radiance *= trace_light_visibility(ray_origin, nee_sample.resolved_light_sample.world_position);
-            // Compensate for the stochastic skip: dividing the source-pdf-inverses by
-            // p_nee folds the (1/p_nee) scaling into every downstream contribution
-            // and into the NEE leg of the MIS pdf below.
-            nee.inverse_pdf /= p_nee;
-            nee.inverse_solid_angle_pdf /= p_nee;
+            // INITIAL_DI_SAMPLES of streaming RIS over a workgroup-shared light tile,
+            // followed by a single visibility trace for the winning sample (matches the
+            // pre-unified restir_di.wgsl structure). Used at every bounce; the per-bounce
+            // workgroup_rng init ensures different bounces select different tiles.
+            var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y + bounce;
+            let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
-            var nee_mis_weight = 1.0;
-            if nee.brdf_rays_can_hit {
-                let p_nee_strategy = 1.0 / nee.inverse_solid_angle_pdf;
-                let p_brdf_at_nee = brdf_pdf(v, nee.wi, n, m, F_ab);
-                nee_mis_weight = power_heuristic(p_nee_strategy, p_brdf_at_nee);
+            var di_weight_sum = 0.0;
+            var di_selected_target = 0.0;
+            var di_selected_light_sample = LightSample(NULL_LIGHT_ID, 0u);
+            var di_selected_world_position = vec4(0.0);
+            var di_selected_wi = vec3(0.0);
+            var di_selected_radiance = vec3(0.0);
+            var di_selected_brdf_current = vec3(0.0);
+            var di_selected_inverse_solid_angle_pdf = 0.0;
+            var di_selected_brdf_rays_can_hit = false;
+            let internal_mis = 1.0 / f32(INITIAL_DI_SAMPLES);
+            for (var i = 0u; i < INITIAL_DI_SAMPLES; i++) {
+                let tile_sample = light_tile_start + rand_range_u(1024u, rng);
+                let resolved = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+                let lc = calculate_resolved_light_contribution(resolved, ray_origin, n);
+                let brdf_current = evaluate_brdf(v, lc.wi, n, m, F_ab);
+                let target_function = luminance(brdf_current * lc.radiance);
+                let w = internal_mis * target_function * lc.inverse_pdf;
+                di_weight_sum += w;
+                if di_weight_sum > 0.0 && rand_f(rng) * di_weight_sum < w {
+                    di_selected_target = target_function;
+                    di_selected_light_sample = light_tile_samples[tile_sample];
+                    di_selected_world_position = resolved.world_position;
+                    di_selected_wi = lc.wi;
+                    di_selected_radiance = lc.radiance;
+                    di_selected_brdf_current = brdf_current;
+                    di_selected_inverse_solid_angle_pdf = lc.inverse_solid_angle_pdf;
+                    di_selected_brdf_rays_can_hit = lc.brdf_rays_can_hit;
+                }
             }
 
-            // Build the candidate. Bounce 0 NEE is a length-1 path whose reconnection vertex
-            // is the chosen light — store the LightSample so the light can be re-resolved
-            // (and directional lights handled correctly) at shade time. Longer paths use
-            // x_rc = x2 with the radiance baked into L_at_rc.
-            //
-            // The target uses the vis-aware radiance so occluded candidates get w_i = 0 and
-            // are never selected. Mathematically identical to the unshadowed convention
-            // since any surviving sample necessarily has vis = 1 — just less plumbing.
-            var nee_target: f32;
-            if bounce == 0u {
-                let primary_brdf_at_nee = evaluate_brdf(wo, nee.wi, world_normal, material, primary_F_ab);
-                nee_target = luminance(primary_brdf_at_nee * nee.radiance);
-                let nee_w = nee_target * nee.inverse_pdf * nee_mis_weight;
-                w_sum += nee_w;
-                reservoir.confidence_weight += 1.0;
-                if w_sum > 0.0 && rand_f(rng) * w_sum < nee_w {
-                    reservoir.light_sample = nee_sample.light_sample;
-                    // sample_point / radiance fields are unused when light_sample is set —
-                    // reservoir_contribution re-resolves the light freshly each time.
-                    selected_target_function = nee_target;
+            if di_selected_target > 0.0 {
+                // Single visibility trace for the surviving DI sample.
+                let vis = trace_light_visibility(ray_origin, di_selected_world_position);
+
+                // MIS against the BRDF strategy. With RIS over N candidates the effective
+                // NEE pdf at the winner is roughly N * light_pdf(winner). Scale by p_nee
+                // for the stochastic-NEE gate.
+                var nee_mis_weight = 1.0;
+                if di_selected_brdf_rays_can_hit && di_selected_inverse_solid_angle_pdf > 0.0 {
+                    let p_nee_strategy = f32(INITIAL_DI_SAMPLES) * (1.0 / di_selected_inverse_solid_angle_pdf) * p_nee;
+                    let p_brdf_at_nee = brdf_pdf(v, di_selected_wi, n, m, F_ab);
+                    nee_mis_weight = power_heuristic(p_nee_strategy, p_brdf_at_nee);
                 }
-            } else {
-                let nee_brdf_current = evaluate_brdf(v, nee.wi, n, m, F_ab);
-                let L_at_rc = throughput_past_x1 * nee_brdf_current * nee.radiance * nee.inverse_pdf * nee_mis_weight;
-                nee_target = luminance(primary_brdf_at_x2 * L_at_rc);
-                w_sum += nee_target;
-                reservoir.confidence_weight += 1.0;
-                if w_sum > 0.0 && rand_f(rng) * w_sum < nee_target {
-                    reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
-                    reservoir.sample_point_world_position = x2_position;
-                    reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
-                    reservoir.radiance = L_at_rc;
-                    selected_target_function = nee_target;
+
+                // The sub-reservoir's effective inverse-pdf is di_weight_sum / di_target;
+                // this acts as the single-sample inverse_pdf would. Includes the stochastic
+                // NEE compensation (1/p_nee).
+                let di_W = di_weight_sum / di_selected_target;
+
+                if bounce == 0u {
+                    // Bounce 0: store the LightSample identity so reservoir_contribution
+                    // can re-resolve the light each frame (moving lights, directional
+                    // soft-shadow re-sampling). Main-reservoir w_i = di_weight_sum * vis
+                    // * mis / p_nee, with the same di_selected_target as denominator.
+                    let nee_w = di_weight_sum * vis * nee_mis_weight / p_nee;
+                    w_sum += nee_w;
+                    reservoir.confidence_weight += 1.0;
+                    if w_sum > 0.0 && rand_f(rng) * w_sum < nee_w {
+                        reservoir.light_sample = di_selected_light_sample;
+                        // sample_point / radiance fields are unused when light_sample is
+                        // set — reservoir_contribution re-resolves the light freshly each
+                        // time.
+                        selected_target_function = di_selected_target;
+                    }
+                } else {
+                    // Bounce >= 1: bake the path through this vertex into L_at_rc and
+                    // store as a GI candidate. di_W replaces the single-sample inverse_pdf;
+                    // brdf_current is the BRDF at this vertex toward the chosen light.
+                    let L_at_rc = throughput_past_x1 * di_selected_brdf_current * di_selected_radiance * vis * di_W * nee_mis_weight / p_nee;
+                    let nee_target = luminance(primary_brdf_at_x2 * L_at_rc);
+                    w_sum += nee_target;
+                    reservoir.confidence_weight += 1.0;
+                    if w_sum > 0.0 && rand_f(rng) * w_sum < nee_target {
+                        reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
+                        reservoir.sample_point_world_position = x2_position;
+                        reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
+                        reservoir.radiance = L_at_rc;
+                        selected_target_function = nee_target;
+                    }
                 }
             }
         }
@@ -234,10 +271,11 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             let light_count = arrayLength(&light_sources);
             let area_pdf = 1.0 / (f32(light_count) * f32(ray_hit.triangle_count) * ray_hit.triangle_area);
             let p_light = area_pdf * ray.t * ray.t / NdotV_hit;
-            // Stochastic NEE: NEE only fires at this vertex with probability p_nee,
-            // so the effective competing NEE strategy pdf for this specific light is
-            // p_light * p_nee (zero for pure mirror metals, full for dielectrics).
-            let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee);
+            // Stochastic multi-sample NEE: the effective competing NEE strategy pdf
+            // for this specific light is p_light * p_nee * INITIAL_DI_SAMPLES
+            // (drawing N RIS candidates concentrates the marginal around any specific
+            // direction by ~N; gated by the p_nee stochastic skip).
+            let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(INITIAL_DI_SAMPLES));
 
             let emissive_L_at_rc = throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
             let emissive_target = luminance(primary_brdf_at_x2 * emissive_L_at_rc);

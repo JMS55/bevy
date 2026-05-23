@@ -462,7 +462,7 @@ fn merge_reservoirs(
     }
 
     // Don't merge samples with huge jacobians, as it explodes the variance
-    if other_sample_at_canonical_jacobian > 3.0 || canonical_sample_at_other_jacobian > 3.0 {
+    if other_sample_at_canonical_jacobian > 8.0 || canonical_sample_at_other_jacobian > 8.0 {
         return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.radiance, canonical_sample_at_canonical.wi, canonical_sample_at_canonical.sample_world_position);
     }
 

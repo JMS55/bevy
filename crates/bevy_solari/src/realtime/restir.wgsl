@@ -36,7 +36,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material,
-        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, &rng);
+        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, false, &rng);
 
     reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
@@ -59,12 +59,14 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let input_reservoir = reservoirs_b[pixel_index];
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
-        spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, &rng);
+        spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, true, &rng);
     var combined_reservoir = merge_result.merged_reservoir;
 
     reservoirs_a[pixel_index] = combined_reservoir;
 
-    combined_reservoir.unbiased_contribution_weight *= trace_light_visibility(surface.world_position + (surface.world_normal * RAY_T_MIN), merge_result.selected_sample_world_position);
+    // Visibility is now folded into the merge's resampling weights (one ray per merge,
+    // tracing the "other sample at canonical" pair), so the deferred check is redundant.
+    // combined_reservoir.unbiased_contribution_weight *= trace_light_visibility(surface.world_position + (surface.world_normal * RAY_T_MIN), merge_result.selected_sample_world_position);
 
     let wo = normalize(view.world_position - surface.world_position);
     let NdotV = max(dot(surface.world_normal, wo), 0.0001);
@@ -128,7 +130,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // === NEE candidate at the current vertex ===
         let nee_sample = generate_random_light_sample(rng);
         var nee = calculate_resolved_light_contribution(nee_sample.resolved_light_sample, ray_origin, n);
-        let nee_unshadowed_radiance = nee.radiance;
         nee.radiance *= trace_light_visibility(ray_origin, nee_sample.resolved_light_sample.world_position);
 
         var nee_mis_weight = 1.0;
@@ -143,17 +144,14 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // (and directional lights handled correctly) at shade time. Longer paths use
         // x_rc = x2 with the radiance baked into L_at_rc.
         //
-        // For bounce 0 NEE the RIS weight uses the vis-aware target (occluded candidates
-        // get w_i = 0 and are never selected), but selected_target_function uses the
-        // *unshadowed* target so it matches reservoir_contribution's light branch (which
-        // returns the freshly-resolved unshadowed contribution). Visibility for the
-        // surviving sample is applied by the deferred trace in spatial_and_shade.
+        // The target uses the vis-aware radiance so occluded candidates get w_i = 0 and
+        // are never selected. Mathematically identical to the unshadowed convention
+        // since any surviving sample necessarily has vis = 1 — just less plumbing.
         var nee_target: f32;
         if bounce == 0u {
             let primary_brdf_at_nee = evaluate_brdf(wo, nee.wi, world_normal, material, primary_F_ab);
-            nee_target = luminance(primary_brdf_at_nee * nee_unshadowed_radiance);
-            let nee_target_with_vis = luminance(primary_brdf_at_nee * nee.radiance);
-            let nee_w = nee_target_with_vis * nee.inverse_pdf * nee_mis_weight;
+            nee_target = luminance(primary_brdf_at_nee * nee.radiance);
+            let nee_w = nee_target * nee.inverse_pdf * nee_mis_weight;
             w_sum += nee_w;
             reservoir.confidence_weight += 1.0;
             if w_sum > 0.0 && rand_f(rng) * w_sum < nee_w {
@@ -416,6 +414,12 @@ fn merge_reservoirs(
     other_world_position: vec3<f32>,
     other_world_normal: vec3<f32>,
     other_material: ResolvedMaterial,
+    // True for spatial merge (neighbor pixel — no baked visibility we can trust at our
+    // shading point, must trace fresh). False for temporal merge (same pixel's history —
+    // visibility is already baked into the stored radiance for GI samples; only trace
+    // when the temporal reservoir is a bounce-0 NEE light_sample, since those are
+    // re-resolved fresh each frame and carry no baked visibility).
+    is_spatial: bool,
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
     var canonical_resolved: ResolvedLightSample;
@@ -436,9 +440,25 @@ fn merge_reservoirs(
 
     // Contributions for resampling and MIS
     let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
-    let other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
+    var other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
     let canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
     let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
+
+    // Shadow the resampling weight for the "other sample at canonical" pair — that's
+    // the one that decides whether other's sample is allowed to win the merge.
+    //
+    // Skip the trace for temporal merges of GI-style reservoirs: their stored radiance
+    // already has the visibility baked in from when this same trace ran in a previous
+    // frame's merge, so re-tracing is redundant (and would double-multiply visibility).
+    // Bounce-0 NEE (light_sample) reservoirs are re-resolved fresh each frame and carry
+    // no baked visibility, so they still need the trace.
+    let other_is_light_sample = other_reservoir.light_sample.light_id != NULL_LIGHT_ID;
+    let need_visibility_trace = is_spatial || other_is_light_sample;
+    if need_visibility_trace && other_sample_at_canonical.target_function > 0.0 {
+        let vis = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
+        other_sample_at_canonical.target_function *= vis;
+        other_sample_at_canonical.radiance *= vis;
+    }
 
     // Jacobians for resampling and MIS. Light samples don't need a reprojection jacobian,
     // since resolve_and_calculate_light_contribution already accounts for the shading point's geometry.

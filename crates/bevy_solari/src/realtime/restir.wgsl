@@ -122,6 +122,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var x2_position = vec3(0.0);
     var x2_normal = vec3(0.0);
     var x2_set = false;
+    // Computed once when x2 is captured; reused by every bounce >= 1 candidate plus the
+    // bounce-0 emissive/cache candidates (all of which apply the primary BRDF at the
+    // x1 -> x2 direction). Also reused as `primary_brdf_at_next` in the bounce-0
+    // throughput step (where next_bounce.wi IS the x1 -> x2 direction).
+    var wi_to_x2 = vec3(0.0);
+    var primary_brdf_at_x2 = vec3(0.0);
 
     for (var bounce = 0u; bounce < 3u; bounce++) {
         let NdotV = max(dot(n, v), 0.0001);
@@ -163,8 +169,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         } else {
             let nee_brdf_current = evaluate_brdf(v, nee.wi, n, m, F_ab);
             let L_at_rc = throughput_past_x1 * nee_brdf_current * nee.radiance * nee.inverse_pdf * nee_mis_weight;
-            let wi_to_x2 = normalize(x2_position - world_position);
-            let primary_brdf_at_x2 = evaluate_brdf(wo, wi_to_x2, world_normal, material, primary_F_ab);
             nee_target = luminance(primary_brdf_at_x2 * L_at_rc);
             w_sum += nee_target;
             reservoir.confidence_weight += 1.0;
@@ -186,25 +190,29 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let ray_hit = resolve_ray_hit_full(ray);
         let p_brdf = next_bounce.pdf;
 
-        // Capture x2 on the first BRDF jump.
+        // Capture x2 on the first BRDF jump, and compute the primary BRDF at x2 once —
+        // it's reused by every downstream candidate (emissive, cache, every bounce >= 1
+        // NEE) since x2 never changes after this.
         if !x2_set {
             x2_position = ray_hit.world_position;
             x2_normal = ray_hit.world_normal;
+            wi_to_x2 = normalize(x2_position - world_position);
+            primary_brdf_at_x2 = evaluate_brdf(wo, wi_to_x2, world_normal, material, primary_F_ab);
             x2_set = true;
         }
 
         // At bounce 0 the primary brdf*cos is applied externally at shade time, so
         // throughput_past_x1 must exclude it. Dividing next_bounce.throughput by the
-        // BRDF value at the sampled direction extracts the remaining factor:
-        //  - non-mirror GGX/diffuse: throughput = brdf*cos/pdf, brdf_at_wi = brdf*cos
-        //    -> result = 1/pdf
-        //  - mirror specular: throughput = brdf_reflectance/specular_weight, brdf_at_wi
-        //    = brdf_reflectance (delta), pdf = INF
-        //    -> result = 1/specular_weight (avoids the 1/INF = 0 trap that would kill
-        //       indirect light on mirror-like metals)
+        // BRDF at the sampled direction (= primary_brdf_at_x2 at bounce 0, since that
+        // IS the x1 -> x2 direction) extracts the remaining factor:
+        //  - non-mirror GGX/diffuse: throughput = brdf*cos/pdf -> result = 1/pdf
+        //  - mirror specular: throughput = brdf_reflectance/specular_weight, pdf = INF
+        //    -> result = 1/specular_weight (avoids 1/INF = 0 which would kill mirror GI)
         // At later bounces include the full brdf*cos/pdf — these are post-x2 and belong in L_at_rc.
-        let primary_brdf_at_next = evaluate_brdf(v, next_bounce.wi, n, m, F_ab);
-        let throughput_step = select(next_bounce.throughput, next_bounce.throughput / max(primary_brdf_at_next, vec3(0.0001)), bounce == 0u);
+        var throughput_step = next_bounce.throughput;
+        if bounce == 0u {
+            throughput_step = next_bounce.throughput / max(primary_brdf_at_x2, vec3(0.0001));
+        }
         throughput_past_x1 *= throughput_step;
         full_throughput *= next_bounce.throughput;
 
@@ -217,8 +225,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             let emissive_mis_weight = power_heuristic(p_brdf, p_light);
 
             let emissive_L_at_rc = throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
-            let wi_to_x2 = normalize(x2_position - world_position);
-            let primary_brdf_at_x2 = evaluate_brdf(wo, wi_to_x2, world_normal, material, primary_F_ab);
             let emissive_target = luminance(primary_brdf_at_x2 * emissive_L_at_rc);
             w_sum += emissive_target;
             reservoir.confidence_weight += 1.0;
@@ -236,33 +242,32 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // it's a good approximation when the bounce was diffuse (radiance is roughly
         // isotropic) or when we're out of bounce budget and need *something* to close
         // the path.
-        //
-        // Only terminate into the cache when the BRDF ray was long enough to clear the
-        // cache cell (cell diagonal = sqrt(3) * cell_size). Short rays land in a cell
-        // that may straddle nearby occluding geometry and leak light through corners.
-        var rng_copy = *rng;
-        let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, ray.t, &rng_copy);
-        let ray_longer_than_cell = ray.t > sqrt(3.0) * world_cache_cell_size;
-        if (next_bounce.diffuse_selected || bounce == GI_MAX_BOUNCES - 1u) && ray_longer_than_cell {
-            let cached_radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
-            // The cache stores irradiance; apply the Lambertian diffuse BRDF
-            // (base_color / PI) at ray_hit to get outgoing radiance toward the previous
-            // vertex (matches the convention from the old restir_gi.wgsl).
-            let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
-            let cache_L_at_rc = throughput_past_x1 * cache_outgoing;
-            let wi_to_x2 = normalize(x2_position - world_position);
-            let primary_brdf_at_x2 = evaluate_brdf(wo, wi_to_x2, world_normal, material, primary_F_ab);
-            let cache_target = luminance(primary_brdf_at_x2 * cache_L_at_rc);
-            w_sum += cache_target;
-            reservoir.confidence_weight += 1.0;
-            if w_sum > 0.0 && rand_f(rng) * w_sum < cache_target {
-                reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
-                reservoir.sample_point_world_position = x2_position;
-                reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
-                reservoir.radiance = cache_L_at_rc;
-                selected_target_function = cache_target;
+        if next_bounce.diffuse_selected || bounce == GI_MAX_BOUNCES - 1u {
+            // Only terminate into the cache when the BRDF ray was long enough to clear
+            // the cache cell (cell diagonal = sqrt(3) * cell_size). Short rays land in a
+            // cell that may straddle nearby occluding geometry and leak light through
+            // corners.
+            var rng_copy = *rng;
+            let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, ray.t, &rng_copy);
+            if ray.t > sqrt(3.0) * world_cache_cell_size {
+                let cached_radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+                // The cache stores irradiance; apply the Lambertian diffuse BRDF
+                // (base_color / PI) at ray_hit to get outgoing radiance toward the
+                // previous vertex (matches the old restir_gi.wgsl convention).
+                let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
+                let cache_L_at_rc = throughput_past_x1 * cache_outgoing;
+                let cache_target = luminance(primary_brdf_at_x2 * cache_L_at_rc);
+                w_sum += cache_target;
+                reservoir.confidence_weight += 1.0;
+                if w_sum > 0.0 && rand_f(rng) * w_sum < cache_target {
+                    reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
+                    reservoir.sample_point_world_position = x2_position;
+                    reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
+                    reservoir.radiance = cache_L_at_rc;
+                    selected_target_function = cache_target;
+                }
+                break;
             }
-            break;
         }
 
         // === Update state for next iteration ===

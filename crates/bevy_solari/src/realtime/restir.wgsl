@@ -87,6 +87,10 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // }
     // textureStore(accumulation_texture, global_id.xy, vec4(pixel_color, sample_count + 1.0));
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+
+#ifdef VISUALIZE_WORLD_CACHE
+    textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, RAY_T_MAX, WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
+#endif
 }
 
 // Unified-reservoir ReSTIR PT: every candidate is a complete path described by a

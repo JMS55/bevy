@@ -59,7 +59,18 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
     let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
 
     for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
-        let existing_checksum = atomicCompareExchangeWeak(&world_cache_checksums[key], WORLD_CACHE_EMPTY_CELL, checksum).old_value;
+        let cas = atomicCompareExchangeWeak(&world_cache_checksums[key], WORLD_CACHE_EMPTY_CELL, checksum);
+        let existing_checksum = cas.old_value;
+
+        // atomicCompareExchangeWeak may spuriously fail (returning the expected
+        // old_value but exchanged=false). If we don't catch it we'd run the "cell is empty" init
+        // path below without actually claiming the slot, racing with the thread that
+        // really did claim it and corrupting world_cache_geometry_data. Treat any
+        // spurious failure on an empty slot as a collision and probe forward.
+        if existing_checksum == WORLD_CACHE_EMPTY_CELL && !cas.exchanged {
+            key += 1u;
+            continue;
+        }
 
         // Cell already exists or is empty - reset lifetime
         if existing_checksum == checksum || existing_checksum == WORLD_CACHE_EMPTY_CELL {

@@ -93,6 +93,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // The primary BRDF*cos is *not* baked into L_at_rc; it is applied externally.
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
     var reservoir = empty_reservoir();
+    reservoir.confidence_weight = 1.0;
     var w_sum = 0.0;
     var selected_target_function = 0.0;
 
@@ -203,7 +204,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                     // * mis / p_nee, with the same di_selected_target as denominator.
                     let nee_w = di_weight_sum * vis * nee_mis_weight / p_nee;
                     w_sum += nee_w;
-                    reservoir.confidence_weight += 1.0;
                     if w_sum > 0.0 && rand_f(rng) * w_sum < nee_w {
                         reservoir.light_sample = di_selected_light_sample;
                         // sample_point / radiance fields are unused when light_sample is
@@ -218,7 +218,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                     let L_at_rc = throughput_past_x1 * di_selected_brdf_current * di_selected_radiance * vis * di_W * nee_mis_weight / p_nee;
                     let nee_target = luminance(primary_brdf_at_x2 * L_at_rc);
                     w_sum += nee_target;
-                    reservoir.confidence_weight += 1.0;
                     if w_sum > 0.0 && rand_f(rng) * w_sum < nee_target {
                         reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
                         reservoir.sample_point_world_position = x2_position;
@@ -280,7 +279,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             let emissive_L_at_rc = throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
             let emissive_target = luminance(primary_brdf_at_x2 * emissive_L_at_rc);
             w_sum += emissive_target;
-            reservoir.confidence_weight += 1.0;
             if w_sum > 0.0 && rand_f(rng) * w_sum < emissive_target {
                 reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
                 reservoir.sample_point_world_position = x2_position;
@@ -311,7 +309,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                 let cache_L_at_rc = throughput_past_x1 * cache_outgoing;
                 let cache_target = luminance(primary_brdf_at_x2 * cache_L_at_rc);
                 w_sum += cache_target;
-                reservoir.confidence_weight += 1.0;
                 if w_sum > 0.0 && rand_f(rng) * w_sum < cache_target {
                     reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
                     reservoir.sample_point_world_position = x2_position;

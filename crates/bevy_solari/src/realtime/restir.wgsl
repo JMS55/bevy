@@ -16,6 +16,11 @@ const INITIAL_DI_SAMPLES = 8u;
 const GI_MAX_BOUNCES = 3u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
+// Below this value of mix(1, roughness, metallic) the specular lobe dominates
+// and temporal/spatial neighbors rarely share the lobe direction — resampling
+// from them adds variance without quality gain. Pure dielectrics always equal
+// 1.0 here regardless of roughness, so they are never skipped.
+const SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD = 0.3;
 
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -33,6 +38,11 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
 
     let wo = normalize(view.world_position - surface.world_position);
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, &rng);
+
+    if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
+        reservoirs_b[pixel_index] = initial_reservoir;
+        return;
+    }
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material,
@@ -55,16 +65,31 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
-
     let input_reservoir = reservoirs_b[pixel_index];
-    let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
-        spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, true, &rng);
-    var combined_reservoir = merge_result.merged_reservoir;
+    let wo = normalize(view.world_position - surface.world_position);
+    let NdotV = max(dot(surface.world_normal, wo), 0.0001);
+    let F_ab = F_AB(surface.material.perceptual_roughness, NdotV);
+
+    var combined_reservoir: Reservoir;
+    var shade_brdf_radiance: vec3<f32>;
+    if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
+        combined_reservoir = input_reservoir;
+        var resolved: ResolvedLightSample;
+        if input_reservoir.light_sample.light_id != NULL_LIGHT_ID {
+            resolved = resolve_light_sample(input_reservoir.light_sample, light_sources[input_reservoir.light_sample.light_id >> 16u]);
+        }
+        shade_brdf_radiance = reservoir_contribution(input_reservoir, resolved, surface.world_position, surface.world_normal, wo, surface.material, F_ab).brdf_radiance;
+    } else {
+        let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+        let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
+            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, true, &rng);
+        combined_reservoir = merge_result.merged_reservoir;
+        shade_brdf_radiance = merge_result.selected_sample_brdf_radiance;
+    }
 
     reservoirs_a[pixel_index] = combined_reservoir;
 
-    var pixel_color = merge_result.selected_sample_brdf_radiance * combined_reservoir.unbiased_contribution_weight;
+    var pixel_color = shade_brdf_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color += surface.material.emissive;
     pixel_color *= view.exposure;
 

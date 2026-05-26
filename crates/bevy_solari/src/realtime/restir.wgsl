@@ -119,9 +119,8 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var x2_set = false;
     // Computed once when x2 is captured; reused by every bounce >= 1 candidate plus the
     // bounce-0 emissive/cache candidates (all of which apply the primary BRDF at the
-    // x1 -> x2 direction). Also reused as `primary_brdf_at_next` in the bounce-0
-    // throughput step (where next_bounce.wi IS the x1 -> x2 direction).
-    var wi_to_x2 = vec3(0.0);
+    // x1 -> x2 direction). Also reused in the bounce-0 throughput step (where the
+    // sampled wi IS the x1 -> x2 direction).
     var primary_brdf_at_x2 = vec3(0.0);
 
     for (var bounce = 0u; bounce < GI_MAX_BOUNCES; bounce++) {
@@ -244,8 +243,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         if !x2_set {
             x2_position = ray_hit.world_position;
             x2_normal = ray_hit.world_normal;
-            wi_to_x2 = normalize(x2_position - world_position);
-            primary_brdf_at_x2 = evaluate_brdf(wo, wi_to_x2, world_normal, material, primary_F_ab);
+            // Evaluate at the sampled direction, not at normalize(x2 - x1). The
+            // position-reconstructed direction has tiny floating-point error from the
+            // ray origin offset (RAY_T_MIN along n) and hit-position rounding, which
+            // is enough to push NdotH below the strict 1 - 0.0001 mirror threshold
+            // in evaluate_specular_brdf and zero out the BRDF for mirror metals.
+            primary_brdf_at_x2 = evaluate_brdf(wo, next_bounce.wi, world_normal, material, primary_F_ab);
             x2_set = true;
         }
 

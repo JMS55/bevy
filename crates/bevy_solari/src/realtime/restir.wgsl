@@ -494,23 +494,17 @@ fn merge_reservoirs(
     // Contributions for resampling and MIS
     let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
     var other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
-    let canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
+    var canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
     let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
 
-    // Shadow the resampling weight for the "other sample at canonical" pair — that's
-    // the one that decides whether other's sample is allowed to win the merge.
-    //
-    // Skip the trace for temporal merges of GI-style reservoirs: their stored radiance
-    // already has the visibility baked in from when this same trace ran in a previous
-    // frame's merge, so re-tracing is redundant (and would double-multiply visibility).
-    // Bounce-0 NEE (light_sample) reservoirs are re-resolved fresh each frame and carry
-    // no baked visibility, so they still need the trace.
-    let other_is_light_sample = other_reservoir.light_sample.light_id != NULL_LIGHT_ID;
-    let need_visibility_trace = is_spatial || other_is_light_sample;
-    if need_visibility_trace && other_sample_at_canonical.target_function > 0.0 {
+    if other_sample_at_canonical.target_function > 0.0 {
         let vis = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
         other_sample_at_canonical.target_function *= vis;
         other_sample_at_canonical.brdf_radiance *= vis;
+    }
+    if canonical_sample_at_other.target_function > 0.0 {
+        let vis = trace_light_visibility(other_world_position + other_world_normal * RAY_T_MIN, canonical_sample_at_other.sample_world_position);
+        canonical_sample_at_other.target_function *= vis;
     }
 
     // Jacobians for resampling and MIS. Light samples don't need a reprojection jacobian,

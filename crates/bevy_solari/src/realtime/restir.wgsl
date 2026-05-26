@@ -346,18 +346,27 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
-    var point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
 
     if bool(constants.reset) {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
     }
 
-    if any(temporal_pixel_id_float < vec2(0.0)) || any(temporal_pixel_id_float >= view.main_pass_viewport.zw) {
-        point_temporal_pixel_id = pixel_id;
+    var point_temporal_pixel_id = pixel_id;
+    if all(temporal_pixel_id_float >= vec2(0.0)) && all(temporal_pixel_id_float < view.main_pass_viewport.zw) {
+        point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
     }
 
     let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, constants.frame_index, view.main_pass_viewport.zw);
-    var temporal = load_temporal_reservoir_inner(permuted_temporal_pixel_id, depth, world_position, world_normal);
+
+    // Check if the pixel features have changed heavily between the current and previous frame
+    let temporal_depth = textureLoad(previous_depth_buffer, permuted_temporal_pixel_id, 0);
+    let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, permuted_temporal_pixel_id, 0), temporal_depth, permuted_temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
+    if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
+        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
+    }
+
+    let temporal_pixel_index = permuted_temporal_pixel_id.x + permuted_temporal_pixel_id.y * u32(view.main_pass_viewport.z);
+    var temporal = NeighborInfo(reservoirs_a[temporal_pixel_index], temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material);
 
     // Check if the light selected in the previous frame no longer exists in the current frame (e.g. entity despawned)
     if temporal.reservoir.light_sample.light_id != NULL_LIGHT_ID {
@@ -373,20 +382,6 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     temporal.reservoir.confidence_weight = min(temporal.reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
 
     return temporal;
-}
-
-fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
-    // Check if the pixel features have changed heavily between the current and previous frame
-    let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
-    let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, temporal_pixel_id, 0), temporal_depth, temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
-    if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
-        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
-    }
-
-    let temporal_pixel_index = temporal_pixel_id.x + temporal_pixel_id.y * u32(view.main_pass_viewport.z);
-    let temporal_reservoir = reservoirs_a[temporal_pixel_index];
-
-    return NeighborInfo(temporal_reservoir, temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material);
 }
 
 fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> NeighborInfo {

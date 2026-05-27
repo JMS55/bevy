@@ -316,12 +316,13 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             }
         }
 
-        // === Terminate into the world cache (diffuse bounces, or the last bounce) ===
+        // === Terminate into the world cache (non-metallic previous surface, or the last bounce) ===
         // The cache stores diffuse-ish outgoing radiance at (position, normal) cells, so
-        // it's a good approximation when the bounce was diffuse (radiance is roughly
-        // isotropic) or when we're out of bounce budget and need *something* to close
-        // the path.
-        if next_bounce.diffuse_selected || bounce == GI_MAX_BOUNCES - 1u {
+        // it's a good approximation when the previous surface was non-metallic (radiance is
+        // roughly isotropic) or when we're out of bounce budget and need *something* to close
+        // the path. Use the same mix(1, roughness, metallic) probability as NEE: 1.0 for pure
+        // dielectrics, roughness for pure metals.
+        if rand_f(rng) < mix(1.0, m.perceptual_roughness, m.metallic) || bounce == GI_MAX_BOUNCES - 1u {
             // Only terminate into the cache when the BRDF ray was long enough to clear
             // the cache cell (cell diagonal = sqrt(3) * cell_size). Short rays land in a
             // cell that may straddle nearby occluding geometry and leak light through

@@ -327,6 +327,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             // the cache cell (cell diagonal = sqrt(3) * cell_size). Short rays land in a
             // cell that may straddle nearby occluding geometry and leak light through
             // corners.
+            // TODO: I think we need to factor in rand_f(rng) < mix(1.0, m.perceptual_roughness, m.metallic), like p_nee
             var rng_copy = *rng;
             let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, ray.t, &rng_copy);
             if ray.t > sqrt(3.0) * world_cache_cell_size {

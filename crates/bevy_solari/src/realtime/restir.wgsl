@@ -352,10 +352,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                 let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
                 let cache_L_at_rc = throughput_past_x1 * cache_outgoing;
                 let cache_target = luminance(primary_brdf_at_x2 * cache_L_at_rc);
-                // RR correction: stochastic termination samples the cache with probability
-                // p_term, so upweight by 1/p_term to keep the estimator unbiased. Forced
-                // last-bounce termination has effective probability 1, no correction needed.
-                let cache_weight = select(cache_target, cache_target / p_term, stochastic_terminate);
+                // RR correction: mid-bounce we enter this block with probability p_term, so
+                // upweight by 1/p_term to keep the estimator unbiased. The last bounce enters
+                // unconditionally (forced) — effective probability 1, no correction. Gate on
+                // forced_terminate, not the stochastic roll: at the last bounce both flags can
+                // fire together, and applying the correction there would double-count.
+                let cache_weight = select(cache_target / p_term, cache_target, forced_terminate);
                 w_sum += cache_weight;
                 if w_sum > 0.0 && rand_f(rng) * w_sum < cache_weight {
                     reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);

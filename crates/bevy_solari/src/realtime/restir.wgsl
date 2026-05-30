@@ -583,18 +583,33 @@ fn merge_reservoirs(
         return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
     }
 
+    // Defensive pairwise MIS (Wyman et al. 2023 ReSTIR course notes, §7.1.3 Eq 7.8 / Algorithm 7
+    // — the variant ReSTIR PT adopts by default). The plain balance heuristic lets a neighbor with
+    // a large (approximate) p̂ drive the canonical's weight m_c toward 0; when that neighbor is
+    // actually a poor estimator here (its reconnection vertex is occluded from / incompatible with
+    // this pixel) the reserved weight is lost every frame and the pixel darkens. The defensive
+    // term floors the canonical at its confidence share t_c = c_c / (c_c + c_n):
+    //   m_c = t_c + (1 - t_c) * balance_c,   m_n = (1 - t_c) * balance_n.
+    // For M = 2 this is exactly Algorithm 7. It remains a valid MIS partition (weights sum to 1),
+    // so unlike a hard canonical fallback it cannot leak energy / over-brighten. When the neighbor
+    // is empty (c_n = 0) it collapses to t_c = 1 -> canonical keeps full weight.
+    let total_confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
+    let defensive_t_c = select(1.0, canonical_reservoir.confidence_weight / total_confidence_weight, total_confidence_weight > 0.0);
+
     // Resampling weight for canonical sample
-    let canonical_sample_mis_weight = balance_heuristic(
+    let canonical_balance_mis_weight = balance_heuristic(
         canonical_reservoir.confidence_weight * canonical_sample_at_canonical.target_function,
         other_reservoir.confidence_weight * canonical_sample_at_other.target_function * canonical_sample_at_other_jacobian,
     );
+    let canonical_sample_mis_weight = mix(canonical_balance_mis_weight, 1.0, defensive_t_c);
     let canonical_sample_resampling_weight = canonical_sample_mis_weight * canonical_sample_at_canonical.target_function * canonical_reservoir.unbiased_contribution_weight;
 
     // Resampling weight for other sample
-    let other_sample_mis_weight = balance_heuristic(
+    let other_balance_mis_weight = balance_heuristic(
         other_reservoir.confidence_weight * other_sample_at_other.target_function,
         canonical_reservoir.confidence_weight * other_sample_at_canonical.target_function * other_sample_at_canonical_jacobian,
     );
+    let other_sample_mis_weight = (1.0 - defensive_t_c) * other_balance_mis_weight;
     let other_sample_resampling_weight = other_sample_mis_weight * other_sample_at_canonical.target_function * other_reservoir.unbiased_contribution_weight * other_sample_at_canonical_jacobian;
 
     // Perform resampling

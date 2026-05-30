@@ -334,7 +334,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // roughly isotropic) or when we're out of bounce budget and need *something* to close
         // the path. Use the same mix(1, roughness, metallic) probability as NEE: 1.0 for pure
         // dielectrics, roughness for pure metals.
-        if rand_f(rng) < mix(1.0, m.perceptual_roughness, m.metallic) || bounce == MAX_BOUNCES - 1u {
+        let p_term = mix(1.0, m.perceptual_roughness, m.metallic);
+        let stochastic_terminate = rand_f(rng) < p_term;
+        let forced_terminate = bounce == MAX_BOUNCES - 1u;
+        if stochastic_terminate || forced_terminate {
             // Only terminate into the cache when the BRDF ray was long enough to clear
             // the cache cell (cell diagonal = sqrt(3) * cell_size). Short rays land in a
             // cell that may straddle nearby occluding geometry and leak light through
@@ -349,8 +352,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                 let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
                 let cache_L_at_rc = throughput_past_x1 * cache_outgoing;
                 let cache_target = luminance(primary_brdf_at_x2 * cache_L_at_rc);
-                w_sum += cache_target;
-                if w_sum > 0.0 && rand_f(rng) * w_sum < cache_target {
+                // RR correction: stochastic termination samples the cache with probability
+                // p_term, so upweight by 1/p_term to keep the estimator unbiased. Forced
+                // last-bounce termination has effective probability 1, no correction needed.
+                let cache_weight = select(cache_target, cache_target / p_term, stochastic_terminate);
+                w_sum += cache_weight;
+                if w_sum > 0.0 && rand_f(rng) * w_sum < cache_weight {
                     reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
                     reservoir.sample_point_world_position = x2_position;
                     reservoir.sample_point_world_normal = octahedral_encode(x2_normal);

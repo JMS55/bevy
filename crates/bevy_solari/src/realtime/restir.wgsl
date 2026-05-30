@@ -609,7 +609,7 @@ fn merge_reservoirs(
         other_reservoir.confidence_weight * other_sample_at_other.target_function,
         canonical_reservoir.confidence_weight * other_sample_at_canonical.target_function * other_sample_at_canonical_jacobian,
     );
-    let other_sample_mis_weight = (1.0 - defensive_t_c) * other_balance_mis_weight;
+    let other_sample_mis_weight = mix(other_balance_mis_weight, 0.0, defensive_t_c);
     let other_sample_resampling_weight = other_sample_mis_weight * other_sample_at_canonical.target_function * other_reservoir.unbiased_contribution_weight * other_sample_at_canonical_jacobian;
 
     // Perform resampling

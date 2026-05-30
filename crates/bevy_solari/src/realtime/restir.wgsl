@@ -4,16 +4,16 @@ enable wgpu_ray_query;
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::utils::{octahedral_decode, octahedral_encode, rand_f, rand_range_u, sample_disk}
 #import bevy_render::maths::PI
-#import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_and_sample_brdf_uniform_diffuse, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB}
+#import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
-#import bevy_solari::realtime_bindings::{accumulation_texture, constants, depth_buffer, gbuffer, light_tile_resolved_samples, light_tile_samples, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, view, view_output}
-#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, generate_random_light_sample, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, sample_random_light, trace_light_visibility}
+#import bevy_solari::realtime_bindings::{constants, depth_buffer, gbuffer, light_tile_resolved_samples, light_tile_samples, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, view, view_output}
+#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
 #import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 
 const INITIAL_DI_SAMPLES = 8u;
-const GI_MAX_BOUNCES = 3u;
+const MAX_BOUNCES = 3u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
 // Below this value of mix(1, roughness, metallic) the specular lobe dominates
@@ -39,14 +39,19 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let wo = normalize(view.world_position - surface.world_position);
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, &rng);
 
-    if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
+    // Skip resampling for specular-dominated surfaces, and for unshareable (bounce-0
+    // directly-visible-light) samples — the latter must not be merged at all: merging would
+    // out-vote this fresh confidence-1 sample with high-confidence neighbors and discard its
+    // light. It's shaded directly at its own pixel instead.
+    if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD
+        || is_unshareable_reservoir(initial_reservoir) {
         reservoirs_b[pixel_index] = initial_reservoir;
         return;
     }
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material,
-        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, false, &rng);
+        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, &rng);
 
     reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
@@ -72,7 +77,10 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var combined_reservoir: Reservoir;
     var shade_brdf_radiance: vec3<f32>;
-    if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
+    if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD
+        || is_unshareable_reservoir(input_reservoir) {
+        // Specular-dominated, or an unshareable directly-visible-light sample: shade the
+        // input directly without spatial reuse (see initial_and_temporal).
         combined_reservoir = input_reservoir;
         var resolved: ResolvedLightSample;
         if input_reservoir.light_sample.light_id != NULL_LIGHT_ID {
@@ -82,7 +90,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     } else {
         let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
         let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
-            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, true, &rng);
+            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, &rng);
         combined_reservoir = merge_result.merged_reservoir;
         shade_brdf_radiance = merge_result.selected_sample_brdf_radiance;
     }
@@ -92,15 +100,6 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var pixel_color = shade_brdf_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color += surface.material.emissive;
     pixel_color *= view.exposure;
-
-    // Accumulate over frames (like pathtracer.wgsl) — sample count stashed in alpha
-    // var sample_count = 0.0;
-    // if !bool(constants.reset) {
-    //     let old = textureLoad(accumulation_texture, global_id.xy);
-    //     sample_count = old.a;
-    //     pixel_color = mix(old.rgb, pixel_color, 1.0 / (sample_count + 1.0));
-    // }
-    // textureStore(accumulation_texture, global_id.xy, vec4(pixel_color, sample_count + 1.0));
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 
 #ifdef VISUALIZE_WORLD_CACHE
@@ -148,7 +147,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     // sampled wi IS the x1 -> x2 direction).
     var primary_brdf_at_x2 = vec3(0.0);
 
-    for (var bounce = 0u; bounce < GI_MAX_BOUNCES; bounce++) {
+    for (var bounce = 0u; bounce < MAX_BOUNCES; bounce++) {
         let NdotV = max(dot(n, v), 0.0001);
         let F_ab = F_AB(m.perceptual_roughness, NdotV);
 
@@ -216,11 +215,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                     nee_mis_weight = power_heuristic(p_nee_strategy, p_brdf_at_nee);
                 }
 
-                // The sub-reservoir's effective inverse-pdf is di_weight_sum / di_target;
-                // this acts as the single-sample inverse_pdf would. Includes the stochastic
-                // NEE compensation (1/p_nee).
-                let di_W = di_weight_sum / di_selected_target;
-
                 if bounce == 0u {
                     // Bounce 0: store the LightSample identity so reservoir_contribution
                     // can re-resolve the light each frame (moving lights, directional
@@ -237,8 +231,11 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                     }
                 } else {
                     // Bounce >= 1: bake the path through this vertex into L_at_rc and
-                    // store as a GI candidate. di_W replaces the single-sample inverse_pdf;
-                    // brdf_current is the BRDF at this vertex toward the chosen light.
+                    // store as a GI candidate. di_W (the sub-reservoir's effective
+                    // inverse-pdf = di_weight_sum / di_target, incl. the 1/p_nee stochastic
+                    // NEE compensation) replaces the single-sample inverse_pdf; brdf_current
+                    // is the BRDF at this vertex toward the chosen light.
+                    let di_W = di_weight_sum / di_selected_target;
                     let L_at_rc = throughput_past_x1 * di_selected_brdf_current * di_selected_radiance * vis * di_W * nee_mis_weight / p_nee;
                     let nee_target = luminance(primary_brdf_at_x2 * L_at_rc);
                     w_sum += nee_target;
@@ -308,7 +305,22 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             let emissive_target = luminance(primary_brdf_at_x2 * emissive_L_at_rc);
             w_sum += emissive_target;
             if w_sum > 0.0 && rand_f(rng) * w_sum < emissive_target {
-                reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
+                // At bounce 0 the reconnection vertex IS the directly-visible light: a single
+                // BRDF-importance-sampled hit. On a broad lobe it's a rare high-variance
+                // "jackpot" — sharing it across pixels over-counts (everyone borrows everyone's
+                // jackpots), so tag it "do not reuse cross-pixel" via the otherwise-unused seed
+                // field (seed == 1). Bounce >= 1 emissive is genuine indirect (x_rc is a diffuse
+                // vertex) and NEE is a separate steady strategy — both reuse fine (seed == 0).
+                //
+                // We tag *all* bounce-0 hits, not just diffuse-lobe ones: the deciding factor is
+                // lobe *tightness*, not which lobe was sampled. A rough surface's specular lobe is
+                // still broad (gating on next_bounce.diffuse_selected leaves those jackpots
+                // shareable and the over-brightness returns). Genuinely tight specular surfaces —
+                // the only ones where this sample would be low-variance enough to share — already
+                // skip all reuse via SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD, so every surface
+                // that actually reaches reuse is broad. See load_temporal/load_spatial_reservoir.
+                let unshareable = select(0u, 1u, bounce == 0u);
+                reservoir.light_sample = LightSample(NULL_LIGHT_ID, unshareable);
                 reservoir.sample_point_world_position = x2_position;
                 reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
                 reservoir.radiance = emissive_L_at_rc;
@@ -322,12 +334,11 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // roughly isotropic) or when we're out of bounce budget and need *something* to close
         // the path. Use the same mix(1, roughness, metallic) probability as NEE: 1.0 for pure
         // dielectrics, roughness for pure metals.
-        if rand_f(rng) < mix(1.0, m.perceptual_roughness, m.metallic) || bounce == GI_MAX_BOUNCES - 1u {
+        if rand_f(rng) < mix(1.0, m.perceptual_roughness, m.metallic) || bounce == MAX_BOUNCES - 1u {
             // Only terminate into the cache when the BRDF ray was long enough to clear
             // the cache cell (cell diagonal = sqrt(3) * cell_size). Short rays land in a
             // cell that may straddle nearby occluding geometry and leak light through
             // corners.
-            // TODO: I think we need to factor in rand_f(rng) < mix(1.0, m.perceptual_roughness, m.metallic), like p_nee
             var rng_copy = *rng;
             let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, ray.t, &rng_copy);
             if ray.t > sqrt(3.0) * world_cache_cell_size {
@@ -370,6 +381,14 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     return reservoir;
 }
 
+// True for a bounce-0 BRDF-emissive (directly-visible-light) reconnection, tagged in the
+// otherwise-unused seed field. These are single, high-variance direct-light samples that
+// must not be reused across pixels (doing so over-counts — see the emissive candidate in
+// generate_initial_reservoir). They are still shaded at their own pixel as the canonical.
+fn is_unshareable_reservoir(reservoir: Reservoir) -> bool {
+    return reservoir.light_sample.light_id == NULL_LIGHT_ID && reservoir.light_sample.seed == 1u;
+}
+
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
     let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
     let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
@@ -394,6 +413,12 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
 
     let temporal_pixel_index = permuted_temporal_pixel_id.x + permuted_temporal_pixel_id.y * u32(view.main_pass_viewport.z);
     var temporal = NeighborInfo(reservoirs_a[temporal_pixel_index], temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material);
+
+    // permute_pixel makes this a cross-pixel lookup, so don't reuse a directly-visible-light
+    // sample from it (would over-count).
+    if is_unshareable_reservoir(temporal.reservoir) {
+        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
+    }
 
     // Check if the light selected in the previous frame no longer exists in the current frame (e.g. entity despawned)
     if temporal.reservoir.light_sample.light_id != NULL_LIGHT_ID {
@@ -423,6 +448,11 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
 
         let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
         let spatial_reservoir = reservoirs_b[spatial_pixel_index];
+        // Spatial reuse is cross-pixel by definition, so skip a neighbor that holds a
+        // directly-visible-light sample (would over-count).
+        if is_unshareable_reservoir(spatial_reservoir) {
+            continue;
+        }
         return NeighborInfo(spatial_reservoir, spatial_surface.world_position, spatial_surface.world_normal, spatial_surface.material);
     }
 
@@ -494,12 +524,6 @@ fn merge_reservoirs(
     other_world_position: vec3<f32>,
     other_world_normal: vec3<f32>,
     other_material: ResolvedMaterial,
-    // True for spatial merge (neighbor pixel — no baked visibility we can trust at our
-    // shading point, must trace fresh). False for temporal merge (same pixel's history —
-    // visibility is already baked into the stored radiance for GI samples; only trace
-    // when the temporal reservoir is a bounce-0 NEE light_sample, since those are
-    // re-resolved fresh each frame and carry no baked visibility).
-    is_spatial: bool,
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
     var canonical_resolved: ResolvedLightSample;
@@ -527,7 +551,6 @@ fn merge_reservoirs(
     if other_sample_at_canonical.target_function > 0.0 {
         let vis = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
         other_sample_at_canonical.target_function *= vis;
-        other_sample_at_canonical.brdf_radiance *= vis;
     }
     if canonical_sample_at_other.target_function > 0.0 {
         let vis = trace_light_visibility(other_world_position + other_world_normal * RAY_T_MIN, canonical_sample_at_other.sample_world_position);

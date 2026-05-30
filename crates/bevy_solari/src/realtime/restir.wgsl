@@ -50,8 +50,12 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     }
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
+    // PreviousViewUniforms doesn't expose world_position — derive it as the world-space image of the
+    // view-space origin: world_from_view * (0,0,0,1), with world_from_view = world_from_clip * clip_from_view.
+    let prev_camera_homog = previous_view.world_from_clip * (previous_view.clip_from_view * vec4(0.0, 0.0, 0.0, 1.0));
+    let prev_camera_world_position = prev_camera_homog.xyz / prev_camera_homog.w;
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material,
-        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, &rng);
+        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, prev_camera_world_position, &rng);
 
     reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
@@ -90,7 +94,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     } else {
         let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
         let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
-            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, &rng);
+            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, view.world_position, &rng);
         combined_reservoir = merge_result.merged_reservoir;
         shade_brdf_radiance = merge_result.selected_sample_brdf_radiance;
     }
@@ -533,6 +537,11 @@ fn merge_reservoirs(
     other_world_position: vec3<f32>,
     other_world_normal: vec3<f32>,
     other_material: ResolvedMaterial,
+    // Camera position at which `other_reservoir` was generated. Equal to view.world_position
+    // for spatial reuse (same-frame neighbor) but previous_view.world_position for temporal
+    // reuse — using current view there gives a wrong wo at the temporal pixel, biasing
+    // p̂_n's BRDF and thus the m_n MIS weight under camera motion (notably zoom).
+    other_view_position: vec3<f32>,
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
     var canonical_resolved: ResolvedLightSample;
@@ -547,7 +556,7 @@ fn merge_reservoirs(
     let canonical_wo = normalize(view.world_position - canonical_world_position);
     let canonical_NdotV = max(dot(canonical_world_normal, canonical_wo), 0.0001);
     let canonical_F_ab = F_AB(canonical_material.perceptual_roughness, canonical_NdotV);
-    let other_wo = normalize(view.world_position - other_world_position);
+    let other_wo = normalize(other_view_position - other_world_position);
     let other_NdotV = max(dot(other_world_normal, other_wo), 0.0001);
     let other_F_ab = F_AB(other_material.perceptual_roughness, other_NdotV);
 

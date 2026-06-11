@@ -413,7 +413,12 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
         point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
     }
 
-    let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, constants.frame_index, view.main_pass_viewport.zw);
+    // constants.frame_index is pre-multiplied by 5782582 (node.rs) for RNG seeding, but
+    // permute_pixel consumes the low 4 bits of a *raw* frame counter as its 4x4 offset
+    // cycle. Fed the pre-multiplied value, the cycle degenerates (x offset only ever 0 or
+    // 2, period 8 overall), which synchronizes temporal-history rejections screen-wide
+    // into visible pulsing under camera motion. Divide the multiplier back out.
+    let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, constants.frame_index / 5782582u, view.main_pass_viewport.zw);
 
     // Check if the pixel features have changed heavily between the current and previous frame
     let temporal_depth = textureLoad(previous_depth_buffer, permuted_temporal_pixel_id, 0);

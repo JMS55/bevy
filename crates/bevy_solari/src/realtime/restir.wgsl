@@ -2,8 +2,9 @@
 enable wgpu_ray_query;
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::utils::{octahedral_decode, octahedral_encode, rand_f, rand_range_u, sample_disk}
+#import bevy_pbr::utils::{rand_f, rand_range_u, sample_disk}
 #import bevy_render::maths::PI
+#import bevy_render::utils::{octahedral_decode, octahedral_encode}
 #import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample

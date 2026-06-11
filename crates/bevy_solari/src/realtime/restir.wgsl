@@ -66,7 +66,10 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    var rng = pixel_index + constants.frame_index;
+    // Constant offset gives this pass a distinct RNG stream: initial_and_temporal seeds
+    // with the same pixel_index + frame_index and would otherwise replay the identical
+    // rand sequence in this pass.
+    var rng = pixel_index + constants.frame_index + 0x6A09E667u;
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {

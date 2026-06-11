@@ -13,7 +13,13 @@ enable wgpu_ray_query;
 @compute @workgroup_size(1024, 1, 1)
 fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(local_invocation_index) sample_index: u32) {
     let tile_id = workgroup_id.x;
-    var rng = (tile_id * 5782582u) + sample_index + constants.frame_index;
+    // tile_id's multiplier must differ from frame_index's CPU-side multiplier (5782582,
+    // see node.rs). With matching multipliers the seed is
+    // (tile_id + frame_count) * 5782582 + sample_index, so tile T at frame F generates
+    // exactly the same samples as tile T+1 at frame F-1 — the tile array just scrolls one
+    // tile per frame, refreshing only 1/128th of the light candidate pool each frame and
+    // producing temporally-correlated noise.
+    var rng = (tile_id * 0x9E3779B9u) + sample_index + constants.frame_index;
 
     let sample = generate_random_light_sample(&rng);
 

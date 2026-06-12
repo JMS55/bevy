@@ -14,6 +14,10 @@ enable wgpu_ray_query;
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 
 const INITIAL_DI_SAMPLES = 8u;
+// NEE RIS candidates at bounce >= 1 vertices. Their result is frozen into the reconnection
+// payload (L_at_rc) as sub-path noise, where extra candidates are far less visible than at
+// bounce 0 (whose candidate directly becomes the resampled target). Quality/perf knob.
+const SECONDARY_DI_SAMPLES = 4u;
 const MAX_BOUNCES = 3u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
@@ -177,8 +181,13 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // contributes; skip it most of the time there and let BRDF-sampled emissive
         // do the work. Pure dielectrics always run NEE.
         let p_nee = mix(1.0, m.perceptual_roughness, m.metallic);
+        // Must be INITIAL_DI_SAMPLES at bounce 0: reservoir_contribution rebuilds the
+        // bounce-0 MIS weights with that constant at every reuse. Bounce >= 1 MIS weights
+        // are frozen into L_at_rc, so the count there only has to be consistent within
+        // this loop iteration (the emissive candidate below uses the same di_samples).
+        let di_samples = select(SECONDARY_DI_SAMPLES, INITIAL_DI_SAMPLES, bounce == 0u);
         if rand_f(rng) < p_nee {
-            // INITIAL_DI_SAMPLES of streaming RIS over a workgroup-shared light tile,
+            // di_samples of streaming RIS over a workgroup-shared light tile,
             // followed by a single visibility trace for the winning sample (matches the
             // pre-unified restir_di.wgsl structure). Used at every bounce; the per-bounce
             // workgroup_rng init ensures different bounces select different tiles.
@@ -197,9 +206,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             var di_selected_brdf_current = vec3(0.0);
             var di_selected_inverse_solid_angle_pdf = 0.0;
             var di_selected_brdf_rays_can_hit = false;
-            let internal_mis = 1.0 / f32(INITIAL_DI_SAMPLES);
+            let internal_mis = 1.0 / f32(di_samples);
             let need_gi_fields = bounce > 0u;
-            for (var i = 0u; i < INITIAL_DI_SAMPLES; i++) {
+            for (var i = 0u; i < di_samples; i++) {
                 let tile_sample = light_tile_start + rand_range_u(1024u, rng);
                 let resolved = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
                 let lc = calculate_resolved_light_contribution(resolved, ray_origin, n);
@@ -230,7 +239,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                 // for the stochastic-NEE gate.
                 var nee_mis_weight = 1.0;
                 if di_selected_brdf_rays_can_hit && di_selected_inverse_solid_angle_pdf > 0.0 {
-                    let p_nee_strategy = f32(INITIAL_DI_SAMPLES) * (1.0 / di_selected_inverse_solid_angle_pdf) * p_nee;
+                    let p_nee_strategy = f32(di_samples) * (1.0 / di_selected_inverse_solid_angle_pdf) * p_nee;
                     let p_brdf_at_nee = brdf_pdf(v, di_selected_wi, n, m, F_ab);
                     nee_mis_weight = power_heuristic(p_nee_strategy, p_brdf_at_nee);
                 }
@@ -326,10 +335,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             let area_pdf = 1.0 / (f32(light_count) * f32(ray_hit.triangle_count) * ray_hit.triangle_area);
             let p_light = area_pdf * ray.t * ray.t / NdotV_hit;
             // Stochastic multi-sample NEE: the effective competing NEE strategy pdf
-            // for this specific light is p_light * p_nee * INITIAL_DI_SAMPLES
+            // for this specific light is p_light * p_nee * di_samples
             // (drawing N RIS candidates concentrates the marginal around any specific
             // direction by ~N; gated by the p_nee stochastic skip).
-            let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(INITIAL_DI_SAMPLES));
+            let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(di_samples));
 
             if bounce == 0u && isinf(p_brdf) {
                 // Delta-lobe (mirror) hit on a directly-visible light. Its density in the

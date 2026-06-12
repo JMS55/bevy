@@ -227,7 +227,17 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                     // Bounce 0: store the LightSample identity so reservoir_contribution
                     // can re-resolve the light each frame (moving lights, directional
                     // soft-shadow re-sampling). Main-reservoir w_i = di_weight_sum * vis
-                    // * mis / p_nee, with the same di_selected_target as denominator.
+                    // * mis / p_nee.
+                    //
+                    // The target function includes nee_mis_weight, matching
+                    // reservoir_contribution which recomputes it from the local surface.
+                    // This keeps W = w_sum / target free of this pixel's BRDF pdf: the MIS
+                    // weight pairs with the bounce-0 emissive strategy of whichever pixel
+                    // evaluates the sample, and p_brdf/p_nee are surface- and
+                    // view-dependent. Baking it into W would freeze this pixel's partition
+                    // into reservoirs reused by other pixels (spatial, across material
+                    // variation) and other frames (temporal, under camera motion), so the
+                    // NEE + emissive strategies would no longer sum to 1 at the receiver.
                     let nee_w = di_weight_sum * vis * nee_mis_weight / p_nee;
                     w_sum += nee_w;
                     if w_sum > 0.0 && rand_f(rng) * w_sum < nee_w {
@@ -235,7 +245,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                         // sample_point / radiance fields are unused when light_sample is
                         // set — reservoir_contribution re-resolves the light freshly each
                         // time.
-                        selected_target_function = di_selected_target;
+                        selected_target_function = di_selected_target * nee_mis_weight;
                     }
                 } else {
                     // Bounce >= 1: bake the path through this vertex into L_at_rc and
@@ -672,7 +682,30 @@ struct ReservoirContribution {
 fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> ReservoirContribution {
     if reservoir.light_sample.light_id != NULL_LIGHT_ID {
         let light_contribution = calculate_resolved_light_contribution(resolved, world_position, world_normal);
-        let brdf_radiance = light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab);
+
+        // MIS weight against the bounce-0 BRDF-emissive strategy, recomputed with THIS
+        // surface's BRDF/material rather than baked into the reservoir's W at generation
+        // (mirrors the bounce-0 nee_mis_weight in generate_initial_reservoir, which puts
+        // the same factor in the stored target function). The NEE and emissive strategies
+        // must partition each light's energy per evaluation pixel — w_nee + w_brdf = 1
+        // needs both weights built from the local p_brdf/p_nee, while a baked weight
+        // would carry the generating pixel's partition into reuse and over/under-count
+        // direct light wherever material or view direction differ.
+        var nee_mis_weight = 1.0;
+        if light_contribution.brdf_rays_can_hit && light_contribution.inverse_solid_angle_pdf > 0.0 {
+            // resolve_light_sample's inverse_pdf excludes the 1/light_count light-pick
+            // factor that the presampled tiles include (generate_random_light_sample
+            // multiplies it in after resolving); add it so the effective NEE pdf here
+            // matches the one used at generation and in the emissive candidate's p_light.
+            let light_count = arrayLength(&light_sources);
+            let inverse_solid_angle_pdf = light_contribution.inverse_solid_angle_pdf * f32(light_count);
+            let p_nee = mix(1.0, material.perceptual_roughness, material.metallic);
+            let p_nee_strategy = f32(INITIAL_DI_SAMPLES) * (1.0 / inverse_solid_angle_pdf) * p_nee;
+            let p_brdf_at_nee = brdf_pdf(wo, light_contribution.wi, world_normal, material, F_ab);
+            nee_mis_weight = power_heuristic(p_nee_strategy, p_brdf_at_nee);
+        }
+
+        let brdf_radiance = light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab) * nee_mis_weight;
         return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), resolved.world_position);
     } else if any(reservoir.radiance != vec3(0.0)) {
         let wi = normalize(reservoir.sample_point_world_position - world_position);

@@ -44,6 +44,8 @@ pub struct SolariLightingPipelines {
     blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
     initial_and_temporal_pipeline: CachedComputePipelineId,
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    initial_and_temporal_with_psr_pipeline: CachedComputePipelineId,
     spatial_and_shade_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
@@ -106,6 +108,17 @@ pub fn solari_lighting(
         return;
     };
 
+    // The PSR variant additionally writes the DLSS RR guide buffers, so it can only be
+    // used when the view has them.
+    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
+    let initial_and_temporal_pipeline = pipelines.initial_and_temporal_pipeline;
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    let initial_and_temporal_pipeline = if view_dlss_rr_textures.is_some() {
+        pipelines.initial_and_temporal_with_psr_pipeline
+    } else {
+        pipelines.initial_and_temporal_pipeline
+    };
+
     let (
         Some(decay_world_cache_pipeline),
         Some(compact_world_cache_single_block_pipeline),
@@ -135,7 +148,7 @@ pub fn solari_lighting(
         pipeline_cache.get_compute_pipeline(pipelines.sample_gi_for_world_cache_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.blend_new_world_cache_samples_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.presample_light_tiles_pipeline),
-        pipeline_cache.get_compute_pipeline(pipelines.initial_and_temporal_pipeline),
+        pipeline_cache.get_compute_pipeline(initial_and_temporal_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.spatial_and_shade_pipeline),
         &scene_bindings.bind_group,
         view_prepass_textures.deferred_view(),
@@ -210,7 +223,8 @@ pub fn solari_lighting(
         )
     });
 
-    // Choice of number here is arbitrary
+    // Mostly arbitrary, but must differ from the tile-id multiplier in
+    // presample_light_tiles.wgsl (see the comment there).
     let frame_index = frame_count.0.wrapping_mul(5782582);
 
     let diagnostics = ctx.diagnostic_recorder();
@@ -312,6 +326,11 @@ pub fn solari_lighting(
 
     let d = diagnostics.time_span(&mut pass, "solari_lighting/lighting");
 
+    // The PSR pipeline variant writes the DLSS RR guide buffers via bind group 2.
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
+        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
+    }
     pass.set_pipeline(initial_and_temporal_pipeline);
     pass.set_immediates(
         0,
@@ -493,6 +512,14 @@ pub fn init_solari_lighting_pipelines(
             load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
             None,
             vec![],
+        ),
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        initial_and_temporal_with_psr_pipeline: create_pipeline(
+            "solari_lighting_initial_and_temporal_with_psr_pipeline",
+            "initial_and_temporal",
+            load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
+            Some(&bind_group_layout_resolve_dlss_rr_textures),
+            vec!["DLSS_RR_GUIDE_BUFFERS".into()],
         ),
         spatial_and_shade_pipeline: create_pipeline(
             "solari_lighting_spatial_and_shade_pipeline",

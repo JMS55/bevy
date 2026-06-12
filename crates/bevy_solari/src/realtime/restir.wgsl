@@ -10,8 +10,13 @@ enable wgpu_ray_query;
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
 #import bevy_solari::realtime_bindings::{constants, depth_buffer, gbuffer, light_tile_resolved_samples, light_tile_samples, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, view, view_output}
 #import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
-#import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, trace_ray}
+#import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, MIRROR_ROUGHNESS_THRESHOLD, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
+#ifdef DLSS_RR_GUIDE_BUFFERS
+#import bevy_pbr::pbr_functions::{calculate_diffuse_color, calculate_F0}
+#import bevy_solari::realtime_bindings::{diffuse_albedo, specular_albedo, normal_roughness, specular_motion_vectors}
+#import bevy_solari::resolve_dlss_rr_textures::env_brdf_approx2
+#endif
 
 const INITIAL_DI_SAMPLES = 8u;
 // NEE RIS candidates at bounce >= 1 vertices. Their result is frozen into the reconnection
@@ -138,12 +143,22 @@ struct InitialSamplingResult {
     mirror_emissive_radiance: vec3<f32>,
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, pixel_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
     var reservoir = empty_reservoir();
     reservoir.confidence_weight = 1.0;
     var mirror_emissive_radiance = vec3(0.0);
     var w_sum = 0.0;
     var selected_target_function = 0.0;
+
+#ifdef DLSS_RR_GUIDE_BUFFERS
+    // Primary surface replacement (PSR) for perfect mirrors: follow the delta reflection
+    // chain to the first non-mirror hit and write that surface's attributes — reflected
+    // into the mirror's virtual space — over the DLSS RR guide buffers, so the denoiser
+    // treats this pixel as directly seeing the reflected surface.
+    // https://developer.nvidia.com/blog/rendering-perfect-reflections-and-refractions-in-path-traced-games/#primary_surface_replacement
+    var mirror_rotations = reflection_matrix(world_normal);
+    var psr_finished = material.roughness > MIRROR_ROUGHNESS_THRESHOLD || material.metallic <= 0.9999;
+#endif
 
     let primary_NdotV = max(dot(world_normal, wo), 0.0001);
     let primary_F_ab = F_AB(material.perceptual_roughness, primary_NdotV);
@@ -297,6 +312,23 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         if ray.kind == RAY_QUERY_INTERSECTION_NONE { break; }
         let ray_hit = resolve_ray_hit_full(ray);
         let p_brdf = next_bounce.pdf;
+
+#ifdef DLSS_RR_GUIDE_BUFFERS
+        if !psr_finished {
+            if !isinf(p_brdf) {
+                // The lobe sampler took the residual non-delta lobe (metallic can be up to
+                // 0.9999 short of pure), so this ray isn't the mirror reflection — keep the
+                // resolve pass's guide-buffer defaults this frame.
+                psr_finished = true;
+            } else if ray_hit.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD && ray_hit.material.metallic > 0.9999 {
+                // Still in the mirror chain; fold this mirror's reflection into the chain.
+                mirror_rotations = mirror_rotations * reflection_matrix(ray_hit.world_normal);
+            } else {
+                psr_finished = true;
+                replace_primary_surface(pixel_id, ray_hit, mirror_rotations, world_position);
+            }
+        }
+#endif
 
         // Capture x2 on the first BRDF jump, and compute the primary BRDF at x2 once —
         // it's reused by every downstream candidate (emissive, cache, every bounce >= 1
@@ -454,6 +486,53 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     }
     return InitialSamplingResult(reservoir, mirror_emissive_radiance);
 }
+
+#ifdef DLSS_RR_GUIDE_BUFFERS
+// https://en.wikipedia.org/wiki/Householder_transformation
+fn reflection_matrix(plane_normal: vec3<f32>) -> mat3x3<f32> {
+    // N times Nᵀ.
+    let n_nt = mat3x3<f32>(
+        plane_normal * plane_normal.x,
+        plane_normal * plane_normal.y,
+        plane_normal * plane_normal.z,
+    );
+    let identity_matrix = mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+    return identity_matrix - n_nt * 2.0;
+}
+
+fn replace_primary_surface(pixel_id: vec2<u32>, ray_hit: ResolvedRayHitFull, mirror_rotations: mat3x3<f32>, primary_surface_world_position: vec3<f32>) {
+    // Simplification: apply all rotations in the chain around the first mirror, rather
+    // than applying each rotation around its respective mirror.
+    let virtual_position = (mirror_rotations * (ray_hit.world_position - primary_surface_world_position)) + primary_surface_world_position;
+    // Approximation: reuses this frame's mirror chain for the previous-frame position
+    // (a moving mirror's previous orientation isn't tracked).
+    let virtual_previous_frame_position = (mirror_rotations * (ray_hit.previous_frame_world_position - primary_surface_world_position)) + primary_surface_world_position;
+    let specular_motion_vector = calculate_motion_vector(virtual_position, virtual_previous_frame_position);
+
+    let F0 = calculate_F0(ray_hit.material.base_color, ray_hit.material.metallic, vec3(ray_hit.material.reflectance));
+    let wo = normalize(view.world_position - virtual_position);
+    let virtual_normal = normalize(mirror_rotations * ray_hit.world_normal);
+
+    textureStore(specular_motion_vectors, pixel_id, vec4(specular_motion_vector, vec2(0.0)));
+    textureStore(diffuse_albedo, pixel_id, vec4(calculate_diffuse_color(ray_hit.material.base_color, ray_hit.material.metallic, 0.0, 0.0), 0.0));
+    textureStore(specular_albedo, pixel_id, vec4(env_brdf_approx2(F0, ray_hit.material.roughness, virtual_normal, wo), 0.0));
+    textureStore(normal_roughness, pixel_id, vec4(virtual_normal, ray_hit.material.perceptual_roughness));
+}
+
+fn calculate_motion_vector(world_position: vec3<f32>, previous_world_position: vec3<f32>) -> vec2<f32> {
+    let clip_position_t = view.unjittered_clip_from_world * vec4(world_position, 1.0);
+    let clip_position = clip_position_t.xy / clip_position_t.w;
+    let previous_clip_position_t = previous_view.unjittered_clip_from_world * vec4(previous_world_position, 1.0);
+    let previous_clip_position = previous_clip_position_t.xy / previous_clip_position_t.w;
+    // These motion vectors are used as offsets to UV positions and are stored
+    // in the range -1,1 to allow offsetting from the one corner to the
+    // diagonally-opposite corner in UV coordinates, in either direction.
+    // A difference between diagonally-opposite corners of clip space is in the
+    // range -2,2, so this needs to be scaled by 0.5. And the V direction goes
+    // down where clip space y goes up, so y needs to be flipped.
+    return (clip_position - previous_clip_position) * vec2(0.5, -0.5);
+}
+#endif
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
     if bool(constants.reset) {

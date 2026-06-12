@@ -708,7 +708,14 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         let brdf_radiance = light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab) * nee_mis_weight;
         return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), resolved.world_position);
     } else if any(reservoir.radiance != vec3(0.0)) {
-        let wi = normalize(reservoir.sample_point_world_position - world_position);
+        // Reconstruct toward the reconnection vertex from the actual ray origin a
+        // reconnection ray would use (offset RAY_T_MIN along the normal, matching
+        // generate_initial_reservoir's trace and the merge visibility traces).
+        // Reconstructing from the un-offset position deviates from the traced
+        // direction by ~RAY_T_MIN/distance radians — enough to fail the strict
+        // NdotH mirror gate in evaluate_specular_brdf at short reconnection
+        // distances or grazing angles, zeroing out mirror reflections at shade.
+        let wi = normalize(reservoir.sample_point_world_position - (world_position + world_normal * RAY_T_MIN));
         let brdf_radiance = reservoir.radiance * evaluate_brdf(wo, wi, world_normal, material, F_ab);
         return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), vec4(reservoir.sample_point_world_position, 1.0));
     } else {

@@ -12,7 +12,7 @@ use crate::{
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
-use bevy_camera::{Camera, Camera3d};
+use bevy_camera::{Camera, Camera3d, MainPassResolutionOverride};
 use bevy_core_pipeline::{core_3d::CORE_3D_DEPTH_FORMAT, deferred::*, prepass::*};
 use bevy_ecs::{
     prelude::*,
@@ -25,11 +25,11 @@ use bevy_material::{
     key::{ErasedMaterialPipelineKey, ErasedMeshPipelineKey},
     AlphaMode, MaterialProperties, OpaqueRendererMethod, RenderPhaseType,
 };
-use bevy_math::{Affine3A, Mat4, Vec4};
+use bevy_math::{Affine3A, Mat4, Vec2, Vec4};
 use bevy_mesh::{Mesh, Mesh3d, MeshAttributeCompressionFlags, MeshVertexBufferLayoutRef};
 use bevy_render::{
     batching::gpu_preprocessing::GpuPreprocessingSupport,
-    camera::{DirtySpecializations, PendingQueues},
+    camera::{DirtySpecializations, PendingQueues, TemporalJitter},
     globals::{GlobalsBuffer, GlobalsUniform},
     mesh::{allocator::MeshAllocator, RenderMesh},
     render_asset::{prepare_assets, RenderAssets},
@@ -152,7 +152,11 @@ impl Plugin for PrepassPlugin {
                 .add_systems(ExtractSchedule, extract_camera_previous_view_data)
                 .add_systems(
                     Render,
-                    prepare_previous_view_uniforms.in_set(PrepareResources),
+                    (
+                        prepare_previous_view_uniforms,
+                        update_previous_temporal_jitter.after(prepare_previous_view_uniforms),
+                    )
+                        .in_set(PrepareResources),
                 );
         }
 
@@ -201,9 +205,13 @@ pub fn update_previous_view_data(
         let view_from_world = Mat4::from(world_from_view.inverse());
         let view_from_clip = camera.clip_from_view().inverse();
 
+        // Note: this main-world system cannot know the temporal jitter (it's applied in
+        // the render world); the jittered variants of these matrices are produced in
+        // `prepare_previous_view_uniforms` using `PreviousTemporalJitter`.
         commands.entity(entity).try_insert(PreviousViewData {
             view_from_world,
             clip_from_world: camera.clip_from_view() * view_from_world,
+            unjittered_clip_from_world: camera.clip_from_view() * view_from_world,
             clip_from_view: camera.clip_from_view(),
             world_from_clip: Mat4::from(world_from_view) * view_from_clip,
             view_from_clip,
@@ -715,7 +723,12 @@ pub fn prepare_previous_view_uniforms(
     render_queue: Res<RenderQueue>,
     mut previous_view_uniforms: ResMut<PreviousViewUniforms>,
     views: Query<
-        (Entity, &ExtractedView, Option<&PreviousViewData>),
+        (
+            Entity,
+            &ExtractedView,
+            Option<&PreviousViewData>,
+            Option<&PreviousTemporalJitter>,
+        ),
         Or<(With<Camera3d>, With<ShadowView>)>,
     >,
 ) {
@@ -729,8 +742,8 @@ pub fn prepare_previous_view_uniforms(
         return;
     };
 
-    for (entity, camera, maybe_previous_view_uniforms) in views_iter {
-        let prev_view_data = match maybe_previous_view_uniforms {
+    for (entity, camera, maybe_previous_view_uniforms, maybe_previous_jitter) in views_iter {
+        let mut prev_view_data = match maybe_previous_view_uniforms {
             Some(previous_view) => previous_view.clone(),
             None => {
                 let world_from_view = camera.world_from_view.affine();
@@ -740,6 +753,7 @@ pub fn prepare_previous_view_uniforms(
                 PreviousViewData {
                     view_from_world,
                     clip_from_world: camera.clip_from_view * view_from_world,
+                    unjittered_clip_from_world: camera.clip_from_view * view_from_world,
                     clip_from_view: camera.clip_from_view,
                     world_from_clip: Mat4::from(world_from_view) * view_from_clip,
                     view_from_clip,
@@ -747,8 +761,76 @@ pub fn prepare_previous_view_uniforms(
             }
         };
 
+        // The previous frame's depth/gbuffer were rasterized with that frame's temporal
+        // jitter, but `PreviousViewData` is recorded in the main world, which doesn't know
+        // the jitter (it's applied in the render world). Re-apply it here so that
+        // reconstructing positions from the previous frame's textures through these
+        // matrices is exact. `unjittered_clip_from_world` keeps the jitter-free variant
+        // for motion vectors.
+        if let Some(previous_jitter) = maybe_previous_jitter {
+            let mut clip_from_view = prev_view_data.clip_from_view;
+            previous_jitter
+                .jitter
+                .jitter_projection(&mut clip_from_view, previous_jitter.main_pass_viewport_size);
+            let view_from_clip = clip_from_view.inverse();
+            let world_from_view = prev_view_data.view_from_world.inverse();
+
+            prev_view_data.clip_from_view = clip_from_view;
+            prev_view_data.view_from_clip = view_from_clip;
+            prev_view_data.clip_from_world = clip_from_view * prev_view_data.view_from_world;
+            prev_view_data.world_from_clip = world_from_view * view_from_clip;
+        }
+
         commands.entity(entity).insert(PreviousViewUniformOffset {
             offset: writer.write(&prev_view_data),
+        });
+    }
+}
+
+/// Render-world component recording the [`TemporalJitter`] a view was rendered with, plus
+/// the main-pass viewport size it applies to, so that the *next* frame's
+/// [`prepare_previous_view_uniforms`] can reproduce the jittered matrices the previous
+/// frame's depth/gbuffer were rasterized with.
+#[derive(Component, Clone)]
+pub struct PreviousTemporalJitter {
+    pub jitter: TemporalJitter,
+    pub main_pass_viewport_size: Vec2,
+}
+
+/// Records each jittered view's [`TemporalJitter`] into [`PreviousTemporalJitter`] for
+/// next frame's [`prepare_previous_view_uniforms`]. Scheduled after it so this frame's
+/// value isn't overwritten before it's consumed.
+pub fn update_previous_temporal_jitter(
+    mut commands: Commands,
+    views: Query<
+        (
+            Entity,
+            &ExtractedView,
+            Option<&TemporalJitter>,
+            Option<&MainPassResolutionOverride>,
+        ),
+        Or<(With<Camera3d>, With<ShadowView>)>,
+    >,
+) {
+    for (entity, extracted_view, temporal_jitter, resolution_override) in &views {
+        let Some(temporal_jitter) = temporal_jitter else {
+            commands.entity(entity).remove::<PreviousTemporalJitter>();
+            continue;
+        };
+
+        // Matches the viewport that `prepare_view_uniforms` jitters the current
+        // projection with.
+        let mut view_size = Vec2::new(
+            extracted_view.viewport.z as f32,
+            extracted_view.viewport.w as f32,
+        );
+        if let Some(resolution_override) = resolution_override {
+            view_size = resolution_override.0.as_vec2();
+        }
+
+        commands.entity(entity).insert(PreviousTemporalJitter {
+            jitter: temporal_jitter.clone(),
+            main_pass_viewport_size: view_size,
         });
     }
 }

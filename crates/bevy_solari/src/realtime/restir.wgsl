@@ -2,14 +2,14 @@
 enable wgpu_ray_query;
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::utils::{rand_f, rand_range_u, sample_disk}
+#import bevy_pbr::utils::{rand_f, rand_range_u, rand_u, sample_disk}
 #import bevy_render::maths::PI
 #import bevy_render::utils::{octahedral_decode, octahedral_encode}
 #import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
 #import bevy_solari::realtime_bindings::{constants, depth_buffer, gbuffer, light_tile_resolved_samples, light_tile_samples, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, view, view_output}
-#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
+#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
 #import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 
@@ -17,7 +17,7 @@ const INITIAL_DI_SAMPLES = 8u;
 const MAX_BOUNCES = 3u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
-// Below this value of mix(1, roughness, metallic) the specular lobe dominates
+// Below this value of mix(1, perceptual_roughness, metallic) the specular lobe dominates
 // and temporal/spatial neighbors rarely share the lobe direction — resampling
 // from them adds variance without quality gain. Pure dielectrics always equal
 // 1.0 here regardless of roughness, so they are never skipped.
@@ -430,8 +430,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
         // Russian roulette on the pathtracer-style full throughput (which is bounded by
         // albedo at each step); scale BOTH throughput trackers to keep them unbiased.
+        // >= so that rr == 0 (throughput hits exactly 0 at grazing angles) is a guaranteed
+        // break even on the rare rand_f() == 0.0, never a 0/0 = NaN in the divides below.
         let rr = saturate(luminance(full_throughput));
-        if rand_f(rng) > rr { break; }
+        if rand_f(rng) >= rr { break; }
         throughput_past_x1 /= rr;
         full_throughput /= rr;
     }
@@ -454,24 +456,29 @@ fn is_unshareable_reservoir(reservoir: Reservoir) -> bool {
 }
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
-    let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
-    let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
-
     if bool(constants.reset) {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
     }
 
+    let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
+    let temporal_pixel_id_float = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
+
+    // If reprojection lands off-screen, intentionally fall back to this pixel's own
+    // previous-frame reservoir rather than dropping history: the dissimilarity check
+    // below still validates the surface, and a same-pixel guess that passes it beats
+    // restarting from a confidence-1 initial reservoir at the screen edge.
     var point_temporal_pixel_id = pixel_id;
     if all(temporal_pixel_id_float >= vec2(0.0)) && all(temporal_pixel_id_float < view.main_pass_viewport.zw) {
         point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
     }
 
-    // constants.frame_index is pre-multiplied by 5782582 (node.rs) for RNG seeding, but
-    // permute_pixel consumes the low 4 bits of a *raw* frame counter as its 4x4 offset
-    // cycle. Fed the pre-multiplied value, the cycle degenerates (x offset only ever 0 or
-    // 2, period 8 overall), which synchronizes temporal-history rejections screen-wide
-    // into visible pulsing under camera motion. Divide the multiplier back out.
-    let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, constants.frame_index / 5782582u, view.main_pass_viewport.zw);
+    // permute_pixel's 4x4 offset cycle wants a random value that is uniform across all
+    // pixels of a frame. constants.frame_index can't be used raw: it's frame_count times
+    // an even multiplier (node.rs), so its low 4 bits cycle degenerately (x offset only
+    // ever 0 or 2, period 8), which synchronizes temporal-history rejections screen-wide
+    // into visible pulsing under camera motion. Hash it once instead.
+    var permute_rng = constants.frame_index;
+    let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, rand_u(&permute_rng), view.main_pass_viewport.zw);
 
     // Check if the pixel features have changed heavily between the current and previous frame
     let temporal_depth = textureLoad(previous_depth_buffer, permuted_temporal_pixel_id, 0);
@@ -507,6 +514,13 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
 fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> NeighborInfo {
     for (var i = 0u; i < 5u; i++) {
         let spatial_pixel_id = get_neighbor_pixel_id(pixel_id, SPATIAL_REUSE_RADIUS_PIXELS, rng);
+
+        // The disk sample can land back on the center pixel. Merging a reservoir with
+        // itself leaves the UCW unchanged but wastes the merge's visibility rays and
+        // double counts confidence — try a different neighbor instead.
+        if all(spatial_pixel_id == pixel_id) {
+            continue;
+        }
 
         let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
         let spatial_surface = gpixel_resolve(textureLoad(gbuffer, spatial_pixel_id, 0), spatial_depth, spatial_pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
@@ -559,10 +573,6 @@ fn jacobian(
     return select(jacobian, 0.0, isinf(jacobian) || isnan(jacobian));
 }
 
-fn isinf(x: f32) -> bool {
-    return (bitcast<u32>(x) & 0x7fffffffu) == 0x7f800000u;
-}
-
 fn empty_reservoir() -> Reservoir {
     return Reservoir(
         vec3(0.0),
@@ -577,7 +587,9 @@ fn empty_reservoir() -> Reservoir {
 struct ReservoirMergeResult {
     merged_reservoir: Reservoir,
     // brdf(wo, wi) * radiance at canonical for the selected sample (already evaluated
-    // inside `reservoir_contribution`; visibility folded in for the "other" branch).
+    // inside `reservoir_contribution`). Unshadowed, but valid to shade with: visibility is
+    // multiplied into the other sample's *target function*, so an occluded other sample
+    // has zero resampling weight and can never be the selected sample.
     // Shade time just multiplies by `unbiased_contribution_weight`.
     selected_sample_brdf_radiance: vec3<f32>,
 }
@@ -602,32 +614,32 @@ fn merge_reservoirs(
     if canonical_reservoir.light_sample.light_id != NULL_LIGHT_ID {
         canonical_resolved = resolve_light_sample(canonical_reservoir.light_sample, light_sources[canonical_reservoir.light_sample.light_id >> 16u]);
     }
-    var other_resolved: ResolvedLightSample;
-    if other_reservoir.light_sample.light_id != NULL_LIGHT_ID {
-        other_resolved = resolve_light_sample(other_reservoir.light_sample, light_sources[other_reservoir.light_sample.light_id >> 16u]);
-    }
 
     let canonical_wo = normalize(view.world_position - canonical_world_position);
     let canonical_NdotV = max(dot(canonical_world_normal, canonical_wo), 0.0001);
     let canonical_F_ab = F_AB(canonical_material.perceptual_roughness, canonical_NdotV);
+    let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
+
+    // Empty neighbor (disocclusion, reset, unshareable/despawned-light rejection, or no
+    // similar spatial pixel found): the merge below degenerates to exactly the canonical
+    // reservoir (t_c = 1 and a zero other-sample weight), so skip the neighbor resolve,
+    // the three cross contributions, the jacobians, and the visibility traces.
+    if other_reservoir.confidence_weight == 0.0 {
+        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
+    }
+
+    var other_resolved: ResolvedLightSample;
+    if other_reservoir.light_sample.light_id != NULL_LIGHT_ID {
+        other_resolved = resolve_light_sample(other_reservoir.light_sample, light_sources[other_reservoir.light_sample.light_id >> 16u]);
+    }
     let other_wo = normalize(other_view_position - other_world_position);
     let other_NdotV = max(dot(other_world_normal, other_wo), 0.0001);
     let other_F_ab = F_AB(other_material.perceptual_roughness, other_NdotV);
 
     // Contributions for resampling and MIS
-    let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
     var other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
     var canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
     let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
-
-    if other_sample_at_canonical.target_function > 0.0 {
-        let vis = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
-        other_sample_at_canonical.target_function *= vis;
-    }
-    if canonical_sample_at_other.target_function > 0.0 {
-        let vis = trace_light_visibility(other_world_position + other_world_normal * RAY_T_MIN, canonical_sample_at_other.sample_world_position);
-        canonical_sample_at_other.target_function *= vis;
-    }
 
     // Jacobians for resampling and MIS. Light samples don't need a reprojection jacobian,
     // since resolve_and_calculate_light_contribution already accounts for the shading point's geometry.
@@ -650,9 +662,30 @@ fn merge_reservoirs(
         );
     }
 
-    // Don't merge samples with huge jacobians, as it explodes the variance
-    if other_sample_at_canonical_jacobian > 8.0 || canonical_sample_at_other_jacobian > 8.0 {
-        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
+    // Shifts with jacobians outside [1/8, 8] are inadmissible — a huge jacobian explodes
+    // variance by inflating the reused sample's weight (or crushing the canonical's MIS
+    // weight via the balance denominator). Each jacobian is zeroed independently so the
+    // MIS weights stay a valid per-sample partition: a zeroed other-sample jacobian kills
+    // only that sample's resampling weight, and a zeroed canonical jacobian only removes
+    // the neighbor term from the canonical's balance denominator (m_c -> 1). The band is
+    // reciprocal-symmetric (J and 1/J fail together), so a shift rejected in one direction
+    // is also rejected in the other and the weights still sum to 1 at every sample point.
+    if other_sample_at_canonical_jacobian < 0.125 || other_sample_at_canonical_jacobian > 8.0 {
+        other_sample_at_canonical_jacobian = 0.0;
+    }
+    if canonical_sample_at_other_jacobian < 0.125 || canonical_sample_at_other_jacobian > 8.0 {
+        canonical_sample_at_other_jacobian = 0.0;
+    }
+
+    // Visibility for the cross-pixel targets. Skipped when the matching jacobian is zero,
+    // since every term the trace would feed is multiplied by that jacobian.
+    if other_sample_at_canonical.target_function > 0.0 && other_sample_at_canonical_jacobian > 0.0 {
+        let vis = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
+        other_sample_at_canonical.target_function *= vis;
+    }
+    if canonical_sample_at_other.target_function > 0.0 && canonical_sample_at_other_jacobian > 0.0 {
+        let vis = trace_light_visibility(other_world_position + other_world_normal * RAY_T_MIN, canonical_sample_at_other.sample_world_position);
+        canonical_sample_at_other.target_function *= vis;
     }
 
     // Defensive pairwise MIS (Wyman et al. 2023 ReSTIR course notes, §7.1.3 Eq 7.8 / Algorithm 7

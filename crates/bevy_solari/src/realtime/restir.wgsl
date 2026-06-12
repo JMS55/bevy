@@ -22,6 +22,10 @@ const CONFIDENCE_WEIGHT_CAP = 8.0;
 // from them adds variance without quality gain. Pure dielectrics always equal
 // 1.0 here regardless of roughness, so they are never skipped.
 const SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD = 0.3;
+// Seed sentinel marking a bounce-0 delta-lobe (mirror) BRDF-emissive sample as unshareable
+// (see the emissive candidate in generate_initial_reservoir). 0xFFFFFFFF is a NaN bit
+// pattern, so it can never collide with a bitcast area_pdf (positive finite) or 0.
+const UNSHAREABLE_SEED = 0xFFFFFFFFu;
 
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -40,10 +44,10 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let wo = normalize(view.world_position - surface.world_position);
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, &rng);
 
-    // Skip resampling for specular-dominated surfaces, and for unshareable (bounce-0
-    // directly-visible-light) samples — the latter must not be merged at all: merging would
-    // out-vote this fresh confidence-1 sample with high-confidence neighbors and discard its
-    // light. It's shaded directly at its own pixel instead.
+    // Skip resampling for specular-dominated surfaces — temporal/spatial neighbors rarely
+    // share the lobe direction, so resampling adds variance without quality gain. Also skip
+    // for unshareable delta-lobe direct-light samples, which must not enter any merge (their
+    // candidate weight would contaminate a merged W that other pixels later reuse).
     if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD
         || is_unshareable_reservoir(initial_reservoir) {
         reservoirs_b[pixel_index] = initial_reservoir;
@@ -87,8 +91,8 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var shade_brdf_radiance: vec3<f32>;
     if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD
         || is_unshareable_reservoir(input_reservoir) {
-        // Specular-dominated, or an unshareable directly-visible-light sample: shade the
-        // input directly without spatial reuse (see initial_and_temporal).
+        // Specular-dominated or unshareable delta-lobe sample: shade the input directly
+        // without spatial reuse (see initial_and_temporal).
         combined_reservoir = input_reservoir;
         var resolved: ResolvedLightSample;
         if input_reservoir.light_sample.light_id != NULL_LIGHT_ID {
@@ -319,30 +323,66 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             // direction by ~N; gated by the p_nee stochastic skip).
             let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(INITIAL_DI_SAMPLES));
 
-            let emissive_L_at_rc = throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
-            let emissive_target = luminance(primary_brdf_at_x2 * emissive_L_at_rc);
-            w_sum += emissive_target;
-            if w_sum > 0.0 && rand_f(rng) * w_sum < emissive_target {
-                // At bounce 0 the reconnection vertex IS the directly-visible light: a single
-                // BRDF-importance-sampled hit. On a broad lobe it's a rare high-variance
-                // "jackpot" — sharing it across pixels over-counts (everyone borrows everyone's
-                // jackpots), so tag it "do not reuse cross-pixel" via the otherwise-unused seed
-                // field (seed == 1). Bounce >= 1 emissive is genuine indirect (x_rc is a diffuse
-                // vertex) and NEE is a separate steady strategy — both reuse fine (seed == 0).
-                //
-                // We tag *all* bounce-0 hits, not just diffuse-lobe ones: the deciding factor is
-                // lobe *tightness*, not which lobe was sampled. A rough surface's specular lobe is
-                // still broad (gating on next_bounce.diffuse_selected leaves those jackpots
-                // shareable and the over-brightness returns). Genuinely tight specular surfaces —
-                // the only ones where this sample would be low-variance enough to share — already
-                // skip all reuse via SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD, so every surface
-                // that actually reaches reuse is broad. See load_temporal/load_spatial_reservoir.
-                let unshareable = select(0u, 1u, bounce == 0u);
-                reservoir.light_sample = LightSample(NULL_LIGHT_ID, unshareable);
-                reservoir.sample_point_world_position = x2_position;
-                reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
-                reservoir.radiance = emissive_L_at_rc;
-                selected_target_function = emissive_target;
+            if bounce == 0u && isinf(p_brdf) {
+                // Delta-lobe (mirror) hit on a directly-visible light. Its density in the
+                // shared solid-angle measure is a Dirac atom: throughput_past_x1 carries the
+                // 1/specular_weight delta convention, which is only meaningful at this pixel —
+                // toward any other pixel the sample's valid contribution weight is zero, so a
+                // finite shared W injects energy (mirror floors near bright emissives visibly
+                // over-brighten). Tag it unshareable: it skips all merging and is shaded
+                // directly at its own pixel (see is_unshareable_reservoir).
+                let emissive_L_at_rc = throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
+                let emissive_target = luminance(primary_brdf_at_x2 * emissive_L_at_rc);
+                w_sum += emissive_target;
+                if w_sum > 0.0 && rand_f(rng) * w_sum < emissive_target {
+                    reservoir.light_sample = LightSample(NULL_LIGHT_ID, UNSHAREABLE_SEED);
+                    reservoir.sample_point_world_position = x2_position;
+                    reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
+                    reservoir.radiance = emissive_L_at_rc;
+                    selected_target_function = emissive_target;
+                }
+            } else if bounce == 0u {
+                // At bounce 0 the reconnection vertex IS the directly-visible light, so the
+                // radiance leaving x2 toward x1 is exactly the material emission — no frozen
+                // sub-path factors. For the sample to be shareable across pixels, its payload
+                // must be a pure function of the path, so two generator-specific factors that
+                // used to be baked into `radiance` move out of it:
+                //  - 1/p_brdf (carried by throughput_past_x1) goes into the candidate weight,
+                //    where inverse pdfs belong — it ends up in W like any sampling density.
+                //  - emissive_mis_weight stays in the target function only, and is recomputed
+                //    from the *evaluating* pixel's surface in reservoir_contribution (exactly
+                //    like the bounce-0 NEE candidate above — see that comment). Both strategy
+                //    weights are then built from the same local pdfs at every evaluator, so
+                //    NEE + emissive partition each light's energy without over-counting.
+                // The evaluator needs the light's area pdf to rebuild the MIS weight; it is
+                // view-independent, so carry it bitcast in the otherwise-unused seed field.
+                // It's always nonzero, which doubles as the sample's tag (bounce >= 1
+                // reconnection samples write seed == 0 and are not reweighted).
+                let emissive_w = luminance(primary_brdf_at_x2 * throughput_past_x1 * ray_hit.material.emissive) * emissive_mis_weight;
+                let emissive_target = luminance(primary_brdf_at_x2 * ray_hit.material.emissive) * emissive_mis_weight;
+                w_sum += emissive_w;
+                if w_sum > 0.0 && rand_f(rng) * w_sum < emissive_w {
+                    reservoir.light_sample = LightSample(NULL_LIGHT_ID, bitcast<u32>(area_pdf));
+                    reservoir.sample_point_world_position = x2_position;
+                    reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
+                    reservoir.radiance = ray_hit.material.emissive;
+                    selected_target_function = emissive_target;
+                }
+            } else {
+                // Bounce >= 1 emissive is genuine indirect: x_rc = x2 is a non-light surface,
+                // and everything past x2 (including this vertex's NEE<->BRDF MIS partition)
+                // is sub-path noise frozen into L_at_rc — the standard reconnection-shift
+                // approximation, fine to reuse as-is.
+                let emissive_L_at_rc = throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
+                let emissive_target = luminance(primary_brdf_at_x2 * emissive_L_at_rc);
+                w_sum += emissive_target;
+                if w_sum > 0.0 && rand_f(rng) * w_sum < emissive_target {
+                    reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
+                    reservoir.sample_point_world_position = x2_position;
+                    reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
+                    reservoir.radiance = emissive_L_at_rc;
+                    selected_target_function = emissive_target;
+                }
             }
         }
 
@@ -402,12 +442,15 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     return reservoir;
 }
 
-// True for a bounce-0 BRDF-emissive (directly-visible-light) reconnection, tagged in the
-// otherwise-unused seed field. These are single, high-variance direct-light samples that
-// must not be reused across pixels (doing so over-counts — see the emissive candidate in
-// generate_initial_reservoir). They are still shaded at their own pixel as the canonical.
+// True for a bounce-0 delta-lobe (mirror) BRDF-emissive sample (directly-visible light
+// through a mirror reflection), tagged via the seed sentinel. Its W carries the
+// 1/specular_weight delta convention, which is only meaningful at the pixel that generated
+// it — in the shared solid-angle measure the sample is a Dirac atom with zero valid
+// contribution weight toward any other pixel, so merging it anywhere injects energy. It is
+// shaded directly at its own pixel instead. (Residual, pre-existing leak: when this
+// candidate *loses* the initial RIS, its weight stays in the w_sum of the shareable winner.)
 fn is_unshareable_reservoir(reservoir: Reservoir) -> bool {
-    return reservoir.light_sample.light_id == NULL_LIGHT_ID && reservoir.light_sample.seed == 1u;
+    return reservoir.light_sample.light_id == NULL_LIGHT_ID && reservoir.light_sample.seed == UNSHAREABLE_SEED;
 }
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
@@ -440,8 +483,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     let temporal_pixel_index = permuted_temporal_pixel_id.x + permuted_temporal_pixel_id.y * u32(view.main_pass_viewport.z);
     var temporal = NeighborInfo(reservoirs_a[temporal_pixel_index], temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material);
 
-    // permute_pixel makes this a cross-pixel lookup, so don't reuse a directly-visible-light
-    // sample from it (would over-count).
+    // Delta-lobe direct-light samples must not be merged (see is_unshareable_reservoir).
     if is_unshareable_reservoir(temporal.reservoir) {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
     }
@@ -474,8 +516,7 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
 
         let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
         let spatial_reservoir = reservoirs_b[spatial_pixel_index];
-        // Spatial reuse is cross-pixel by definition, so skip a neighbor that holds a
-        // directly-visible-light sample (would over-count).
+        // Delta-lobe direct-light samples must not be merged (see is_unshareable_reservoir).
         if is_unshareable_reservoir(spatial_reservoir) {
             continue;
         }
@@ -715,8 +756,31 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         // direction by ~RAY_T_MIN/distance radians — enough to fail the strict
         // NdotH mirror gate in evaluate_specular_brdf at short reconnection
         // distances or grazing angles, zeroing out mirror reflections at shade.
-        let wi = normalize(reservoir.sample_point_world_position - (world_position + world_normal * RAY_T_MIN));
-        let brdf_radiance = reservoir.radiance * evaluate_brdf(wo, wi, world_normal, material, F_ab);
+        let delta = reservoir.sample_point_world_position - (world_position + world_normal * RAY_T_MIN);
+        let sample_distance = length(delta);
+        let wi = delta / sample_distance;
+        var brdf_radiance = reservoir.radiance * evaluate_brdf(wo, wi, world_normal, material, F_ab);
+
+        // Bounce-0 BRDF-emissive sample (directly-visible light): the seed field carries the
+        // light triangle's bitcast area pdf and the stored radiance is the raw emission.
+        // Rebuild the MIS weight against THIS surface's NEE strategy — the dual of
+        // nee_mis_weight above, mirroring the emissive candidate in
+        // generate_initial_reservoir. Both strategy weights are then built from the same
+        // local pdfs, so NEE + emissive partition each light's energy at every evaluating
+        // pixel and the sample can be reused across pixels without over-counting.
+        // Unshareable delta-lobe samples are excluded: they keep the old payload convention
+        // (throughput and MIS weight baked into radiance) and are only ever shaded at their
+        // own pixel, so no reweight applies.
+        if reservoir.light_sample.seed != 0u && reservoir.light_sample.seed != UNSHAREABLE_SEED {
+            let area_pdf = bitcast<f32>(reservoir.light_sample.seed);
+            let light_normal = octahedral_decode(reservoir.sample_point_world_normal);
+            let cos_theta_light = max(dot(-wi, light_normal), 0.0001);
+            let p_light = area_pdf * sample_distance * sample_distance / cos_theta_light;
+            let p_nee = mix(1.0, material.perceptual_roughness, material.metallic);
+            let p_brdf = brdf_pdf(wo, wi, world_normal, material, F_ab);
+            brdf_radiance *= power_heuristic(p_brdf, p_light * p_nee * f32(INITIAL_DI_SAMPLES));
+        }
+
         return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), vec4(reservoir.sample_point_world_position, 1.0));
     } else {
         return ReservoirContribution(vec3(0.0), 0.0, vec4(reservoir.sample_point_world_position, 1.0));

@@ -68,7 +68,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let prev_camera_homog = previous_view.world_from_clip * (previous_view.clip_from_view * vec4(0.0, 0.0, 0.0, 1.0));
     let prev_camera_world_position = prev_camera_homog.xyz / prev_camera_homog.w;
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material,
-        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, prev_camera_world_position, &rng);
+        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, prev_camera_world_position, false, &rng);
 
     reservoirs_b[pixel_index] = merge_result.merged_reservoir;
 }
@@ -109,7 +109,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     } else {
         let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
         let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
-            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, view.world_position, &rng);
+            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, view.world_position, true, &rng);
         combined_reservoir = merge_result.merged_reservoir;
         shade_brdf_radiance = merge_result.selected_sample_brdf_radiance;
     }
@@ -677,6 +677,7 @@ fn merge_reservoirs(
     // reuse — using current view there gives a wrong wo at the temporal pixel, biasing
     // p̂_n's BRDF and thus the m_n MIS weight under camera motion (notably zoom).
     other_view_position: vec3<f32>,
+    is_spatial: bool,
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
     var canonical_resolved: ResolvedLightSample;
@@ -768,7 +769,7 @@ fn merge_reservoirs(
     // so unlike a hard canonical fallback it cannot leak energy / over-brighten. When the neighbor
     // is empty (c_n = 0) it collapses to t_c = 1 -> canonical keeps full weight.
     let total_confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
-    let defensive_t_c = select(1.0, canonical_reservoir.confidence_weight / total_confidence_weight, total_confidence_weight > 0.0);
+    let defensive_t_c = f32(is_spatial) * select(1.0, canonical_reservoir.confidence_weight / total_confidence_weight, total_confidence_weight > 0.0);
 
     // Resampling weight for canonical sample
     let canonical_balance_mis_weight = balance_heuristic(

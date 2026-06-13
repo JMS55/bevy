@@ -47,7 +47,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
     let wo = normalize(view.world_position - surface.world_position);
-    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, &rng);
+    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, global_id.xy, &rng);
     let initial_reservoir = initial.reservoir;
 
     // Stage the directly-accumulated mirror-emissive contribution for spatial_and_shade,

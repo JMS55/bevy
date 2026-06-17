@@ -31,6 +31,22 @@ const CONFIDENCE_WEIGHT_CAP = 8.0;
 // from them adds variance without quality gain. Pure dielectrics always equal
 // 1.0 here regardless of roughness, so they are never skipped.
 const SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD = 0.3;
+// === Footprint-based reconnection criteria (ReSTIR PT Enhanced 2026, Section 4) ===
+// A path's x1 -> x2 reconnection segment is only entered into the reservoir (i.e. shared with
+// other pixels) when reusing it stays low variance. Otherwise the path is shaded directly into
+// this pixel and never published, which avoids the correlated specular fireflies a reconnection
+// shift through a sharp BSDF lobe produces (see generate_initial_reservoir).
+//
+// Ray-footprint multiplier: the area a sample represents at x2 (when traced from x1) must be at
+// least (KAPPA / 100) of the primary ray footprint. Smaller footprints — a sharp lobe and/or a
+// short x1 -> x2 segment — fail the test. Larger KAPPA is more conservative (excludes more).
+// ReSTIR PT Enhanced uses 0.02; calibrate by eye, raising it if specular blobs persist.
+const RECONNECTION_FOOTPRINT_KAPPA = 0.02;
+// Roughness guard (Enhanced Section 4.2). Used as a single-vertex floor at x1 for specular-lobe
+// samples (footprint bounds get unreliable at very low roughness / high curvature), and as the
+// specular-dominance cutoff at x2 (a sharper reflector there makes the stored radiance
+// view-dependent and unsafe to reuse from a neighbor's connection direction).
+const RECONNECTION_ROUGHNESS_MIN = 0.3;
 
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -50,10 +66,10 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, global_id.xy, &rng);
     let initial_reservoir = initial.reservoir;
 
-    // Stage the directly-accumulated mirror-emissive contribution for spatial_and_shade,
-    // which reads it back out of view_output and adds it to the final pixel color. Written
-    // unconditionally (it is usually zero) so the read never sees a stale value.
-    textureStore(view_output, global_id.xy, vec4(initial.mirror_emissive_radiance, 0.0));
+    // Stage the directly-accumulated non-resampled radiance (mirror / sharp-specular paths) for
+    // spatial_and_shade, which reads it back out of view_output and adds it to the final pixel
+    // color. Written unconditionally (it is usually zero) so the read never sees a stale value.
+    textureStore(view_output, global_id.xy, vec4(initial.non_resampled_radiance, 0.0));
 
     // Skip resampling for specular-dominated surfaces — temporal/spatial neighbors rarely
     // share the lobe direction, so resampling adds variance without quality gain.
@@ -138,15 +154,16 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // The primary BRDF*cos is *not* baked into L_at_rc; it is applied externally.
 struct InitialSamplingResult {
     reservoir: Reservoir,
-    // Bounce-0 delta-lobe (mirror) BRDF hit on an emissive surface, accumulated directly
-    // into the pixel instead of resampled (see the emissive candidate below).
-    mirror_emissive_radiance: vec3<f32>,
+    // Radiance from path candidates that are not reuse-safe — mirror/sharp-lobe reconnections
+    // that fail the footprint criteria, and directly-visible mirror emitters. Accumulated
+    // straight into the pixel instead of being published into the reservoir for reuse.
+    non_resampled_radiance: vec3<f32>,
 }
 
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, pixel_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
     var reservoir = empty_reservoir();
     reservoir.confidence_weight = 1.0;
-    var mirror_emissive_radiance = vec3(0.0);
+    var non_resampled_radiance = vec3(0.0);
     var w_sum = 0.0;
     var selected_target_function = 0.0;
 
@@ -180,6 +197,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var x2_position = vec3(0.0);
     var x2_normal = vec3(0.0);
     var x2_set = false;
+    // Whether the x1 -> x2 reconnection is reuse-safe (decided once in the x2-capture block via
+    // the footprint criteria). When false, every reconnection candidate built on x2 is shaded
+    // directly into non_resampled_radiance instead of being published into the reservoir.
+    var x2_reusable = false;
     // Computed once when x2 is captured; reused by every bounce >= 1 candidate plus the
     // bounce-0 emissive/cache candidates (all of which apply the primary BRDF at the
     // x1 -> x2 direction). Also reused in the bounce-0 throughput step (where the
@@ -291,14 +312,20 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                     // is the BRDF at this vertex toward the chosen light.
                     let di_W = di_weight_sum / di_selected_target;
                     let L_at_rc = throughput_past_x1 * di_selected_brdf_current * di_selected_radiance * vis * di_W * nee_mis_weight / p_nee;
-                    let nee_target = luminance(primary_brdf_at_x2 * L_at_rc);
-                    w_sum += nee_target;
-                    if w_sum > 0.0 && rand_f(rng) * w_sum < nee_target {
-                        reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
-                        reservoir.sample_point_world_position = x2_position;
-                        reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
-                        reservoir.radiance = L_at_rc;
-                        selected_target_function = nee_target;
+                    if !x2_reusable {
+                        // x1 -> x2 not reuse-safe: shade directly instead of publishing (see
+                        // the footprint criterion in the x2-capture block).
+                        non_resampled_radiance += primary_brdf_at_x2 * L_at_rc;
+                    } else {
+                        let nee_target = luminance(primary_brdf_at_x2 * L_at_rc);
+                        w_sum += nee_target;
+                        if w_sum > 0.0 && rand_f(rng) * w_sum < nee_target {
+                            reservoir.light_sample = LightSample(NULL_LIGHT_ID, 0u);
+                            reservoir.sample_point_world_position = x2_position;
+                            reservoir.sample_point_world_normal = octahedral_encode(x2_normal);
+                            reservoir.radiance = L_at_rc;
+                            selected_target_function = nee_target;
+                        }
                     }
                 }
             }
@@ -342,6 +369,35 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             // is enough to push NdotH below the strict 1 - 0.0001 mirror threshold
             // in evaluate_specular_brdf and zero out the BRDF for mirror metals.
             primary_brdf_at_x2 = evaluate_brdf(wo, next_bounce.wi, world_normal, material, primary_F_ab);
+
+            // === Footprint-based reconnection criterion (ReSTIR PT Enhanced 2026, Section 4) ===
+            // Decided once for the x1 -> x2 segment that every reconnection candidate shares.
+            // ray_footprint = 1 / (p_sigma(x1->x2) * G(x1->x2)) = t^2 / (p_brdf * cos_x2) is the
+            // area a sample represents at x2; it goes to 0 for mirror lobes (p_brdf = INF) and
+            // shrinks for sharp lobes or short segments. The primary footprint uses a uniform
+            // 1/(4*PI) reference density, so the test trades roughness against distance — a sharp
+            // lobe is reusable only at long range.
+            let cos_x2 = max(dot(ray_hit.world_normal, -next_bounce.wi), 0.0001);
+            let ray_footprint = (ray.t * ray.t) / (next_bounce.pdf * cos_x2);
+            let primary_dist = length(view.world_position - world_position);
+            let primary_footprint = 4.0 * PI * primary_dist * primary_dist / primary_NdotV;
+            let footprint_ok = ray_footprint >= (RECONNECTION_FOOTPRINT_KAPPA / 100.0) * primary_footprint;
+
+            // Single-vertex roughness floor at x1, applied only to specular-lobe samples (a
+            // diffuse-lobe bounce is always "rough"); guards low-roughness / high-curvature
+            // cases where the footprint bound is unreliable (Enhanced Section 4.2).
+            let x1_lobe_ok = next_bounce.diffuse_selected || material.perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN;
+
+            // Inverse-footprint guard at the reconnection vertex x2: a sharp specular reflector
+            // there makes the stored outgoing radiance view-dependent and wrong when reused from
+            // a neighbor's connection direction. mix(1, roughness, metallic) is low only for
+            // low-roughness metals; diffuse-dominated dielectrics, rough surfaces, and emissive
+            // light vertices are reuse-safe. (Conservative proxy for the exact inverse ray
+            // footprint, which needs x2's continuation-lobe pdf a bounce later.)
+            let x2_is_light = any(ray_hit.material.emissive > vec3(0.0));
+            let x2_end_ok = x2_is_light || mix(1.0, ray_hit.material.perceptual_roughness, ray_hit.material.metallic) >= RECONNECTION_ROUGHNESS_MIN;
+
+            x2_reusable = footprint_ok && x1_lobe_ok && x2_end_ok;
             x2_set = true;
         }
 
@@ -372,18 +428,15 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             // direction by ~N; gated by the p_nee stochastic skip).
             let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(di_samples));
 
-            if bounce == 0u && isinf(p_brdf) {
-                // Delta-lobe (mirror) hit on a directly-visible light. Its density in the
-                // shared solid-angle measure is a Dirac atom: throughput_past_x1 carries the
-                // 1/specular_weight delta convention, which is only meaningful at this pixel —
-                // toward any other pixel the sample's valid contribution weight is zero, so a
-                // finite shared W injects energy (mirror floors near bright emissives visibly
-                // over-brighten). It also must not compete in this RIS at all: even when it
-                // loses, its candidate weight would stay in w_sum and inflate the shareable
-                // winner's W. The contribution is fully determined by the traced path, so
-                // resampling can't improve it anyway — accumulate it directly into the pixel.
-                // (emissive_mis_weight is exactly 1 here since p_brdf is infinite.)
-                mirror_emissive_radiance = primary_brdf_at_x2 * throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
+            if !x2_reusable {
+                // x1 -> x2 reconnection is not reuse-safe (mirror/sharp lobe, or footprint /
+                // roughness gate failed). The contribution is fully determined by the traced
+                // path and only valid at this pixel, so accumulate it directly rather than
+                // publishing it into the reservoir — a shift to a neighbor would otherwise
+                // either waste it or inflate it into a correlated firefly. This generalizes the
+                // original mirror-emissive special case: mirror lobes always land here (p_brdf =
+                // INF -> ray_footprint = 0), where emissive_mis_weight is exactly 1.
+                non_resampled_radiance += primary_brdf_at_x2 * throughput_past_x1 * ray_hit.material.emissive * emissive_mis_weight;
             } else if bounce == 0u {
                 // At bounce 0 the reconnection vertex IS the directly-visible light, so the
                 // radiance leaving x2 toward x1 is exactly the material emission — no frozen
@@ -452,6 +505,11 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                 // previous vertex (matches the old restir_gi.wgsl convention).
                 let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
                 let cache_L_at_rc = throughput_past_x1 * cache_outgoing;
+                if !x2_reusable {
+                    // x1 -> x2 not reuse-safe: shade directly instead of publishing.
+                    non_resampled_radiance += primary_brdf_at_x2 * cache_L_at_rc;
+                    break;
+                }
                 let cache_target = luminance(primary_brdf_at_x2 * cache_L_at_rc);
                 w_sum += cache_target;
                 if w_sum > 0.0 && rand_f(rng) * w_sum < cache_target {
@@ -484,7 +542,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     if selected_target_function > 0.0 {
         reservoir.unbiased_contribution_weight = w_sum / selected_target_function;
     }
-    return InitialSamplingResult(reservoir, mirror_emissive_radiance);
+    return InitialSamplingResult(reservoir, non_resampled_radiance);
 }
 
 #ifdef DLSS_RR_GUIDE_BUFFERS

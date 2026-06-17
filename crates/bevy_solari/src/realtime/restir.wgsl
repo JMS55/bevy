@@ -748,11 +748,28 @@ fn merge_reservoirs(
     let canonical_F_ab = F_AB(canonical_material.perceptual_roughness, canonical_NdotV);
     let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
 
-    // Empty neighbor (disocclusion, reset, despawned-light rejection, or no
-    // similar spatial pixel found): the merge below degenerates to exactly the canonical
-    // reservoir (t_c = 1 and a zero other-sample weight), so skip the neighbor resolve,
-    // the three cross contributions, the jacobians, and the visibility traces.
-    if other_reservoir.confidence_weight == 0.0 {
+    // Empty neighbor (disocclusion, reset, despawned-light rejection, no similar spatial pixel
+    // found, or a reservoir left empty because its surface was shadowed for several frames):
+    // the merge below degenerates to exactly the canonical reservoir (t_c = 1 and a zero
+    // other-sample weight), so skip the neighbor resolve, the three cross contributions, the
+    // jacobians, and the visibility traces.
+    //
+    // The emptiness test (not just confidence_weight == 0) is what fixes moving-occluder shadow
+    // lag. A point shadowed for several frames keeps merging a fresh empty reservoir with its
+    // also-empty history, so the stored reservoir holds no sample yet its confidence_weight
+    // climbs to the cap. Without treating empty-but-confident as no-neighbor, the frame the
+    // occluder moves away the fresh, correctly-lit canonical would be MIS-weighted against that
+    // stale confidence (via the c_n * canonical_sample_at_other term in the balance denominator)
+    // and suppressed to ~c_c / (c_c + c_n) of its true value, ramping back to full only over the
+    // confidence-cap window. Returning canonical's own (already unbiased) estimate makes the
+    // reveal snap to full strength in one frame.
+    //
+    // Only *empty* reservoirs qualify. A neighbor that holds a valid sample merely occluded at
+    // this pixel keeps its confidence, so its legitimate balance-heuristic share still applies
+    // (m_c < 1) — short-circuiting those would over-count the canonical and over-brighten static
+    // penumbrae, multi-light regions, and surfaces with occluded-here GI reconnections.
+    let other_is_empty = other_reservoir.light_sample.light_id == NULL_LIGHT_ID && all(other_reservoir.radiance == vec3(0.0));
+    if other_reservoir.confidence_weight == 0.0 || other_is_empty {
         return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
     }
 

@@ -213,12 +213,10 @@ fn calculate_resolved_light_contribution(resolved_light_sample: ResolvedLightSam
 
     let cos_theta_light = saturate(dot(-wi, resolved_light_sample.world_normal));
     let light_distance_squared = light_distance * light_distance;
+    let denominator = cos_theta_light / light_distance_squared;
 
-    let radiance = resolved_light_sample.radiance * (cos_theta_light / light_distance_squared);
-
-    // For directional lights, world_position.w == 0, light_distance == 1, cos_theta_light == 1,
-    // so this collapses to inverse_pdf (which is already a solid-angle pdf for directional cones).
-    let inverse_solid_angle_pdf = resolved_light_sample.inverse_pdf * cos_theta_light / light_distance_squared;
+    let radiance = resolved_light_sample.radiance * denominator;
+    let inverse_solid_angle_pdf = resolved_light_sample.inverse_pdf * denominator;
 
     return LightContribution(radiance, resolved_light_sample.inverse_pdf, inverse_solid_angle_pdf, wi, resolved_light_sample.world_position.w == 1.0);
 }

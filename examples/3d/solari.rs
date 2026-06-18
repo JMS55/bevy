@@ -571,7 +571,6 @@ fn update_control_text(
     robot_light_material: Option<Res<RobotLightMaterial>>,
     materials: Res<Assets<StandardMaterial>>,
     directional_light: Query<Entity, With<DirectionalLight>>,
-    solari_lighting: Single<&SolariLighting>,
     time: Res<Time<Virtual>>,
     args: Res<Args>,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_rr_supported: Option<

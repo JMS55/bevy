@@ -48,8 +48,16 @@ const RECONNECTION_FOOTPRINT_KAPPA = 0.02;
 // view-dependent and unsafe to reuse from a neighbor's connection direction).
 const RECONNECTION_ROUGHNESS_MIN = 0.3;
 
+// Split out of the former `initial_and_temporal` megakernel: generating the initial reservoir
+// (a 3-bounce path-traced candidate) and merging it with temporal history are now separate
+// dispatches. Fused, the path-tracing loop's loop-carried live set and merge_reservoirs' four
+// inlined reservoir_contribution evaluations shared one register budget, capping occupancy.
+// Split, each kernel's peak live set is far smaller. `initial` publishes its candidate into
+// reservoirs_b[pixel]; `temporal` reads that same pixel back (plus reprojected history from
+// reservoirs_a) and rewrites it in place — no cross-pixel hazard on reservoirs_b, so no third
+// buffer is needed.
 @compute @workgroup_size(8, 8, 1)
-fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
+fn initial(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
@@ -64,17 +72,38 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
 
     let wo = normalize(view.world_position - surface.world_position);
     let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, global_id.xy, &rng);
-    let initial_reservoir = initial.reservoir;
 
     // Stage the directly-accumulated non-resampled radiance (mirror / sharp-specular paths) for
     // spatial_and_shade, which reads it back out of view_output and adds it to the final pixel
     // color. Written unconditionally (it is usually zero) so the read never sees a stale value.
     textureStore(view_output, global_id.xy, vec4(initial.non_resampled_radiance, 0.0));
 
+    // Publish the candidate for `temporal` to read back. For specular-dominated surfaces this is
+    // also the final reservoir (temporal skips them with the same threshold check below).
+    reservoirs_b[pixel_index] = initial.reservoir;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
+
+    let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
+    // Distinct RNG stream from `initial` (which seeds pixel_index + frame_index): the merge's
+    // sample-selection draws would otherwise correlate with the candidate generation that
+    // produced the sample. Offset by a SHA-512 fractional constant (cf. spatial_and_shade).
+    var rng = pixel_index + constants.frame_index + 0xBB67AE85u;
+
+    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    // depth == 0.0 already wrote an empty reservoir in `initial`; nothing to merge.
+    if depth == 0.0 { return; }
+
+    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    let initial_reservoir = reservoirs_b[pixel_index];
+
     // Skip resampling for specular-dominated surfaces — temporal/spatial neighbors rarely
-    // share the lobe direction, so resampling adds variance without quality gain.
+    // share the lobe direction, so resampling adds variance without quality gain. The candidate
+    // `initial` already published stands as the final reservoir.
     if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
-        reservoirs_b[pixel_index] = initial_reservoir;
         return;
     }
 
@@ -94,9 +123,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    // Constant offset gives this pass a distinct RNG stream: initial_and_temporal seeds
-    // with the same pixel_index + frame_index and would otherwise replay the identical
-    // rand sequence in this pass.
+    // Constant offset gives this pass a distinct RNG stream: the initial/temporal passes seed
+    // with the same pixel_index + frame_index (+ their own offsets) and would otherwise replay
+    // an overlapping rand sequence in this pass.
     var rng = pixel_index + constants.frame_index + 0x6A09E667u;
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
@@ -114,8 +143,8 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var combined_reservoir: Reservoir;
     var shade_brdf_radiance: vec3<f32>;
     if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
-        // Specular-dominated: shade the input directly without spatial reuse (see
-        // initial_and_temporal).
+        // Specular-dominated: shade the input directly without spatial reuse (see the
+        // matching threshold check in `temporal`).
         combined_reservoir = input_reservoir;
         var resolved: ResolvedLightSample;
         if input_reservoir.light_sample.light_id != NULL_LIGHT_ID {
@@ -134,7 +163,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var pixel_color = shade_brdf_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color += surface.material.emissive;
-    // Mirror-emissive contribution staged in view_output by initial_and_temporal.
+    // Mirror-emissive contribution staged in view_output by the `initial` pass.
     pixel_color += textureLoad(view_output, global_id.xy).rgb;
     pixel_color *= view.exposure;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));

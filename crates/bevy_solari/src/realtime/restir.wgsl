@@ -30,7 +30,7 @@ const CONFIDENCE_WEIGHT_CAP = 8.0;
 // and temporal/spatial neighbors rarely share the lobe direction — resampling
 // from them adds variance without quality gain. Pure dielectrics always equal
 // 1.0 here regardless of roughness, so they are never skipped.
-const SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD = 0.3;
+const SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD = 0.2;
 // === Footprint-based reconnection criteria (ReSTIR PT Enhanced 2026, Section 4) ===
 // A path's x1 -> x2 reconnection segment is only entered into the reservoir (i.e. shared with
 // other pixels) when reusing it stays low variance. Otherwise the path is shaded directly into

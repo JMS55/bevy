@@ -91,10 +91,6 @@ fn isnan(x: f32) -> bool {
     return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
 }
 
-fn isinf(x: f32) -> bool {
-    return (bitcast<u32>(x) & 0x7fffffffu) == 0x7f800000u;
-}
-
 const NULL_LIGHT_ID = 0xFFFFFFFFu;
 
 struct LightSample {

@@ -83,6 +83,10 @@ fn ggx_vndf_pdf(wi_tangent: vec3<f32>, wo_tangent: vec3<f32>, roughness: f32) ->
     return select(pdf, 0.0, isnan(pdf));
 }
 
+fn isinf(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7fffffffu) == 0x7f800000u;
+}
+
 fn isnan(x: f32) -> bool {
     return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
 }
@@ -108,8 +112,9 @@ struct ResolvedLightSample {
 struct LightContribution {
     radiance: vec3<f32>,
     inverse_pdf: f32,
-    // Solid-angle-domain inverse PDF at the shading point, for MIS against BRDF sampling.
-    // For directional lights this equals inverse_pdf (already in solid angle).
+    // inverse_pdf may not be in solid angle measure (e.g. area measure)
+    // but inverse_solid_angle_pdf is always in solid angle measure
+    // for cases where it's required, e.g. MIS between light sampling techniques
     inverse_solid_angle_pdf: f32,
     wi: vec3<f32>,
     brdf_rays_can_hit: bool,
@@ -132,10 +137,6 @@ fn sample_random_light(ray_origin: vec3<f32>, origin_world_normal: vec3<f32>, rn
     return light_contribution;
 }
 
-// Solid-angle-domain PDF (at the originating shading point) for sampling the emissive
-// triangle that the BRDF-sampled ray landed on. ray_distance is the distance from the
-// shading point to the hit; NdotV is the cosine between the hit's normal and the
-// direction back toward the shading point (= cos_theta_light for this sample).
 fn random_emissive_light_pdf(hit: ResolvedRayHitFull, ray_distance: f32, NdotV: f32) -> f32 {
     let light_count = arrayLength(&light_sources);
     let area_pdf = 1.0 / (f32(light_count) * f32(hit.triangle_count) * hit.triangle_area);

@@ -109,8 +109,6 @@ pub fn solari_lighting(
         return;
     };
 
-    // The PSR variant additionally writes the DLSS RR guide buffers, so it can only be
-    // used when the view has them.
     #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
     let initial_pipeline = pipelines.initial_pipeline;
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -226,8 +224,6 @@ pub fn solari_lighting(
         )
     });
 
-    // Mostly arbitrary, but must differ from the tile-id multiplier in
-    // presample_light_tiles.wgsl (see the comment there).
     let frame_index = frame_count.0.wrapping_mul(5782582);
 
     let diagnostics = ctx.diagnostic_recorder();
@@ -329,7 +325,6 @@ pub fn solari_lighting(
 
     let d = diagnostics.time_span(&mut pass, "solari_lighting/lighting");
 
-    // The PSR pipeline variant writes the DLSS RR guide buffers via bind group 2.
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
         pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);

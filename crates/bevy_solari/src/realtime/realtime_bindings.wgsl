@@ -4,7 +4,7 @@ enable wgpu_ray_query;
 
 #import bevy_render::view::View
 #import bevy_pbr::prepass_bindings::PreviousViewUniforms
-#import bevy_solari::sampling::LightSample
+#import bevy_solari::sampling::{LightSample, NULL_LIGHT_ID}
 
 @group(1) @binding(0) var view_output: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(1) var<storage, read_write> light_tile_samples: array<LightSample>;
@@ -41,7 +41,9 @@ enable wgpu_ray_query;
 @group(2) @binding(3) var specular_motion_vectors: texture_storage_2d<rg16float, write>;
 #endif
 
-struct PushConstants { frame_index: u32, reset: u32 }
+struct PushConstants {
+    frame_index: u32,
+    reset: u32}
 var<immediate> constants: PushConstants;
 
 // Don't adjust the size of this struct without also adjusting `prepare::RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE`.
@@ -64,9 +66,19 @@ struct Reservoir {
     light_sample: LightSample,
 }
 
+fn empty_reservoir() -> Reservoir {
+    return Reservoir(
+        vec3(0.0),
+        0.0,
+        vec3(0.0),
+        0.0,
+        vec2(0.0),
+        LightSample(NULL_LIGHT_ID, 0u),
+    );
+}
+
 struct WorldCacheGeometryData {
     world_position: vec3<f32>,
     padding_a: u32,
     world_normal: vec3<f32>,
-    padding_b: u32
-}
+    padding_b: u32}

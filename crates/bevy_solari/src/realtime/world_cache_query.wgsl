@@ -100,7 +100,7 @@ fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>, ray_t: f32
     let lod = floor(lod_f) + select(0.0, 1.0, rand_f(rng) < lod_fract * lod_fract * lod_fract);
     var cell_size = WORLD_CACHE_POSITION_BASE_CELL_SIZE * exp2(lod);
 
-// Reduce light leaks
+    // Reduce light leaks
     if ray_t < cell_size {
         let shrunk_lod = max(floor(log2(ray_t / WORLD_CACHE_POSITION_BASE_CELL_SIZE)), 0.0);
         cell_size = WORLD_CACHE_POSITION_BASE_CELL_SIZE * exp2(shrunk_lod);

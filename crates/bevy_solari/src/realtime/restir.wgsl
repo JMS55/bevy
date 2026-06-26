@@ -19,43 +19,17 @@ enable wgpu_ray_query;
 #endif
 
 const INITIAL_DI_SAMPLES = 8u;
-// NEE RIS candidates at bounce >= 1 vertices. Their result is frozen into the reconnection
-// payload (L_at_rc) as sub-path noise, where extra candidates are far less visible than at
-// bounce 0 (whose candidate directly becomes the resampled target). Quality/perf knob.
 const SECONDARY_DI_SAMPLES = 4u;
 const MAX_BOUNCES = 3u;
-const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
+
 const CONFIDENCE_WEIGHT_CAP = 8.0;
-// Below this value of mix(1, perceptual_roughness, metallic) the specular lobe dominates
-// and temporal/spatial neighbors rarely share the lobe direction — resampling
-// from them adds variance without quality gain. Pure dielectrics always equal
-// 1.0 here regardless of roughness, so they are never skipped.
+
+const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD = 0.2;
-// === Footprint-based reconnection criteria (ReSTIR PT Enhanced 2026, Section 4) ===
-// A path's x1 -> x2 reconnection segment is only entered into the reservoir (i.e. shared with
-// other pixels) when reusing it stays low variance. Otherwise the path is shaded directly into
-// this pixel and never published, which avoids the correlated specular fireflies a reconnection
-// shift through a sharp BSDF lobe produces (see generate_initial_reservoir).
-//
-// Ray-footprint multiplier: the area a sample represents at x2 (when traced from x1) must be at
-// least (KAPPA / 100) of the primary ray footprint. Smaller footprints — a sharp lobe and/or a
-// short x1 -> x2 segment — fail the test. Larger KAPPA is more conservative (excludes more).
-// ReSTIR PT Enhanced uses 0.02; calibrate by eye, raising it if specular blobs persist.
+
 const RECONNECTION_FOOTPRINT_KAPPA = 0.02;
-// Roughness guard (Enhanced Section 4.2). Used as a single-vertex floor at x1 for specular-lobe
-// samples (footprint bounds get unreliable at very low roughness / high curvature), and as the
-// specular-dominance cutoff at x2 (a sharper reflector there makes the stored radiance
-// view-dependent and unsafe to reuse from a neighbor's connection direction).
 const RECONNECTION_ROUGHNESS_MIN = 0.3;
 
-// Split out of the former `initial_and_temporal` megakernel: generating the initial reservoir
-// (a 3-bounce path-traced candidate) and merging it with temporal history are now separate
-// dispatches. Fused, the path-tracing loop's loop-carried live set and merge_reservoirs' four
-// inlined reservoir_contribution evaluations shared one register budget, capping occupancy.
-// Split, each kernel's peak live set is far smaller. `initial` publishes its candidate into
-// reservoirs_b[pixel]; `temporal` reads that same pixel back (plus reprojected history from
-// reservoirs_a) and rewrites it in place — no cross-pixel hazard on reservoirs_b, so no third
-// buffer is needed.
 @compute @workgroup_size(8, 8, 1)
 fn initial(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
@@ -70,16 +44,9 @@ fn initial(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invoc
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    let wo = normalize(view.world_position - surface.world_position);
-    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, wo, surface.material, workgroup_id.xy, global_id.xy, &rng);
+    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.material, workgroup_id.xy, global_id.xy, &rng);
 
-    // Stage the directly-accumulated non-resampled radiance (mirror / sharp-specular paths) for
-    // spatial_and_shade, which reads it back out of view_output and adds it to the final pixel
-    // color. Written unconditionally (it is usually zero) so the read never sees a stale value.
     textureStore(view_output, global_id.xy, vec4(initial.non_resampled_radiance, 0.0));
-
-    // Publish the candidate for `temporal` to read back. For specular-dominated surfaces this is
-    // also the final reservoir (temporal skips them with the same threshold check below).
     reservoirs_b[pixel_index] = initial.reservoir;
 }
 
@@ -88,28 +55,19 @@ fn temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    // Distinct RNG stream from `initial` (which seeds pixel_index + frame_index): the merge's
-    // sample-selection draws would otherwise correlate with the candidate generation that
-    // produced the sample. Offset by a SHA-512 fractional constant (cf. spatial_and_shade).
     var rng = pixel_index + constants.frame_index + 0xBB67AE85u;
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
-    // depth == 0.0 already wrote an empty reservoir in `initial`; nothing to merge.
     if depth == 0.0 { return; }
-
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
     let initial_reservoir = reservoirs_b[pixel_index];
 
-    // Skip resampling for specular-dominated surfaces — temporal/spatial neighbors rarely
-    // share the lobe direction, so resampling adds variance without quality gain. The candidate
-    // `initial` already published stands as the final reservoir.
+    // Performance improvement: Skip resampling for low-roughness metallic surfaces
     if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
         return;
     }
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
-    // PreviousViewUniforms doesn't expose world_position — derive it as the world-space image of the
-    // view-space origin: world_from_view * (0,0,0,1), with world_from_view = world_from_clip * clip_from_view.
     let prev_camera_homog = previous_view.world_from_clip * (previous_view.clip_from_view * vec4(0.0, 0.0, 0.0, 1.0));
     let prev_camera_world_position = prev_camera_homog.xyz / prev_camera_homog.w;
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material,
@@ -123,9 +81,6 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    // Constant offset gives this pass a distinct RNG stream: the initial/temporal passes seed
-    // with the same pixel_index + frame_index (+ their own offsets) and would otherwise replay
-    // an overlapping rand sequence in this pass.
     var rng = pixel_index + constants.frame_index + 0x6A09E667u;
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
@@ -143,8 +98,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var combined_reservoir: Reservoir;
     var shade_brdf_radiance: vec3<f32>;
     if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
-        // Specular-dominated: shade the input directly without spatial reuse (see the
-        // matching threshold check in `temporal`).
+        // Performance improvement: Skip resampling for low-roughness metallic surfaces
         combined_reservoir = input_reservoir;
         var resolved: ResolvedLightSample;
         if input_reservoir.light_sample.light_id != NULL_LIGHT_ID {
@@ -163,7 +117,6 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var pixel_color = shade_brdf_radiance * combined_reservoir.unbiased_contribution_weight;
     pixel_color += surface.material.emissive;
-    // Mirror-emissive contribution staged in view_output by the `initial` pass.
     pixel_color += textureLoad(view_output, global_id.xy).rgb;
     pixel_color *= view.exposure;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
@@ -173,23 +126,13 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 #endif
 }
 
-// Unified-reservoir ReSTIR PT: every candidate is a complete path described by a
-// reconnection vertex x_rc and the radiance L_at_rc leaving x_rc toward x1.
-//   - Length-1 paths (bounce-0 NEE): x_rc = the chosen light vertex.
-//   - Length >= 2 paths: x_rc = x2 (the first BRDF-sampled hit), regardless of how
-//     many more bounces follow. Deeper NEE/emissive contributions are folded into
-//     L_at_x_rc via the throughput_past_x1 factor.
-// At shade time: pixel = brdf(x1, x1->rc) * L_at_rc * visibility(x1, rc) * W.
-// The primary BRDF*cos is *not* baked into L_at_rc; it is applied externally.
 struct InitialSamplingResult {
     reservoir: Reservoir,
-    // Radiance from path candidates that are not reuse-safe — mirror/sharp-lobe reconnections
-    // that fail the footprint criteria, and directly-visible mirror emitters. Accumulated
-    // straight into the pixel instead of being published into the reservoir for reuse.
     non_resampled_radiance: vec3<f32>,
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, pixel_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, pixel_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
+    let wo = normalize(view.world_position - world_position);
     var reservoir = empty_reservoir();
     reservoir.confidence_weight = 1.0;
     var non_resampled_radiance = vec3(0.0);
@@ -591,8 +534,6 @@ fn replace_primary_surface(pixel_id: vec2<u32>, ray_hit: ResolvedRayHitFull, mir
     // Simplification: apply all rotations in the chain around the first mirror, rather
     // than applying each rotation around its respective mirror.
     let virtual_position = (mirror_rotations * (ray_hit.world_position - primary_surface_world_position)) + primary_surface_world_position;
-    // Approximation: reuses this frame's mirror chain for the previous-frame position
-    // (a moving mirror's previous orientation isn't tracked).
     let virtual_previous_frame_position = (mirror_rotations * (ray_hit.previous_frame_world_position - primary_surface_world_position)) + primary_surface_world_position;
     let specular_motion_vector = calculate_motion_vector(virtual_position, virtual_previous_frame_position);
 
@@ -638,11 +579,6 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
         point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
     }
 
-    // permute_pixel's 4x4 offset cycle wants a random value that is uniform across all
-    // pixels of a frame. constants.frame_index can't be used raw: it's frame_count times
-    // an even multiplier (node.rs), so its low 4 bits cycle degenerately (x offset only
-    // ever 0 or 2, period 8), which synchronizes temporal-history rejections screen-wide
-    // into visible pulsing under camera motion. Hash it once instead.
     var permute_rng = constants.frame_index;
     let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, rand_u(&permute_rng), view.main_pass_viewport.zw);
 
@@ -676,9 +612,6 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
     for (var i = 0u; i < 5u; i++) {
         let spatial_pixel_id = get_neighbor_pixel_id(pixel_id, SPATIAL_REUSE_RADIUS_PIXELS, rng);
 
-        // The disk sample can land back on the center pixel. Merging a reservoir with
-        // itself leaves the UCW unchanged but wastes the merge's visibility rays and
-        // double counts confidence — try a different neighbor instead.
         if all(spatial_pixel_id == pixel_id) {
             continue;
         }
@@ -742,11 +675,6 @@ fn empty_reservoir() -> Reservoir {
 
 struct ReservoirMergeResult {
     merged_reservoir: Reservoir,
-    // brdf(wo, wi) * radiance at canonical for the selected sample (already evaluated
-    // inside `reservoir_contribution`). Unshadowed, but valid to shade with: visibility is
-    // multiplied into the other sample's *target function*, so an occluded other sample
-    // has zero resampling weight and can never be the selected sample.
-    // Shade time just multiplies by `unbiased_contribution_weight`.
     selected_sample_brdf_radiance: vec3<f32>,
 }
 
@@ -759,10 +687,6 @@ fn merge_reservoirs(
     other_world_position: vec3<f32>,
     other_world_normal: vec3<f32>,
     other_material: ResolvedMaterial,
-    // Camera position at which `other_reservoir` was generated. Equal to view.world_position
-    // for spatial reuse (same-frame neighbor) but previous_view.world_position for temporal
-    // reuse — using current view there gives a wrong wo at the temporal pixel, biasing
-    // p̂_n's BRDF and thus the m_n MIS weight under camera motion (notably zoom).
     other_view_position: vec3<f32>,
     is_spatial: bool,
     rng: ptr<function, u32>,
@@ -777,26 +701,7 @@ fn merge_reservoirs(
     let canonical_F_ab = F_AB(canonical_material.perceptual_roughness, canonical_NdotV);
     let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
 
-    // Empty neighbor (disocclusion, reset, despawned-light rejection, no similar spatial pixel
-    // found, or a reservoir left empty because its surface was shadowed for several frames):
-    // the merge below degenerates to exactly the canonical reservoir (t_c = 1 and a zero
-    // other-sample weight), so skip the neighbor resolve, the three cross contributions, the
-    // jacobians, and the visibility traces.
-    //
-    // The emptiness test (not just confidence_weight == 0) is what fixes moving-occluder shadow
-    // lag. A point shadowed for several frames keeps merging a fresh empty reservoir with its
-    // also-empty history, so the stored reservoir holds no sample yet its confidence_weight
-    // climbs to the cap. Without treating empty-but-confident as no-neighbor, the frame the
-    // occluder moves away the fresh, correctly-lit canonical would be MIS-weighted against that
-    // stale confidence (via the c_n * canonical_sample_at_other term in the balance denominator)
-    // and suppressed to ~c_c / (c_c + c_n) of its true value, ramping back to full only over the
-    // confidence-cap window. Returning canonical's own (already unbiased) estimate makes the
-    // reveal snap to full strength in one frame.
-    //
-    // Only *empty* reservoirs qualify. A neighbor that holds a valid sample merely occluded at
-    // this pixel keeps its confidence, so its legitimate balance-heuristic share still applies
-    // (m_c < 1) — short-circuiting those would over-count the canonical and over-brighten static
-    // penumbrae, multi-light regions, and surfaces with occluded-here GI reconnections.
+    // Skip resampling empty reservoirs
     let other_is_empty = other_reservoir.light_sample.light_id == NULL_LIGHT_ID && all(other_reservoir.radiance == vec3(0.0));
     if other_reservoir.confidence_weight == 0.0 || other_is_empty {
         return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
@@ -836,14 +741,7 @@ fn merge_reservoirs(
         );
     }
 
-    // Shifts with jacobians outside [1/8, 8] are inadmissible — a huge jacobian explodes
-    // variance by inflating the reused sample's weight (or crushing the canonical's MIS
-    // weight via the balance denominator). Each jacobian is zeroed independently so the
-    // MIS weights stay a valid per-sample partition: a zeroed other-sample jacobian kills
-    // only that sample's resampling weight, and a zeroed canonical jacobian only removes
-    // the neighbor term from the canonical's balance denominator (m_c -> 1). The band is
-    // reciprocal-symmetric (J and 1/J fail together), so a shift rejected in one direction
-    // is also rejected in the other and the weights still sum to 1 at every sample point.
+    // Don't merge samples with huge jacobians, as it explodes the variance
     if other_sample_at_canonical_jacobian < 0.125 || other_sample_at_canonical_jacobian > 8.0 {
         other_sample_at_canonical_jacobian = 0.0;
     }
@@ -851,8 +749,7 @@ fn merge_reservoirs(
         canonical_sample_at_other_jacobian = 0.0;
     }
 
-    // Visibility for the cross-pixel targets. Skipped when the matching jacobian is zero,
-    // since every term the trace would feed is multiplied by that jacobian.
+    // Visibility for the cross-domain targets
     if other_sample_at_canonical.target_function > 0.0 && other_sample_at_canonical_jacobian > 0.0 {
         let vis = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
         other_sample_at_canonical.target_function *= vis;
@@ -862,16 +759,7 @@ fn merge_reservoirs(
         canonical_sample_at_other.target_function *= vis;
     }
 
-    // Defensive pairwise MIS (Wyman et al. 2023 ReSTIR course notes, §7.1.3 Eq 7.8 / Algorithm 7
-    // — the variant ReSTIR PT adopts by default). The plain balance heuristic lets a neighbor with
-    // a large (approximate) p̂ drive the canonical's weight m_c toward 0; when that neighbor is
-    // actually a poor estimator here (its reconnection vertex is occluded from / incompatible with
-    // this pixel) the reserved weight is lost every frame and the pixel darkens. The defensive
-    // term floors the canonical at its confidence share t_c = c_c / (c_c + c_n):
-    //   m_c = t_c + (1 - t_c) * balance_c,   m_n = (1 - t_c) * balance_n.
-    // For M = 2 this is exactly Algorithm 7. It remains a valid MIS partition (weights sum to 1),
-    // so unlike a hard canonical fallback it cannot leak energy / over-brighten. When the neighbor
-    // is empty (c_n = 0) it collapses to t_c = 1 -> canonical keeps full weight.
+    // Defensive balance heuristic MIS (for spatial reuse only)
     let total_confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
     let defensive_t_c = f32(is_spatial) * select(1.0, canonical_reservoir.confidence_weight / total_confidence_weight, total_confidence_weight > 0.0);
 
@@ -920,8 +808,6 @@ fn merge_reservoirs(
 }
 
 struct ReservoirContribution {
-    // brdf(wo, wi) * radiance — the per-sample shading kernel at this vertex.
-    // target_function = luminance(brdf_radiance).
     brdf_radiance: vec3<f32>,
     target_function: f32,
     sample_world_position: vec4<f32>,
@@ -934,17 +820,9 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         // MIS weight against the bounce-0 BRDF-emissive strategy, recomputed with THIS
         // surface's BRDF/material rather than baked into the reservoir's W at generation
         // (mirrors the bounce-0 nee_mis_weight in generate_initial_reservoir, which puts
-        // the same factor in the stored target function). The NEE and emissive strategies
-        // must partition each light's energy per evaluation pixel — w_nee + w_brdf = 1
-        // needs both weights built from the local p_brdf/p_nee, while a baked weight
-        // would carry the generating pixel's partition into reuse and over/under-count
-        // direct light wherever material or view direction differ.
+        // the same factor in the stored target function).
         var nee_mis_weight = 1.0;
         if light_contribution.brdf_rays_can_hit && light_contribution.inverse_solid_angle_pdf > 0.0 {
-            // resolve_light_sample's inverse_pdf excludes the 1/light_count light-pick
-            // factor that the presampled tiles include (generate_random_light_sample
-            // multiplies it in after resolving); add it so the effective NEE pdf here
-            // matches the one used at generation and in the emissive candidate's p_light.
             let light_count = arrayLength(&light_sources);
             let inverse_solid_angle_pdf = light_contribution.inverse_solid_angle_pdf * f32(light_count);
             let p_nee = mix(1.0, material.perceptual_roughness, material.metallic);
@@ -956,13 +834,6 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         let brdf_radiance = light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab) * nee_mis_weight;
         return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), resolved.world_position);
     } else if any(reservoir.radiance != vec3(0.0)) {
-        // Reconstruct toward the reconnection vertex from the actual ray origin a
-        // reconnection ray would use (offset RAY_T_MIN along the normal, matching
-        // generate_initial_reservoir's trace and the merge visibility traces).
-        // Reconstructing from the un-offset position deviates from the traced
-        // direction by ~RAY_T_MIN/distance radians — enough to fail the strict
-        // NdotH mirror gate in evaluate_specular_brdf at short reconnection
-        // distances or grazing angles, zeroing out mirror reflections at shade.
         let delta = reservoir.sample_point_world_position - (world_position + world_normal * RAY_T_MIN);
         let sample_distance = length(delta);
         let wi = delta / sample_distance;
@@ -971,10 +842,7 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         // Bounce-0 BRDF-emissive sample (directly-visible light): the seed field carries the
         // light triangle's bitcast area pdf and the stored radiance is the raw emission.
         // Rebuild the MIS weight against THIS surface's NEE strategy — the dual of
-        // nee_mis_weight above, mirroring the emissive candidate in
-        // generate_initial_reservoir. Both strategy weights are then built from the same
-        // local pdfs, so NEE + emissive partition each light's energy at every evaluating
-        // pixel and the sample can be reused across pixels without over-counting.
+        // nee_mis_weight above, mirroring the emissive candidate in generate_initial_reservoir.
         if reservoir.light_sample.seed != 0u {
             let area_pdf = bitcast<f32>(reservoir.light_sample.seed);
             let light_normal = octahedral_decode(reservoir.sample_point_world_normal);

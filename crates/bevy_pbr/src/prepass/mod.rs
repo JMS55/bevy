@@ -206,8 +206,8 @@ pub fn update_previous_view_data(
         let view_from_clip = camera.clip_from_view().inverse();
 
         // Note: this main-world system cannot know the temporal jitter (it's applied in
-        // the render world); the jittered variants of these matrices are produced in
-        // `prepare_previous_view_uniforms` using `PreviousTemporalJitter`.
+        // the render world). Jitter is applied in `prepare_previous_view_uniforms`
+        // using `PreviousTemporalJitter`.
         commands.entity(entity).try_insert(PreviousViewData {
             view_from_world,
             clip_from_world: camera.clip_from_view() * view_from_world,
@@ -728,6 +728,8 @@ pub fn prepare_previous_view_uniforms(
             &ExtractedView,
             Option<&PreviousViewData>,
             Option<&PreviousTemporalJitter>,
+            Option<&TemporalJitter>,
+            Option<&MainPassResolutionOverride>,
         ),
         Or<(With<Camera3d>, With<ShadowView>)>,
     >,
@@ -742,7 +744,15 @@ pub fn prepare_previous_view_uniforms(
         return;
     };
 
-    for (entity, camera, maybe_previous_view_uniforms, maybe_previous_jitter) in views_iter {
+    for (
+        entity,
+        camera,
+        maybe_previous_view_uniforms,
+        maybe_previous_jitter,
+        maybe_jitter,
+        resolution_override,
+    ) in views_iter
+    {
         let mut prev_view_data = match maybe_previous_view_uniforms {
             Some(previous_view) => previous_view.clone(),
             None => {
@@ -765,13 +775,12 @@ pub fn prepare_previous_view_uniforms(
         // jitter, but `PreviousViewData` is recorded in the main world, which doesn't know
         // the jitter (it's applied in the render world). Re-apply it here so that
         // reconstructing positions from the previous frame's textures through these
-        // matrices is exact. `unjittered_clip_from_world` keeps the jitter-free variant
-        // for motion vectors.
+        // matrices is exact.
         if let Some(previous_jitter) = maybe_previous_jitter {
             let mut clip_from_view = prev_view_data.clip_from_view;
             previous_jitter
                 .jitter
-                .jitter_projection(&mut clip_from_view, previous_jitter.main_pass_viewport_size);
+                .jitter_projection(&mut clip_from_view, previous_jitter.view_size);
             let view_from_clip = clip_from_view.inverse();
             let world_from_view = prev_view_data.view_from_world.inverse();
 
@@ -784,55 +793,35 @@ pub fn prepare_previous_view_uniforms(
         commands.entity(entity).insert(PreviousViewUniformOffset {
             offset: writer.write(&prev_view_data),
         });
+
+        // Record this frame's jitter so next frame's iteration (above) can reproduce the
+        // jittered matrices this frame's depth/gbuffer were rasterized with.
+        match maybe_jitter {
+            Some(jitter) => {
+                let mut view_size = Vec2::new(camera.viewport.z as f32, camera.viewport.w as f32);
+                if let Some(resolution_override) = resolution_override {
+                    view_size = resolution_override.0.as_vec2();
+                }
+
+                commands.entity(entity).insert(PreviousTemporalJitter {
+                    jitter: jitter.clone(),
+                    view_size,
+                });
+            }
+            None => {
+                commands.entity(entity).remove::<PreviousTemporalJitter>();
+            }
+        }
     }
 }
 
 /// Render-world component recording the [`TemporalJitter`] a view was rendered with, plus
-/// the main-pass viewport size it applies to, so that the *next* frame's
-/// [`prepare_previous_view_uniforms`] can reproduce the jittered matrices the previous
-/// frame's depth/gbuffer were rasterized with.
+/// the viewport size it applies to, so that the *next* frame's [`prepare_previous_view_uniforms`]
+/// can reproduce the jittered matrices the previous frame's depth/gbuffer were rasterized with.
 #[derive(Component, Clone)]
 pub struct PreviousTemporalJitter {
     pub jitter: TemporalJitter,
-    pub main_pass_viewport_size: Vec2,
-}
-
-/// Records each jittered view's [`TemporalJitter`] into [`PreviousTemporalJitter`] for
-/// next frame's [`prepare_previous_view_uniforms`]. Scheduled after it so this frame's
-/// value isn't overwritten before it's consumed.
-pub fn update_previous_temporal_jitter(
-    mut commands: Commands,
-    views: Query<
-        (
-            Entity,
-            &ExtractedView,
-            Option<&TemporalJitter>,
-            Option<&MainPassResolutionOverride>,
-        ),
-        Or<(With<Camera3d>, With<ShadowView>)>,
-    >,
-) {
-    for (entity, extracted_view, temporal_jitter, resolution_override) in &views {
-        let Some(temporal_jitter) = temporal_jitter else {
-            commands.entity(entity).remove::<PreviousTemporalJitter>();
-            continue;
-        };
-
-        // Matches the viewport that `prepare_view_uniforms` jitters the current
-        // projection with.
-        let mut view_size = Vec2::new(
-            extracted_view.viewport.z as f32,
-            extracted_view.viewport.w as f32,
-        );
-        if let Some(resolution_override) = resolution_override {
-            view_size = resolution_override.0.as_vec2();
-        }
-
-        commands.entity(entity).insert(PreviousTemporalJitter {
-            jitter: temporal_jitter.clone(),
-            main_pass_viewport_size: view_size,
-        });
-    }
+    pub view_size: Vec2,
 }
 
 #[derive(Resource)]

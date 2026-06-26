@@ -107,7 +107,6 @@ pub struct DeferredPrepassDoubleBuffer;
 pub struct PreviousViewData {
     pub view_from_world: Mat4,
     pub clip_from_world: Mat4,
-    /// Variant of `clip_from_world` without temporal jitter applied, for motion vectors.
     pub unjittered_clip_from_world: Mat4,
     pub clip_from_view: Mat4,
     pub world_from_clip: Mat4,

@@ -93,9 +93,6 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
 }
 #endif
 
-// Returns the cell size that would actually be queried for a ray of length `ray_t`
-// landing at `world_position`. The distance-to-camera LOD picks the coarse cell, and
-// the ray length further shrinks it (reduces light leaks for short rays).
 fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>, ray_t: f32, rng: ptr<function, u32>) -> f32 {
     let camera_distance = distance(view_position, world_position) / WORLD_CACHE_POSITION_LOD_SCALE;
     let lod_f = log2(1.0 + camera_distance);

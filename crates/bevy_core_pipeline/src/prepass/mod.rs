@@ -98,11 +98,6 @@ pub struct DeferredPrepassDoubleBuffer;
 /// View matrices from the previous frame.
 ///
 /// Useful for temporal rendering techniques that need access to last frame's camera data.
-///
-/// Projection-dependent matrices include the temporal jitter the view was rendered with
-/// (matching the `View` uniform's convention), so that positions reconstructed from the
-/// previous frame's depth/gbuffer through these matrices land exactly where that frame
-/// computed them. Use [`Self::unjittered_clip_from_world`] for motion vectors.
 #[derive(Component, ShaderType, Clone)]
 pub struct PreviousViewData {
     pub view_from_world: Mat4,

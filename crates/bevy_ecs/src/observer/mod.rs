@@ -443,6 +443,17 @@ impl World {
                 }
             }
         }
+
+        // Remove this observer from the `ObservedBy` list of every entity it watched, so the
+        // tracking does not accumulate stale (despawned) observer entities when observers are
+        // removed and re-added (e.g. by a reactive UI reconciler).
+        for &watched_entity in &descriptor.entities {
+            if let Ok(mut watched) = self.get_entity_mut(watched_entity) {
+                if let Some(mut observed_by) = watched.get_mut::<ObservedBy>() {
+                    observed_by.0.retain(|observer| *observer != entity);
+                }
+            }
+        }
     }
 }
 

@@ -1,3 +1,8 @@
+#![feature(specialization)]
+#![allow(
+    incomplete_features,
+    reason = "`specialization` enables zero-overhead set_if_neq component commits; `min_specialization` cannot specialize on `PartialEq`."
+)]
 #![expect(unsafe_code, reason = "Unsafe code is used to improve performance.")]
 //! Composable scene authoring for Bevy, defined using the Bevy Scene Notation (BSN) format.
 //!

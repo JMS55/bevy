@@ -761,6 +761,8 @@ bevy_render = { path = "crates/bevy_render", version = "0.20.0-dev", default-fea
 bevy-settings = { path = "crates/bevy_settings", version = "0.20.0-dev", default-features = false }
 bevy_state = { path = "crates/bevy_state", version = "0.20.0-dev", default-features = false }
 bevy_scene = { path = "crates/bevy_scene", version = "0.20.0-dev", default-features = false }
+# Prototype proc-macro used by the reactive_counter example.
+reactive_scene_macro = { path = "crates/reactive_scene_macro" }
 # Needed to poll Task examples
 futures-lite = "2.0.1"
 futures-timer = { version = "3", features = ["wasm-bindgen", "gloo-timers"] }
@@ -3101,6 +3103,17 @@ doc-scrape-examples = true
 [package.metadata.example.bsn]
 name = "BSN example"
 description = "Demonstrates how to use BSN to compose scenes"
+category = "Scene"
+wasm = true
+
+[[example]]
+name = "reactive_counter"
+path = "examples/scene/reactive_counter.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.reactive_counter]
+name = "Reactive counter"
+description = "Prototype of react-like reactive scenes (hooks + re-render) layered on BSN"
 category = "Scene"
 wasm = true
 

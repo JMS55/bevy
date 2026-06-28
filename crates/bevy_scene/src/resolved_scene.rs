@@ -2,7 +2,8 @@ use crate::{ResolveContext, ResolveSceneError, Scene, SceneList, ScenePatch};
 use bevy_asset::{AssetId, AssetPath, AssetServer, Assets, Handle, UntypedAssetId};
 use bevy_ecs::{
     bundle::{Bundle, BundleScratch, BundleWriter},
-    component::{Component, ComponentsRegistrator},
+    change_detection::DetectChangesMut,
+    component::{Component, ComponentsRegistrator, Mutable},
     entity::Entity,
     error::{BevyError, Result},
     relationship::{Relationship, RelationshipTarget},
@@ -503,6 +504,73 @@ impl ResolvedScene {
     pub fn push_bundle_template_erased(&mut self, template: Box<dyn ErasedBundleTemplate>) {
         self.bundle_templates.push(template);
     }
+
+    /// Iterates this scene's component templates (for applying/reconciling them individually).
+    pub fn component_templates(&self) -> impl Iterator<Item = &dyn ErasedComponentTemplate> + '_ {
+        self.component_templates.iter().map(|template| &**template)
+    }
+
+    /// The [`TypeId`]s of the components produced by this scene's component templates.
+    /// Useful for diffing which components a node should have across reconciliations.
+    pub fn component_type_ids(&self) -> Vec<TypeId> {
+        self.component_templates
+            .iter()
+            .map(|template| template.component_type_id())
+            .collect()
+    }
+
+    /// Applies only this scene's component templates to the entity in `context` — no bundle
+    /// templates, no related scenes. Intended for reconciling a single node's components.
+    pub fn apply_component_templates(
+        &self,
+        context: &mut TemplateContext,
+    ) -> Result<(), BevyError> {
+        for template in &self.component_templates {
+            template.build_and_insert(context)?;
+        }
+        Ok(())
+    }
+
+    /// Applies only this scene's bundle templates (e.g. observers added via `on`) to the entity.
+    pub fn apply_bundle_templates(&self, context: &mut TemplateContext) -> Result<(), BevyError> {
+        for template in &self.bundle_templates {
+            // SAFETY: bundle templates insert directly onto `context.entity`; they do not use a
+            // `BundleWriter`, so there is no cross-World aliasing concern here.
+            unsafe {
+                template.apply(context)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The number of bundle templates (e.g. observers added via `on`) on this scene.
+    pub fn bundle_template_count(&self) -> usize {
+        self.bundle_templates.len()
+    }
+
+    /// Applies a single bundle template by index, for reconciling observers individually without
+    /// re-applying the whole set.
+    pub fn apply_bundle_template(
+        &self,
+        index: usize,
+        context: &mut TemplateContext,
+    ) -> Result<(), BevyError> {
+        if let Some(template) = self.bundle_templates.get(index) {
+            // SAFETY: bundle templates insert directly onto `context.entity`; they do not use a
+            // `BundleWriter`.
+            unsafe {
+                template.apply(context)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The related scenes for relationship `R` (e.g. `ChildOf` for children).
+    pub fn related_scenes_for<R: Relationship>(&self) -> Option<&[ResolvedScene]> {
+        self.related
+            .get(&TypeId::of::<R>())
+            .map(|related| related.scenes.as_slice())
+    }
     /// This will return the existing [`RelatedResolvedScenes`], if it exists. If not, a new empty [`RelatedResolvedScenes`] will be inserted and returned.
     ///
     /// This is used to add new related scenes and read existing related scenes.
@@ -681,6 +749,16 @@ pub trait ErasedComponentTemplate: Any + Send + Sync {
 
     /// Clones this template. See [`Clone`].
     fn clone_template(&self) -> Box<dyn ErasedComponentTemplate>;
+
+    /// The [`TypeId`] of the [`Component`] this template produces (not the template's own type).
+    fn component_type_id(&self) -> TypeId;
+
+    /// Builds this template and inserts the resulting component directly onto the entity in
+    /// `context`. Used for reconciling/updating a single node's components in place.
+    fn build_and_insert(&self, context: &mut TemplateContext) -> Result<(), BevyError>;
+
+    /// Downcasting access to the template's concrete type (e.g. to read a key value directly).
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl<T: Template<Output: Component> + Send + Sync + 'static> ErasedComponentTemplate for T {
@@ -700,6 +778,46 @@ impl<T: Template<Output: Component> + Send + Sync + 'static> ErasedComponentTemp
 
     fn clone_template(&self) -> Box<dyn ErasedComponentTemplate> {
         Box::new(Template::clone_template(self))
+    }
+
+    fn component_type_id(&self) -> TypeId {
+        TypeId::of::<T::Output>()
+    }
+
+    fn build_and_insert(&self, context: &mut TemplateContext) -> Result<(), BevyError> {
+        self.build_template(context)?.commit(context.entity);
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Commits a built component to an entity. Specialized so that components that are [`PartialEq`]
+/// and mutable use `set_if_neq` — re-applying an unchanged value does not bump its change tick, so
+/// downstream `Changed<T>` systems don't run needlessly. All other components fall back to a plain
+/// insert. This imposes no bound on the open template model (requires `feature(specialization)`).
+trait CommitComponent: Component {
+    fn commit(self, entity: &mut EntityWorldMut);
+}
+
+impl<C: Component> CommitComponent for C {
+    default fn commit(self, entity: &mut EntityWorldMut) {
+        entity.insert(self);
+    }
+}
+
+impl<C: Component<Mutability = Mutable> + PartialEq> CommitComponent for C {
+    fn commit(self, entity: &mut EntityWorldMut) {
+        match entity.get_mut::<C>() {
+            Some(mut existing) => {
+                existing.set_if_neq(self);
+            }
+            None => {
+                entity.insert(self);
+            }
+        }
     }
 }
 

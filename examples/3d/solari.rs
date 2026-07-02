@@ -38,6 +38,9 @@ struct Args {
     /// stress test a scene with many lights.
     #[argh(switch)]
     many_lights: Option<bool>,
+    /// use the Bistro scene (requires assets/Bistro_Godot.glb).
+    #[argh(switch)]
+    bistro: Option<bool>,
 }
 
 fn main() {
@@ -58,7 +61,9 @@ fn main() {
     ))
     .insert_resource(args);
 
-    if args.many_lights == Some(true) {
+    if args.bistro == Some(true) {
+        app.add_systems(Startup, setup_bistro);
+    } else if args.many_lights == Some(true) {
         app.add_systems(Startup, setup_many_lights);
     } else {
         app.add_systems(Startup, setup_pica_pica);
@@ -70,7 +75,7 @@ fn main() {
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
         app.add_systems(Update, toggle_dlss_rr);
 
-        if args.many_lights != Some(true) {
+        if args.many_lights != Some(true) && args.bistro != Some(true) {
             app.add_systems(Update, (pause_scene, toggle_lights, patrol_path));
         }
         app.add_systems(PostUpdate, (update_control_text, update_performance_text));
@@ -149,6 +154,98 @@ fn setup_pica_pica(
         },
         Transform::from_translation(Vec3::new(0.219417, 2.5764852, 6.9718704)).with_rotation(
             Quat::from_xyzw(-0.1466768, 0.013738206, 0.002037309, 0.989087),
+        ),
+        // Msaa::Off and CameraMainTextureUsages with STORAGE_BINDING are required for Solari
+        CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
+        Msaa::Off,
+    ));
+
+    if args.pathtracer == Some(true) {
+        camera.insert(Pathtracer::default());
+    } else {
+        camera.insert(SolariLighting::default());
+    }
+
+    // Using DLSS Ray Reconstruction for denoising (and cheaper rendering via upscaling) is _highly_ recommended when using Solari
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    if dlss_rr_supported.is_some() {
+        camera.insert(Dlss::<DlssRayReconstructionFeature> {
+            perf_quality_mode: Default::default(),
+            reset: Default::default(),
+            _phantom_data: Default::default(),
+        });
+    }
+
+    commands.spawn((
+        ControlText,
+        Text::default(),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(12.0),
+            left: px(12.0),
+            ..default()
+        },
+    ));
+
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(0.0),
+            padding: px(4.0).all(),
+            border_radius: BorderRadius::bottom_left(px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.10, 0.10, 0.10, 0.8)),
+        children![(
+            PerformanceText,
+            Text::default(),
+            TextFont {
+                font_size: FontSize::Px(8.0),
+                ..default()
+            },
+        )],
+    ));
+}
+
+fn setup_bistro(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    args: Res<Args>,
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_rr_supported: Option<
+        Res<DlssRayReconstructionSupported>,
+    >,
+) {
+    commands
+        .spawn((
+            WorldAssetRoot(
+                asset_server.load(GltfAssetLabel::Scene(0).from_asset("Bistro_Godot.glb")),
+            ),
+            Transform::default(),
+        ))
+        .observe(add_raytracing_meshes_on_scene_load);
+
+    commands.spawn((
+        DirectionalLight {
+            illuminance: light_consts::lux::FULL_DAYLIGHT,
+            shadow_maps_enabled: false, // Solari replaces shadow mapping
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, -0.5, 0.0)),
+    ));
+
+    let mut camera = commands.spawn((
+        Camera3d::default(),
+        Camera {
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
+            ..default()
+        },
+        FreeCamera {
+            walk_speed: 3.0,
+            run_speed: 10.0,
+            ..Default::default()
+        },
+        Transform::from_translation(Vec3::new(-12.515882, 2.7404356, 2.7592697)).with_rotation(
+            Quat::from_xyzw(-0.04211848, -0.62481457, -0.03378625, 0.7789039),
         ),
         // Msaa::Off and CameraMainTextureUsages with STORAGE_BINDING are required for Solari
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
@@ -400,6 +497,10 @@ fn add_raytracing_meshes_on_scene_load(
     mut commands: Commands,
     args: Res<Args>,
 ) {
+    // Material assets are shared between mesh instances; the emissive boost below
+    // multiplies, so it must be applied exactly once per material.
+    let mut boosted_materials = std::collections::HashSet::new();
+
     for descendant in children.iter_descendants(scene_ready.entity) {
         if let Ok((Mesh3d(mesh_handle), MeshMaterial3d(material_handle), material_name)) =
             mesh_query.get(descendant)
@@ -454,6 +555,18 @@ fn add_raytracing_meshes_on_scene_load(
                 let mut material = materials.get_mut(material_handle).unwrap();
                 material.alpha_mode = AlphaMode::Opaque;
                 material.specular_transmission = 0.0;
+            }
+
+            // Bistro's emissive factors are authored in the 8-100 range; as physical
+            // luminance under FULL_DAYLIGHT they're orders of magnitude too dim to read
+            // as lights. Boost them to roughly sunlit-surface luminance: high enough to
+            // visibly light their surroundings, low enough that the tonemapper still
+            // shows the bulbs' color instead of clipping them to white.
+            if args.bistro == Some(true) && boosted_materials.insert(material_handle.id()) {
+                let mut material = materials.get_mut(material_handle).unwrap();
+                if material.emissive != LinearRgba::BLACK {
+                    material.emissive = material.emissive * 2_500.0;
+                }
             }
         }
     }
@@ -583,7 +696,7 @@ fn update_control_text(
 ) {
     text.0.clear();
 
-    if args.many_lights != Some(true) {
+    if args.many_lights != Some(true) && args.bistro != Some(true) {
         if time.is_paused() {
             text.0.push_str("(Space): Resume");
         } else {

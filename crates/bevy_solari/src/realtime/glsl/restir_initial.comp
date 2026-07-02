@@ -1,0 +1,36 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_GOOGLE_include_directive : require
+
+// `initial` is compiled as the DLSS Ray Reconstruction / primary-surface-replacement variant
+// (bevy_solari's initial_with_psr_pipeline). This pulls in the set=2 guide buffers and the
+// PSR code paths in the shared unit.
+#define DLSS_RR_GUIDE_BUFFERS
+
+#include "restir_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    uvec3 workgroup_id = gl_WorkGroupID;
+    uvec3 global_id = gl_GlobalInvocationID;
+
+    if (any(greaterThanEqual(global_id.xy, uvec2(view.main_pass_viewport.zw)))) { return; }
+
+    uint pixel_index = global_id.x + global_id.y * uint(view.main_pass_viewport.z);
+    uint rng = pixel_index + constants.frame_rng;
+
+    float depth = texelFetch(depth_buffer, ivec2(global_id.xy), 0).x;
+    if (depth == 0.0) {
+        reservoirs_b[pixel_index] = empty_reservoir();
+        return;
+    }
+    ResolvedGPixel surface = gpixel_resolve(texelFetch(gbuffer, ivec2(global_id.xy), 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+
+    InitialSamplingResult initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.material, workgroup_id.xy, global_id.xy, rng);
+
+    imageStore(view_output, ivec2(global_id.xy), vec4(initial.non_resampled_radiance, 0.0));
+    reservoirs_b[pixel_index] = initial.reservoir;
+}

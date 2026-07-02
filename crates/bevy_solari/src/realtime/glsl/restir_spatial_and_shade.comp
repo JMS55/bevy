@@ -1,0 +1,56 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "restir_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    uvec3 global_id = gl_GlobalInvocationID;
+
+    if (any(greaterThanEqual(global_id.xy, uvec2(view.main_pass_viewport.zw)))) { return; }
+
+    uint pixel_index = global_id.x + global_id.y * uint(view.main_pass_viewport.z);
+    uint rng = pixel_index + constants.frame_rng + 0x6A09E667u;
+
+    float depth = texelFetch(depth_buffer, ivec2(global_id.xy), 0).x;
+    if (depth == 0.0) {
+        reservoirs_a[pixel_index] = empty_reservoir();
+        return;
+    }
+    ResolvedGPixel surface = gpixel_resolve(texelFetch(gbuffer, ivec2(global_id.xy), 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+
+    Reservoir input_reservoir = reservoirs_b[pixel_index];
+    vec3 wo = normalize(view.world_position - surface.world_position);
+    float NdotV = max(dot(surface.world_normal, wo), 0.0001);
+    vec2 F_ab = F_AB(surface.material.perceptual_roughness, NdotV);
+
+    Reservoir combined_reservoir;
+    vec3 shade_brdf_radiance;
+    if (mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD) {
+        // Performance improvement: Skip resampling for low-roughness metallic surfaces
+        combined_reservoir = input_reservoir;
+        ResolvedLightSample resolved;
+        if (input_reservoir.light_sample.light_id != NULL_LIGHT_ID) {
+            resolved = resolve_light_sample(input_reservoir.light_sample, light_sources[input_reservoir.light_sample.light_id >> 16u]);
+        }
+        shade_brdf_radiance = reservoir_contribution(input_reservoir, resolved, surface.world_position, surface.world_normal, wo, surface.material, F_ab).brdf_radiance;
+    } else {
+        NeighborInfo spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, rng);
+        ReservoirMergeResult merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
+            spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, view.world_position, true, rng);
+        combined_reservoir = merge_result.merged_reservoir;
+        shade_brdf_radiance = merge_result.selected_sample_brdf_radiance;
+    }
+
+    reservoirs_a[pixel_index] = combined_reservoir;
+
+    vec3 pixel_color = shade_brdf_radiance * combined_reservoir.unbiased_contribution_weight;
+    pixel_color += surface.material.emissive;
+    pixel_color += imageLoad(view_output, ivec2(global_id.xy)).rgb;
+    pixel_color *= view.exposure;
+    imageStore(view_output, ivec2(global_id.xy), vec4(pixel_color, 1.0));
+}

@@ -486,24 +486,28 @@ pub fn init_solari_lighting_pipelines(
             vec![],
         ),
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        // GLSL→SPIR-V passthrough port of `initial` (DLSS/PSR variant). Entry point is `main`
+        // (GLSL) and the module carries source-level debug info for Nsight.
         initial_with_psr_pipeline: create_pipeline(
             "solari_lighting_initial_with_psr_pipeline",
-            "initial",
-            load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
+            "main",
+            load_embedded_asset!(asset_server.as_ref(), "glsl/restir_initial.spv"),
             Some(&bind_group_layout_resolve_dlss_rr_textures),
-            vec!["DLSS_RR_GUIDE_BUFFERS".into()],
+            vec![],
         ),
+        // GLSL→SPIR-V passthrough port of `temporal`.
         temporal_pipeline: create_pipeline(
             "solari_lighting_temporal_pipeline",
-            "temporal",
-            load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
+            "main",
+            load_embedded_asset!(asset_server.as_ref(), "glsl/restir_temporal.spv"),
             None,
             vec![],
         ),
+        // GLSL→SPIR-V passthrough port of `spatial_and_shade`.
         spatial_and_shade_pipeline: create_pipeline(
             "solari_lighting_spatial_and_shade_pipeline",
-            "spatial_and_shade",
-            load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
+            "main",
+            load_embedded_asset!(asset_server.as_ref(), "glsl/restir_spatial_and_shade.spv"),
             None,
             vec![],
         ),

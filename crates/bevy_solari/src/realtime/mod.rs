@@ -39,6 +39,11 @@ impl Plugin for SolariLightingPlugin {
         load_shader_library!(app, "presample_light_tiles.wgsl");
         load_shader_library!(app, "initial_path.wgsl");
         embedded_asset!(app, "restir.wgsl");
+        // GLSL→SPIR-V (with function/source debug info for Nsight) ports of restir.wgsl's
+        // entry points, loaded via wgpu SPIR-V passthrough. `initial` is the DLSS/PSR variant.
+        embedded_asset!(app, "glsl/restir_initial.spv");
+        embedded_asset!(app, "glsl/restir_temporal.spv");
+        embedded_asset!(app, "glsl/restir_spatial_and_shade.spv");
         load_shader_library!(app, "world_cache_query.wgsl");
         embedded_asset!(app, "world_cache_compact.wgsl");
         embedded_asset!(app, "world_cache_update.wgsl");

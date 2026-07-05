@@ -1,0 +1,34 @@
+[package]
+name = "zero_day"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bevy = { path = "../../../", features = [
+  "bevy_camera_controller",
+  "free_camera",
+  "bevy_solari",
+] }
+
+argh = "0.1.12"
+
+[features]
+# DLSS Ray Reconstruction denoises the Solari path. Opt-in (needs an NVIDIA RTX GPU +
+# the DLSS SDK to build, so it is off by default to keep `cargo build --workspace`
+# working without the SDK): enable it with `--features dlss`.
+dlss = ["bevy/dlss"]
+
+# Hot-reload Bevy's embedded assets -- notably Solari's WGSL shaders in
+# `crates/bevy_solari/src/` -- while the scene runs. Opt-in (adds a filesystem watcher):
+# `cargo run -p zero_day --features embedded_watcher`. `main` repoints the asset root to the
+# workspace so the watcher can see the engine crates; edits to the `.wgsl` reload live.
+embedded_watcher = ["bevy/embedded_watcher"]
+
+# Tracy profiling (see docs/profiling.md). These pass through to Bevy's trace features
+# because `-p zero_day` resolves `--features` against this crate, not `bevy`. Start the
+# Tracy UI, then run e.g. `cargo run -p zero_day --release --features trace_tracy`.
+trace_tracy = ["bevy/trace_tracy"]
+# Same, plus memory-allocation tracking (higher overhead).
+trace_tracy_memory = ["bevy/trace_tracy_memory"]

@@ -32,8 +32,13 @@
 //!
 //! Controls: `C` toggles the film flythrough vs. free-fly (WASD + mouse), `Space` pauses
 //! and resumes all animation, `P` swaps ReSTIR vs. the reference path tracer, `N` toggles
-//! DLSS Ray Reconstruction, and `B` runs a short benchmark (printed to the console). A
-//! top-right overlay shows Solari's per-pass GPU timings.
+//! DLSS Ray Reconstruction, `B` runs a short benchmark (printed to the console), `V` toggles
+//! the post-denoise temporal-variance heatmap (to find the high-variance pixels that stand
+//! out), and `X` cycles path isolation (normal -> direct -> indirect -> world-cache ->
+//! no-world-cache) to attribute a given artifact to one class of light path. `1`/`2`/`3`
+//! independently disable temporal reuse / spatial reuse / shadow rays to attribute noise to
+//! a ReSTIR stage, and `[`/`]` tune the direct-lighting firefly clamp. A top-right overlay
+//! shows Solari's per-pass GPU timings plus the pre/post-denoise variance stats.
 //!
 //! Tracy profiling is available via the `trace_tracy` feature (see `docs/profiling.md`).
 
@@ -59,7 +64,10 @@ use bevy::{
     render::render_resource::TextureUsages,
     solari::{
         pathtracer::{Pathtracer, PathtracingPlugin},
-        prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins},
+        prelude::{
+            PathIsolation, RaytracingMesh3d, SolariLighting, SolariPlugins, SolariVarianceDebug,
+            VarianceDebugMode,
+        },
     },
     window::{PresentMode, WindowResolution},
     winit::WinitSettings,
@@ -298,6 +306,11 @@ fn main() {
             (
                 toggle_flythrough,
                 toggle_pause,
+                toggle_variance_debug,
+                toggle_path_isolation,
+                toggle_reuse_debug,
+                adjust_firefly_clamp,
+                adjust_solari_quality,
                 drive_flythrough,
                 animate_emissive,
                 frame_stats,
@@ -446,6 +459,8 @@ fn setup(
     } else {
         // Realtime ReSTIR lighting, optionally denoised + upscaled by DLSS Ray Reconstruction.
         cam.insert(solari_lighting());
+        // Variance debug tooling (off by default; cycle with `V`). See `variance_debug()`.
+        cam.insert(variance_debug());
         #[cfg(feature = "dlss")]
         if dlss_rr_supported.is_some() {
             cam.insert(dlss_rr(args.dlss_perf_quality()));
@@ -853,6 +868,143 @@ fn solari_lighting() -> SolariLighting {
     }
 }
 
+/// The variance debug tooling config, added alongside `solari_lighting()`. Starts
+/// `Off` (no heatmap) but is present, so pre/post-denoise variance stats are
+/// measured and reported every frame; `V` cycles the heatmap on. See
+/// [`SolariVarianceDebug`].
+fn variance_debug() -> SolariVarianceDebug {
+    SolariVarianceDebug::default()
+}
+
+/// `V` toggles the post-denoise variance heatmap. The pre-denoise heatmap mode
+/// still exists in the engine (`VarianceDebugMode::PreDenoise`) but isn't cycled
+/// here -- for this scene the raw ReSTIR noise is so heavy it isn't a useful view;
+/// the post-denoise residual (what actually reaches the screen) is. The `Var pre`
+/// numeric readout stays live regardless. No-ops in pathtracer mode.
+fn toggle_variance_debug(
+    input: Res<ButtonInput<KeyCode>>,
+    mut variance: Query<&mut SolariVarianceDebug, With<RenderCamera>>,
+) {
+    if !input.just_pressed(KeyCode::KeyV) {
+        return;
+    }
+    let Ok(mut variance) = variance.single_mut() else {
+        return;
+    };
+    variance.mode = match variance.mode {
+        VarianceDebugMode::PostDenoise => VarianceDebugMode::Off,
+        _ => VarianceDebugMode::PostDenoise,
+    };
+}
+
+/// `X` cycles the path-isolation debug view, which restricts the ReSTIR output to
+/// one class of light path so you can see which one carries a given artifact
+/// (e.g. the world-cache "worm" noise). Pairs with the variance heatmap (`V`).
+fn toggle_path_isolation(
+    input: Res<ButtonInput<KeyCode>>,
+    mut variance: Query<&mut SolariVarianceDebug, With<RenderCamera>>,
+) {
+    if !input.just_pressed(KeyCode::KeyX) {
+        return;
+    }
+    let Ok(mut variance) = variance.single_mut() else {
+        return;
+    };
+    variance.path_isolation = match variance.path_isolation {
+        PathIsolation::Normal => PathIsolation::Direct,
+        PathIsolation::Direct => PathIsolation::Indirect,
+        PathIsolation::Indirect => PathIsolation::WorldCache,
+        PathIsolation::WorldCache => PathIsolation::NoWorldCache,
+        PathIsolation::NoWorldCache => PathIsolation::Normal,
+    };
+}
+
+/// `1`/`2`/`3`/`4` independently toggle ReSTIR reuse stages, shadow rays, and
+/// color-noise reduction, to attribute noise: `1` temporal reuse, `2` spatial
+/// reuse, `3` full visibility (skip shadow rays), `4` chroma-marginalized shading.
+/// Compose with path isolation (`X`).
+fn toggle_reuse_debug(
+    input: Res<ButtonInput<KeyCode>>,
+    mut variance: Query<&mut SolariVarianceDebug, With<RenderCamera>>,
+) {
+    let Ok(mut variance) = variance.single_mut() else {
+        return;
+    };
+    if input.just_pressed(KeyCode::Digit1) {
+        variance.disable_temporal_reuse = !variance.disable_temporal_reuse;
+    }
+    if input.just_pressed(KeyCode::Digit2) {
+        variance.disable_spatial_reuse = !variance.disable_spatial_reuse;
+    }
+    if input.just_pressed(KeyCode::Digit3) {
+        variance.force_full_visibility = !variance.force_full_visibility;
+    }
+    if input.just_pressed(KeyCode::Digit4) {
+        variance.disable_color_noise_reduction = !variance.disable_color_noise_reduction;
+    }
+    if input.just_pressed(KeyCode::Digit5) {
+        variance.force_diffuse = !variance.force_diffuse;
+    }
+    if input.just_pressed(KeyCode::Digit6) {
+        variance.disable_temporal_permutation = !variance.disable_temporal_permutation;
+    }
+    if input.just_pressed(KeyCode::Digit7) {
+        variance.two_level_light_ris = !variance.two_level_light_ris;
+    }
+}
+
+/// `[` / `]` tune the direct-lighting firefly clamp (post-exposure luminance).
+/// `]` enables it (starting at 8.0) then doubles; `[` halves, and disables it below
+/// a floor. Watch `Var post max` fall as you lower it, and stop before real
+/// highlights start dimming.
+fn adjust_firefly_clamp(
+    input: Res<ButtonInput<KeyCode>>,
+    mut variance: Query<&mut SolariVarianceDebug, With<RenderCamera>>,
+) {
+    let Ok(mut variance) = variance.single_mut() else {
+        return;
+    };
+    if input.just_pressed(KeyCode::BracketRight) {
+        variance.firefly_clamp = if variance.firefly_clamp <= 0.0 {
+            8.0
+        } else {
+            variance.firefly_clamp * 2.0
+        };
+    }
+    if input.just_pressed(KeyCode::BracketLeft) {
+        variance.firefly_clamp *= 0.5;
+        if variance.firefly_clamp < 0.25 {
+            variance.firefly_clamp = 0.0; // disabled
+        }
+    }
+}
+
+/// `,` / `.` halve / double the ReSTIR temporal confidence cap (effective history
+/// length), and `-` / `=` halve / double the primary direct-light sample count.
+/// These are the real convergence knobs: the confidence cap trades responsiveness
+/// for temporal stability (less shimmer, more lag/ghosting); more samples cut
+/// per-frame variance directly. Tune against the heatmap. No-ops in pathtracer mode.
+fn adjust_solari_quality(
+    input: Res<ButtonInput<KeyCode>>,
+    mut solari: Query<&mut SolariLighting, With<RenderCamera>>,
+) {
+    let Ok(mut solari) = solari.single_mut() else {
+        return;
+    };
+    if input.just_pressed(KeyCode::Period) {
+        solari.confidence_weight_cap = (solari.confidence_weight_cap * 2.0).min(256.0);
+    }
+    if input.just_pressed(KeyCode::Comma) {
+        solari.confidence_weight_cap = (solari.confidence_weight_cap * 0.5).max(1.0);
+    }
+    if input.just_pressed(KeyCode::Equal) {
+        solari.primary_di_samples = (solari.primary_di_samples * 2).min(1024);
+    }
+    if input.just_pressed(KeyCode::Minus) {
+        solari.primary_di_samples = (solari.primary_di_samples / 2).max(1);
+    }
+}
+
 /// Remembers whether DLSS Ray Reconstruction was on the last time realtime lighting was
 /// active, so `P` into the path tracer and back restores the user's `N` choice instead of
 /// always re-enabling DLSS. Set when entering pathtracer mode, read when leaving it.
@@ -884,7 +1036,9 @@ fn toggle_pathtracer(
     if is_pathtracer {
         // Back to realtime ReSTIR lighting, restoring DLSS only if it was on before the trip
         // through the path tracer (and is supported).
-        entity.remove::<Pathtracer>().insert(solari_lighting());
+        entity
+            .remove::<Pathtracer>()
+            .insert((solari_lighting(), variance_debug()));
         #[cfg(feature = "dlss")]
         if dlss_before_pt.0 && dlss_rr_supported.is_some() {
             entity.insert(dlss_rr(args.dlss_perf_quality()));
@@ -897,7 +1051,7 @@ fn toggle_pathtracer(
             dlss_before_pt.0 = *has_dlss;
         }
         entity
-            .remove::<SolariLighting>()
+            .remove::<(SolariLighting, SolariVarianceDebug)>()
             .insert(Pathtracer::default());
         #[cfg(feature = "dlss")]
         entity.remove::<(Dlss<DlssRayReconstructionFeature>, TemporalJitter, MipBias)>();
@@ -1064,6 +1218,8 @@ fn update_hud(
         Has<Dlss<DlssRayReconstructionFeature>>,
         With<RenderCamera>,
     >,
+    variance: Query<&SolariVarianceDebug, With<RenderCamera>>,
+    solari: Query<&SolariLighting, With<RenderCamera>>,
     mut text: Single<&mut Text, With<HudText>>,
 ) {
     let fps = diagnostics
@@ -1097,10 +1253,97 @@ fn update_hud(
     #[cfg(not(feature = "dlss"))]
     let dlss_line = "";
 
+    // Variance debug view + path-isolation mode (realtime path only; see
+    // `toggle_variance_debug` / `toggle_path_isolation`).
+    let variance_line = if let Ok(variance) = variance.single() {
+        let heatmap = match variance.mode {
+            VarianceDebugMode::Off => "off",
+            VarianceDebugMode::PreDenoise => "pre-denoise",
+            VarianceDebugMode::PostDenoise => "post-denoise",
+        };
+        let path = match variance.path_isolation {
+            PathIsolation::Normal => "normal",
+            PathIsolation::Direct => "direct only",
+            PathIsolation::Indirect => "indirect only",
+            PathIsolation::WorldCache => "world-cache only",
+            PathIsolation::NoWorldCache => "no world-cache",
+        };
+        // Only list the reuse toggles when some are active, to keep the HUD quiet.
+        let disabled = [
+            (variance.disable_temporal_reuse, "temporal"),
+            (variance.disable_spatial_reuse, "spatial"),
+            (variance.force_full_visibility, "shadows"),
+            (variance.disable_color_noise_reduction, "color-denoise"),
+            (variance.force_diffuse, "specular"),
+            (variance.disable_temporal_permutation, "temporal-permute"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect::<Vec<_>>();
+        let reuse = if disabled.is_empty() {
+            String::new()
+        } else {
+            format!("\ndisabled: {}  (1/2/3/4/5/6)", disabled.join(", "))
+        };
+        let two_level = if variance.two_level_light_ris {
+            "\ntwo-level light RIS: on  (7)"
+        } else {
+            "\ntwo-level light RIS: off  (7)"
+        };
+        let clamp = if variance.firefly_clamp > 0.0 {
+            format!("\nfirefly clamp: {:.2}  ([ ])", variance.firefly_clamp)
+        } else {
+            "\nfirefly clamp: off  ([ ])".to_string()
+        };
+        // Live convergence knobs (see `adjust_solari_quality`).
+        let quality = if let Ok(s) = solari.single() {
+            format!(
+                "\nconfidence cap: {:.0}  (, .)   di samples: {}  (- =)",
+                s.confidence_weight_cap, s.primary_di_samples
+            )
+        } else {
+            String::new()
+        };
+        format!("\nvariance heatmap: {heatmap}  (V)\npath isolation: {path}  (X){reuse}{two_level}{clamp}{quality}")
+    } else {
+        String::new()
+    };
+
     text.0 = format!(
-        "{renderer}\n{fps:>5.0} fps | {:.1} ms avg | {:.1} ms 1%-worst\n{mode}\n{pause}\nB: benchmark{dlss_line}",
+        "{renderer}\n{fps:>5.0} fps | {:.1} ms avg | {:.1} ms 1%-worst\n{mode}\n{pause}\nB: benchmark{dlss_line}{variance_line}",
         stats.avg_ms, stats.one_percent_high_ms,
     );
+}
+
+/// Reads back one stage's variance stats (published as `record_u32` diagnostics by
+/// Solari; see `VarianceStats`/`SolariVarianceDebug`) and reduces them to display
+/// numbers: mean relative variance, max relative variance, and the fraction of
+/// pixels over the threshold. Returns `None` until the diagnostics exist and at
+/// least one pixel has contributed.
+fn variance_readout(
+    diagnostics: &DiagnosticsStore,
+    sum_path: &'static str,
+    max_path: &'static str,
+    count_path: &'static str,
+    valid_path: &'static str,
+) -> Option<(f64, f32, f64)> {
+    let value = |path: &'static str| {
+        diagnostics
+            .get(&DiagnosticPath::new(path))
+            .and_then(Diagnostic::value)
+    };
+    let valid = value(valid_path)?;
+    if valid < 1.0 {
+        return None;
+    }
+    // Mirror of `VARIANCE_SUM_FIXED_SCALE` in `variance.wgsl` (the fixed-point
+    // scale the GPU used to accumulate the relative-variance sum).
+    const VARIANCE_SUM_FIXED_SCALE: f64 = 16.0;
+    let mean = value(sum_path).unwrap_or(0.0) / VARIANCE_SUM_FIXED_SCALE / valid;
+    // Max was accumulated as raw f32 bits via `atomicMax` (monotonic for f32 >= 0).
+    let max = f32::from_bits(value(max_path).unwrap_or(0.0) as u32);
+    let hot = value(count_path).unwrap_or(0.0) / valid * 100.0;
+    Some((mean, max, hot))
 }
 
 /// Per-pass Solari GPU timings (from `RenderDiagnosticsPlugin`), mirroring the `solari`
@@ -1159,5 +1402,34 @@ fn update_performance_text(
             world_cache_active_cells_count as u32,
             (world_cache_active_cells_count * 100.0) / (2u64.pow(20) as f64)
         ));
+    }
+
+    // Variance debug tooling readout (present only in ReSTIR mode, once the tool
+    // has run). `mean`/`max` are relative variance (Var/mean^2); `hot%` is the
+    // fraction of pixels over the threshold -- the ones that visibly stand out.
+    // The two lines let you watch the denoiser knock the numbers down.
+    let pre = variance_readout(
+        &diagnostics,
+        "render/solari_lighting/variance_pre/sum_relative_fixed",
+        "render/solari_lighting/variance_pre/max_relative_bits",
+        "render/solari_lighting/variance_pre/count_over_threshold",
+        "render/solari_lighting/variance_pre/valid_count",
+    );
+    let post = variance_readout(
+        &diagnostics,
+        "render/solari_lighting/variance_post/sum_relative_fixed",
+        "render/solari_lighting/variance_post/max_relative_bits",
+        "render/solari_lighting/variance_post/count_over_threshold",
+        "render/solari_lighting/variance_post/valid_count",
+    );
+    if pre.is_some() || post.is_some() {
+        text.push_str("\n");
+        for (label, readout) in [("Var pre", pre), ("Var post", post)] {
+            if let Some((mean, max, hot)) = readout {
+                text.push_str(&format!(
+                    "\n{label:9} mean {mean:.3} max {max:5.1} hot {hot:.1}%"
+                ));
+            }
+        }
     }
 }

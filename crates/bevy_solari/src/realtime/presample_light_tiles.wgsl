@@ -9,16 +9,25 @@ enable wgpu_ray_query;
 #import bevy_solari::sampling::{generate_random_light_sample, ResolvedLightSample}
 #import bevy_solari::realtime_bindings::{light_tile_samples, light_tile_resolved_samples, view, constants, ResolvedLightSamplePacked}
 
+// One tile holds `LIGHT_TILE_SAMPLES_PER_BLOCK` presampled lights (see prepare.rs).
+// The workgroup has 1024 lanes, so each lane fills this many slots.
+const SLOTS_PER_LANE = #{LIGHT_TILE_SAMPLES_PER_BLOCK}u / 1024u;
+
 @compute @workgroup_size(1024, 1, 1)
-fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(local_invocation_index) sample_index: u32) {
+fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
     let tile_id = workgroup_id.x;
-    var rng = (tile_id * 0x9E3779B9u) + sample_index + constants.frame_rng;
 
-    let sample = generate_random_light_sample(&rng);
+    // Fill the tile in 1024-wide chunks so tiles larger than the workgroup work.
+    for (var chunk = 0u; chunk < SLOTS_PER_LANE; chunk++) {
+        let sample_index = (chunk * 1024u) + lane;
+        var rng = (tile_id * 0x9E3779B9u) + sample_index + constants.frame_rng;
 
-    let i = (tile_id * 1024u) + sample_index;
-    light_tile_samples[i] = sample.light_sample;
-    light_tile_resolved_samples[i] = pack_resolved_light_sample(sample.resolved_light_sample);
+        let sample = generate_random_light_sample(&rng);
+
+        let i = (tile_id * #{LIGHT_TILE_SAMPLES_PER_BLOCK}u) + sample_index;
+        light_tile_samples[i] = sample.light_sample;
+        light_tile_resolved_samples[i] = pack_resolved_light_sample(sample.resolved_light_sample);
+    }
 }
 
 fn pack_resolved_light_sample(sample: ResolvedLightSample) -> ResolvedLightSamplePacked {

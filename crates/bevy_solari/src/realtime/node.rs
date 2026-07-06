@@ -1,4 +1,6 @@
-use super::prepare::{SolariLightingResources, LIGHT_TILE_BLOCKS, WORLD_CACHE_SIZE};
+use super::prepare::{
+    SolariLightingResources, LIGHT_TILE_BLOCKS, LIGHT_TILE_SAMPLES_PER_BLOCK, WORLD_CACHE_SIZE,
+};
 use crate::scene::RaytracingSceneBindings;
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 use bevy_anti_alias::dlss::ViewDlssRayReconstructionTextures;
@@ -6,13 +8,14 @@ use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_core_pipeline::prepass::{
     PreviousViewData, PreviousViewUniformOffset, PreviousViewUniforms, ViewPrepassTextures,
 };
+use bevy_diagnostic::FrameCount;
 use bevy_ecs::{prelude::*, resource::Resource, system::Commands};
 use bevy_render::{
     diagnostic::RecordDiagnostics as _,
     render_resource::{
         binding_types::{
-            storage_buffer_sized, texture_2d, texture_depth_2d, texture_storage_2d, uniform_buffer,
-            uniform_buffer_sized,
+            storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_depth_2d,
+            texture_storage_2d, uniform_buffer, uniform_buffer_sized,
         },
         BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, LoadOp,
@@ -45,6 +48,7 @@ pub struct SolariLightingPipelines {
     initial_with_psr_pipeline: CachedComputePipelineId,
     temporal_pipeline: CachedComputePipelineId,
     spatial_and_shade_pipeline: CachedComputePipelineId,
+    variance_accumulate_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
 }
@@ -76,6 +80,7 @@ pub fn solari_lighting(
     view_uniforms: Res<ViewUniforms>,
     previous_view_uniforms: Res<PreviousViewUniforms>,
     render_device: Res<RenderDevice>,
+    frame_count: Res<FrameCount>,
     mut ctx: RenderContext,
 ) {
     #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
@@ -122,6 +127,7 @@ pub fn solari_lighting(
         Some(initial_pipeline),
         Some(temporal_pipeline),
         Some(spatial_and_shade_pipeline),
+        Some(variance_accumulate_pipeline),
         Some(scene_bind_group),
         Some(gbuffer),
         Some(depth_buffer),
@@ -143,6 +149,7 @@ pub fn solari_lighting(
         pipeline_cache.get_compute_pipeline(initial_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.temporal_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.spatial_and_shade_pipeline),
+        pipeline_cache.get_compute_pipeline(pipelines.variance_accumulate_pipeline),
         &scene_bindings.bind_group,
         view_prepass_textures.deferred_view(),
         view_prepass_textures.depth_view(),
@@ -166,6 +173,15 @@ pub fn solari_lighting(
     let view_target_attachment = view_target.get_unsampled_color_attachment();
 
     let s = solari_lighting_resources;
+
+    // Ping-pong the variance moments buffers by frame parity so each frame reads
+    // the moments the previous frame wrote (reprojected). See the bind group below.
+    let (variance_moments_read, variance_moments_write) = if frame_count.0 & 1 == 0 {
+        (&s.variance_moments_a, &s.variance_moments_b)
+    } else {
+        (&s.variance_moments_b, &s.variance_moments_a)
+    };
+
     let bind_group = render_device.create_bind_group(
         "solari_lighting_bind_group",
         &pipeline_cache.get_bind_group_layout(&pipelines.bind_group_layout),
@@ -193,6 +209,12 @@ pub fn solari_lighting(
             s.world_cache_active_cell_indices.as_entire_binding(),
             s.world_cache_active_cells_count.as_entire_binding(),
             s.constants.as_entire_binding(),
+            // Ping-pong the variance moments buffers by frame parity: the buffer
+            // written this frame is read (reprojected) next frame. Frame N writes
+            // `write`; frame N+1 swaps them so that buffer becomes `read`.
+            variance_moments_read.as_entire_binding(),
+            variance_moments_write.as_entire_binding(),
+            s.variance_stats.as_entire_binding(),
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -232,6 +254,12 @@ pub fn solari_lighting(
             occlusion_query_set: None,
             multiview_mask: None,
         });
+    }
+
+    // Debug tooling: zero the per-frame variance stats reduction before the
+    // accumulate pass adds this frame's pixels into it (atomics accumulate).
+    if s.variance_enabled {
+        command_encoder.clear_buffer(&s.variance_stats, 0, None);
     }
 
     let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -319,6 +347,16 @@ pub fn solari_lighting(
 
     d.end(&mut pass);
 
+    // Debug tooling: accumulate this frame's pre-denoise (raw ReSTIR) radiance
+    // into the temporal-variance moments and global stats. Reads `view_output`,
+    // which `spatial_and_shade` just wrote, so it must follow that pass.
+    if s.variance_enabled {
+        let d = diagnostics.time_span(&mut pass, "solari_lighting/variance_pre");
+        pass.set_pipeline(variance_accumulate_pipeline);
+        pass.dispatch_workgroups(dx, dy, 1);
+        d.end(&mut pass);
+    }
+
     drop(pass);
 
     diagnostics.record_u32(
@@ -326,6 +364,33 @@ pub fn solari_lighting(
         &s.world_cache_active_cells_count.slice(..),
         "solari_lighting/world_cache_active_cells_count",
     );
+
+    // Debug tooling: publish the pre-denoise variance stats as diagnostics so the
+    // HUD can read them back on the CPU (see `VarianceStats` in `variance.wgsl`
+    // for the layout and units).
+    if s.variance_enabled {
+        let command_encoder = ctx.command_encoder();
+        diagnostics.record_u32(
+            command_encoder,
+            &s.variance_stats.slice(0..4),
+            "solari_lighting/variance_pre/sum_relative_fixed",
+        );
+        diagnostics.record_u32(
+            command_encoder,
+            &s.variance_stats.slice(4..8),
+            "solari_lighting/variance_pre/max_relative_bits",
+        );
+        diagnostics.record_u32(
+            command_encoder,
+            &s.variance_stats.slice(8..12),
+            "solari_lighting/variance_pre/count_over_threshold",
+        );
+        diagnostics.record_u32(
+            command_encoder,
+            &s.variance_stats.slice(12..16),
+            "solari_lighting/variance_pre/valid_count",
+        );
+    }
 }
 
 /// Initializes the Solari lighting pipelines at render startup.
@@ -363,6 +428,11 @@ pub fn init_solari_lighting_pipelines(
                 storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
                 uniform_buffer_sized(false, None),
+                // Variance debug tooling: moments read (binding 23), moments write
+                // (24), and the global stats reduction (25). See `variance.wgsl`.
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
             ),
         ),
     );
@@ -399,10 +469,13 @@ pub fn init_solari_lighting_pipelines(
             layout.push(extra_bind_group_layout.clone());
         }
 
-        let mut shader_defs = vec![ShaderDefVal::UInt(
-            "WORLD_CACHE_SIZE".into(),
-            WORLD_CACHE_SIZE as u32,
-        )];
+        let mut shader_defs = vec![
+            ShaderDefVal::UInt("WORLD_CACHE_SIZE".into(), WORLD_CACHE_SIZE as u32),
+            ShaderDefVal::UInt(
+                "LIGHT_TILE_SAMPLES_PER_BLOCK".into(),
+                LIGHT_TILE_SAMPLES_PER_BLOCK as u32,
+            ),
+        ];
         shader_defs.extend_from_slice(&extra_shader_defs);
 
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -504,6 +577,13 @@ pub fn init_solari_lighting_pipelines(
             "solari_lighting_spatial_and_shade_pipeline",
             "spatial_and_shade",
             load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
+            None,
+            vec![],
+        ),
+        variance_accumulate_pipeline: create_pipeline(
+            "solari_lighting_variance_accumulate_pipeline",
+            "variance_accumulate",
+            load_embedded_asset!(asset_server.as_ref(), "variance_accumulate.wgsl"),
             None,
             vec![],
         ),

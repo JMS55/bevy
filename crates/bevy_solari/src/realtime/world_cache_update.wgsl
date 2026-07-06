@@ -85,7 +85,7 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec3<f32> {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
-    let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+    let light_tile_start = rand_range_u(128u, &workgroup_rng) * #{LIGHT_TILE_SAMPLES_PER_BLOCK}u;
 
     var weight_sum = 0.0;
     var selected_sample_radiance = vec3(0.0);
@@ -93,7 +93,7 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
     var selected_sample_world_position = vec4(0.0);
     let mis_weight = 1.0 / f32(constants.world_cache_direct_light_sample_count);
     for (var i = 0u; i < constants.world_cache_direct_light_sample_count; i++) {
-        let tile_sample = light_tile_start + rand_range_u(1024u, rng);
+        let tile_sample = light_tile_start + rand_range_u(#{LIGHT_TILE_SAMPLES_PER_BLOCK}u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 

@@ -3,14 +3,14 @@ enable wgpu_ray_query;
 #define_import_path bevy_solari::initial_path
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::utils::{rand_f, rand_range_u}
+#import bevy_pbr::utils::{rand_f, rand_range_u, rand_u}
 #import bevy_render::maths::PI
 #import bevy_render::utils::octahedral_encode
 #import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
-#import bevy_solari::realtime_bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view}
-#import bevy_solari::sampling::{calculate_resolved_light_contribution, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_light_visibility}
-#import bevy_solari::scene_bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
+#import bevy_solari::realtime_bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view, PATH_ISO_NORMAL, PATH_ISO_DIRECT, PATH_ISO_INDIRECT, PATH_ISO_WORLD_CACHE, PATH_ISO_NO_WORLD_CACHE, DEBUG_FLAG_FORCE_FULL_VISIBILITY, DEBUG_FLAG_DISABLE_COLOR_NOISE_REDUCTION, DEBUG_FLAG_TWO_LEVEL_LIGHT_RIS}
+#import bevy_solari::sampling::{calculate_resolved_light_contribution, generate_random_light_sample, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, trace_light_visibility}
+#import bevy_solari::scene_bindings::{light_sources, LightSource, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 #ifdef DLSS_RR_GUIDE_BUFFERS
 #import bevy_pbr::pbr_functions::{calculate_diffuse_color, calculate_F0}
@@ -23,6 +23,24 @@ const RECONNECTION_ROUGHNESS_MIN = 0.6;
 const RECONNECTION_RELAX_DISTANCE = 1.0;
 
 const CACHE_TERMINATION_MIN_SOLID_ANGLE = PI;
+
+// Path-isolation debug (see `PATH_ISO_*` and `SolariVarianceDebug`). Whether
+// direct-lighting candidates (NEE and directly BRDF-sampled emitters) at this
+// bounce may contribute under the current isolation mode. Bounce 0 is "direct",
+// deeper bounces are "indirect".
+fn direct_lighting_candidate_allowed(bounce: u32) -> bool {
+    let mode = constants.path_isolation;
+    if mode == PATH_ISO_WORLD_CACHE { return false; }
+    if mode == PATH_ISO_DIRECT { return bounce == 0u; }
+    if mode == PATH_ISO_INDIRECT { return bounce > 0u; }
+    return true;
+}
+
+// Whether world-cache GI terminations may contribute under the current mode.
+fn world_cache_candidate_allowed() -> bool {
+    return constants.path_isolation != PATH_ISO_DIRECT
+        && constants.path_isolation != PATH_ISO_NO_WORLD_CACHE;
+}
 
 struct InitialSamplingResult {
     reservoir: Reservoir,
@@ -176,9 +194,17 @@ fn generate_nee_candidate(
     bounce: u32,
     rng: ptr<function, u32>,
 ) {
+    // Path-isolation debug: skip NEE when this bounce's direct lighting is masked.
+    if !direct_lighting_candidate_allowed(bounce) { return; }
+
     if rand_f(rng) >= p_nee { return; }
 
-    let di = sample_light_ris(path.ray_origin, path.normal, path.wo, path.material, F_ab, di_samples, workgroup_id, bounce, rng);
+    var di: DiSample;
+    if (constants.debug_flags & DEBUG_FLAG_TWO_LEVEL_LIGHT_RIS) != 0u {
+        di = sample_light_ris_two_level(path.ray_origin, path.normal, path.wo, path.material, F_ab, di_samples, workgroup_id, bounce, rng);
+    } else {
+        di = sample_light_ris(path.ray_origin, path.normal, path.wo, path.material, F_ab, di_samples, workgroup_id, bounce, rng);
+    }
     let di_target_function = luminance(di.brdf_radiance);
     if di_target_function <= 0.0 { return; }
 
@@ -204,11 +230,17 @@ fn generate_nee_candidate(
         }
     } else {
         // Deeper bounces: Candidate is the reconnection radiance at x2
-        let L_at_reconnection = path.throughput_past_x1 * di.brdf_radiance * di.unbiased_contribution_weight * nee_mis_weight / p_nee;
         if !path.x2_reusable {
-            // x1 -> x2 not reuse-safe: shade directly at this pixel instead of publishing.
+            // x1 -> x2 not reuse-safe: shade directly at this pixel instead of publishing. Since we
+            // shade here (rather than resampling into the reservoir), use the chroma-marginalized
+            // light estimate, which already folds in the RIS weight and visibility, in place of
+            // brdf_radiance * unbiased_contribution_weight. Same luminance, denoised color.
+            let color_noise_reduction = (constants.debug_flags & DEBUG_FLAG_DISABLE_COLOR_NOISE_REDUCTION) == 0u;
+            let light_contribution = select(di.brdf_radiance * di.unbiased_contribution_weight, di.marginalized_brdf_radiance, color_noise_reduction);
+            let L_at_reconnection = path.throughput_past_x1 * light_contribution * nee_mis_weight / p_nee;
             *non_resampled_radiance += path.x1_brdf * L_at_reconnection;
         } else {
+            let L_at_reconnection = path.throughput_past_x1 * di.brdf_radiance * di.unbiased_contribution_weight * nee_mis_weight / p_nee;
             let target_function = luminance(path.x1_brdf * L_at_reconnection);
             let resampling_weight = target_function;
 
@@ -231,11 +263,16 @@ struct DiSample {
     brdf_radiance: vec3<f32>,
     inverse_solid_angle_pdf: f32,
     brdf_rays_can_hit: bool,
+    // Chroma-marginalized light contribution: the RIS weight-sum built with the RGB integrand F
+    // instead of the scalar target, gated by the selected sample's visibility. Its luminance equals
+    // the scalar estimate's (unbiased), but its chroma averages over all candidates rather than
+    // committing to the one selected light. Used only when shading directly (non_resampled).
+    marginalized_brdf_radiance: vec3<f32>,
 }
 
 fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, di_samples: u32, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y + bounce;
-    let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+    let light_tile_start = rand_range_u(128u, &workgroup_rng) * #{LIGHT_TILE_SAMPLES_PER_BLOCK}u;
 
     var weight_sum = 0.0;
     var selected_target_function = 0.0;
@@ -245,9 +282,13 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
     var selected_brdf_radiance = vec3(0.0);
     var selected_inverse_solid_angle_pdf = 0.0;
     var selected_brdf_rays_can_hit = false;
+    // Vector-valued weight sum: same as weight_sum but with the RGB integrand F kept instead of its
+    // luminance. luminance(marginalized_radiance) == weight_sum, so dividing by weight_sum yields a
+    // chroma direction averaged over all candidates.
+    var marginalized_radiance = vec3(0.0);
     let mis_weight = 1.0 / f32(di_samples);
     for (var i = 0u; i < di_samples; i++) {
-        let tile_sample = light_tile_start + rand_range_u(1024u, rng);
+        let tile_sample = light_tile_start + rand_range_u(#{LIGHT_TILE_SAMPLES_PER_BLOCK}u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, ray_origin, normal);
         let brdf_current = evaluate_brdf(wo, light_contribution.wi, normal, material, F_ab);
@@ -257,6 +298,7 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
         let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
 
         weight_sum += resampling_weight;
+        marginalized_radiance += mis_weight * (brdf_radiance * light_contribution.inverse_pdf);
 
         if weight_sum > 0.0 && rand_f(rng) * weight_sum < resampling_weight {
             selected_target_function = target_function;
@@ -270,12 +312,113 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
     }
 
     var unbiased_contribution_weight = 0.0;
+    var visibility = 1.0;
     if selected_target_function > 0.0 {
         unbiased_contribution_weight = weight_sum / selected_target_function;
+        // Debug tooling: optionally skip the shadow ray (force full visibility) to
+        // test whether shadow-ray noise is the source of shimmer.
+        if (constants.debug_flags & DEBUG_FLAG_FORCE_FULL_VISIBILITY) == 0u {
+            visibility = trace_light_visibility(ray_origin, selected_world_position);
+        }
+        unbiased_contribution_weight *= visibility;
+    }
+    // Reuse the selected sample's visibility for the whole marginalized average. This is a minor
+    // bias (candidates with different occlusion share one shadow test) traded for zero extra rays.
+    marginalized_radiance *= visibility;
+
+    return DiSample(unbiased_contribution_weight, selected_light_sample, selected_wi, selected_brdf_radiance, selected_inverse_solid_angle_pdf, selected_brdf_rays_can_hit, marginalized_radiance);
+}
+
+// Number of point-refinement samples in stage 2 of the two-level light RIS.
+const TWO_LEVEL_POINT_SAMPLES = 8u;
+
+// Debug/experimental: two-level light RIS (see DEBUG_FLAG_TWO_LEVEL_LIGHT_RIS).
+// Stage 1 does RIS over `light_di_samples` lights drawn directly from the scene
+// (uniformly, bypassing the light tiles) with a cheap diffuse, unshadowed target to
+// pick a promising light triangle. Stage 2 does RIS over `TWO_LEVEL_POINT_SAMPLES`
+// fresh points on that triangle with the full BRDF target.
+//
+// The combined unbiased contribution weight is `UCW1 * mean(target2) / target2(y)`
+// (conditional RIS): stage 1's UCW carries the light selection in the full area
+// measure, and because every stage-2 point lies on the triangle stage 1 selected,
+// the light's area measure cancels between the stages. Validate against the
+// reference path tracer -- if the image matches, the weighting is unbiased.
+fn sample_light_ris_two_level(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, light_di_samples: u32, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
+    let null_sample = DiSample(0.0, LightSample(NULL_LIGHT_ID, 0u), vec3(0.0), vec3(0.0), 0.0, false, vec3(0.0));
+
+    // Stage 1: pick a light triangle with a cheap target (no BRDF, no shadow ray),
+    // drawing candidates directly from the scene's lights (ignoring the light tiles).
+    var weight_sum_1 = 0.0;
+    var selected_light_sample = LightSample(NULL_LIGHT_ID, 0u);
+    var selected_target_1 = 0.0;
+    let mis_weight_1 = 1.0 / f32(light_di_samples);
+    for (var i = 0u; i < light_di_samples; i++) {
+        let sample = generate_random_light_sample(rng);
+        let light_contribution = calculate_resolved_light_contribution(sample.resolved_light_sample, ray_origin, normal);
+        // Cheap importance proxy: diffuse irradiance (radiance * NdotL), no BRDF/shadow.
+        let target_1 = luminance(light_contribution.radiance) * saturate(dot(light_contribution.wi, normal));
+        let resampling_weight = mis_weight_1 * (target_1 * light_contribution.inverse_pdf);
+
+        weight_sum_1 += resampling_weight;
+        if weight_sum_1 > 0.0 && rand_f(rng) * weight_sum_1 < resampling_weight {
+            selected_light_sample = sample.light_sample;
+            selected_target_1 = target_1;
+        }
+    }
+
+    if selected_target_1 <= 0.0 { return null_sample; }
+    let ucw_1 = weight_sum_1 / selected_target_1;
+
+    // Stage 2: refine the point on the chosen triangle with the full BRDF target.
+    let light_source = light_sources[selected_light_sample.light_id >> 16u];
+    var sum_target_2 = 0.0;
+    var selected_target_2 = 0.0;
+    var selected_wi = vec3(0.0);
+    var selected_brdf_radiance = vec3(0.0);
+    var selected_world_position = vec4(0.0);
+    var selected_inverse_solid_angle_pdf = 0.0;
+    var selected_brdf_rays_can_hit = false;
+    var selected_point_sample = selected_light_sample;
+    for (var j = 0u; j < TWO_LEVEL_POINT_SAMPLES; j++) {
+        // Same light + triangle, fresh point (new seed -> new barycentrics).
+        let point_sample = LightSample(selected_light_sample.light_id, rand_u(rng));
+        let resolved = resolve_light_sample(point_sample, light_source);
+        let light_contribution = calculate_resolved_light_contribution(resolved, ray_origin, normal);
+        let brdf_radiance = evaluate_brdf(wo, light_contribution.wi, normal, material, F_ab) * light_contribution.radiance;
+        let target_2 = luminance(brdf_radiance);
+
+        sum_target_2 += target_2;
+        if sum_target_2 > 0.0 && rand_f(rng) * sum_target_2 < target_2 {
+            selected_target_2 = target_2;
+            selected_wi = light_contribution.wi;
+            selected_brdf_radiance = brdf_radiance;
+            selected_world_position = resolved.world_position;
+            selected_inverse_solid_angle_pdf = light_contribution.inverse_solid_angle_pdf;
+            selected_brdf_rays_can_hit = light_contribution.brdf_rays_can_hit;
+            selected_point_sample = point_sample;
+        }
+    }
+
+    if selected_target_2 <= 0.0 { return null_sample; }
+
+    // Conditional-RIS composition (see the function doc).
+    var unbiased_contribution_weight =
+        ucw_1 * (sum_target_2 / f32(TWO_LEVEL_POINT_SAMPLES)) / selected_target_2;
+
+    if (constants.debug_flags & DEBUG_FLAG_FORCE_FULL_VISIBILITY) == 0u {
         unbiased_contribution_weight *= trace_light_visibility(ray_origin, selected_world_position);
     }
 
-    return DiSample(unbiased_contribution_weight, selected_light_sample, selected_wi, selected_brdf_radiance, selected_inverse_solid_angle_pdf, selected_brdf_rays_can_hit);
+    return DiSample(
+        unbiased_contribution_weight,
+        selected_point_sample,
+        selected_wi,
+        selected_brdf_radiance,
+        selected_inverse_solid_angle_pdf,
+        selected_brdf_rays_can_hit,
+        // No chroma marginalization in this path; use the selected sample's estimate.
+        selected_brdf_radiance * unbiased_contribution_weight,
+    );
 }
 
 fn generate_emissive_candidate(
@@ -293,6 +436,10 @@ fn generate_emissive_candidate(
     bounce: u32,
     rng: ptr<function, u32>,
 ) {
+    // Path-isolation debug: skip BRDF-sampled emissive when this bounce's direct
+    // lighting is masked (a BRDF ray hitting an emitter is direct light too).
+    if !direct_lighting_candidate_allowed(bounce) { return; }
+
     let NdotV_hit = max(dot(ray_hit.world_normal, -wi), 0.0001);
     let light_count = arrayLength(&light_sources);
     let area_pdf = 1.0 / (f32(light_count) * f32(ray_hit.triangle_count) * ray_hit.triangle_area);
@@ -362,6 +509,10 @@ fn terminate_into_cache(
     var rng_copy = *rng;
     let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, ray_t, &rng_copy);
     if ray_t <= sqrt(3.0) * world_cache_cell_size { return false; }
+
+    // Path-isolation debug: in the modes that mask the world cache, terminate the
+    // path here (as it normally would) but contribute nothing from the cache.
+    if !world_cache_candidate_allowed() { return true; }
 
     let cached_radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray_t, WORLD_CACHE_CELL_LIFETIME, rng);
 

@@ -1,4 +1,4 @@
-use super::SolariLighting;
+use super::{SolariLighting, SolariVarianceDebug};
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 use bevy_anti_alias::dlss::{
     Dlss, DlssRayReconstructionFeature, ViewDlssRayReconstructionTextures,
@@ -38,8 +38,20 @@ const RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE: u64 = 24;
 /// Size of the `Reservoir` shader struct in bytes.
 const RESERVOIR_STRUCT_SIZE: u64 = 48;
 
+/// Size of a `VarianceMoments` (`vec4<f32>`) entry in bytes (see `variance.wgsl`).
+const VARIANCE_MOMENTS_STRUCT_SIZE: u64 = 16;
+
+/// Size of the `VarianceStats` shader struct in bytes (four `u32`s).
+const VARIANCE_STATS_STRUCT_SIZE: u64 = 16;
+
 pub const LIGHT_TILE_BLOCKS: u64 = 128;
-pub const LIGHT_TILE_SAMPLES_PER_BLOCK: u64 = 1024;
+/// Presampled light samples per tile. Each RIS candidate in `sample_light_ris`
+/// (and the world-cache DI update) is drawn from a single tile, so this sets how
+/// large a slice of the scene's lights each tile covers. Must be a multiple of the
+/// presample pass's workgroup size (1024); the presample loop fills that many
+/// slots per invocation. Passed to the shaders as the `LIGHT_TILE_SAMPLES_PER_BLOCK`
+/// shader-def.
+pub const LIGHT_TILE_SAMPLES_PER_BLOCK: u64 = 4096;
 
 /// Amount of entries in the world cache (must be a power of 2, and >= 2^10)
 pub const WORLD_CACHE_SIZE: u64 = 2u64.pow(20);
@@ -64,10 +76,21 @@ struct SolariLightingUniforms {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
+    // Variance debug tooling (see `variance.wgsl`); mirrors the tail of
+    // `SolariLightingSettings` in `realtime_bindings.wgsl`.
+    variance_debug_mode: u32,
+    variance_threshold: f32,
+    variance_history_length: f32,
+    path_isolation: u32,
+    debug_flags: u32,
+    firefly_clamp: f32,
+    _debug_pad1: u32,
+    _debug_pad2: u32,
 }
 
 impl SolariLightingUniforms {
-    fn new(settings: &SolariLighting, frame_count: u32) -> Self {
+    fn new(settings: &SolariLighting, variance: Option<&SolariVarianceDebug>, frame_count: u32) -> Self {
+        let variance = variance.copied().unwrap_or_default();
         Self {
             confidence_weight_cap: settings.confidence_weight_cap,
             primary_di_samples: settings.primary_di_samples,
@@ -81,6 +104,14 @@ impl SolariLightingUniforms {
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
             reset: settings.reset as u32,
+            variance_debug_mode: variance.mode as u32,
+            variance_threshold: variance.threshold,
+            variance_history_length: variance.history_length,
+            path_isolation: variance.path_isolation as u32,
+            debug_flags: variance.debug_flags(),
+            firefly_clamp: variance.firefly_clamp,
+            _debug_pad1: 0,
+            _debug_pad2: 0,
         }
     }
 }
@@ -104,6 +135,19 @@ pub struct SolariLightingResources {
     pub world_cache_active_cell_indices: Buffer,
     pub world_cache_active_cells_count: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    /// Ping-ponged per-pixel temporal-variance moments buffers for the pre-denoise
+    /// debug tap (`variance.wgsl`). Full-size only when [`variance_enabled`] is set;
+    /// otherwise tiny placeholders so the shared bind group stays valid at zero cost.
+    ///
+    /// [`variance_enabled`]: SolariLightingResources::variance_enabled
+    pub variance_moments_a: Buffer,
+    pub variance_moments_b: Buffer,
+    /// Global stats reduction for the pre-denoise variance pass, read back to the
+    /// CPU via the render diagnostics path. Always allocated (16 bytes).
+    pub variance_stats: Buffer,
+    /// Whether the variance debug tooling was active when these resources were
+    /// built. Toggling it forces a reallocation (of the moments buffers).
+    pub variance_enabled: bool,
     pub view_size: UVec2,
 }
 
@@ -112,6 +156,7 @@ pub fn prepare_solari_lighting_resources(
         Entity,
         &ExtractedCamera,
         &SolariLighting,
+        Option<&SolariVarianceDebug>,
         Option<&SolariLightingResources>,
         Option<&MainPassResolutionOverride>,
     )>,
@@ -119,6 +164,7 @@ pub fn prepare_solari_lighting_resources(
         Entity,
         &ExtractedCamera,
         &SolariLighting,
+        Option<&SolariVarianceDebug>,
         Option<&SolariLightingResources>,
         Option<&MainPassResolutionOverride>,
         Has<Dlss<DlssRayReconstructionFeature>>,
@@ -130,13 +176,20 @@ pub fn prepare_solari_lighting_resources(
 ) {
     for query_item in &query {
         #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
-        let (entity, camera, solari_lighting, solari_lighting_resources, resolution_override) =
-            query_item;
+        let (
+            entity,
+            camera,
+            solari_lighting,
+            variance_debug,
+            solari_lighting_resources,
+            resolution_override,
+        ) = query_item;
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
         let (
             entity,
             camera,
             solari_lighting,
+            variance_debug,
             solari_lighting_resources,
             resolution_override,
             has_dlss_rr,
@@ -149,10 +202,12 @@ pub fn prepare_solari_lighting_resources(
             view_size = *resolution_override;
         }
 
-        let uniforms = SolariLightingUniforms::new(solari_lighting, frame_count.0);
+        let uniforms = SolariLightingUniforms::new(solari_lighting, variance_debug, frame_count.0);
+        let variance_enabled = variance_debug.is_some();
 
         if let Some(solari_lighting_resources) = solari_lighting_resources
             && solari_lighting_resources.view_size == view_size
+            && solari_lighting_resources.variance_enabled == variance_enabled
         {
             // The constants uniform can change every frame, so always upload it.
             render_queue.write_buffer(
@@ -273,6 +328,32 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        // Full-size moments buffers only when the debug tooling is active; otherwise
+        // tiny placeholders that keep the shared bind group valid without paying the
+        // (two-per-pixel-vec4) memory cost when the tool is off.
+        let variance_moments_size = if variance_enabled {
+            (view_size.x * view_size.y) as u64 * VARIANCE_MOMENTS_STRUCT_SIZE
+        } else {
+            VARIANCE_MOMENTS_STRUCT_SIZE
+        };
+        let variance_moments_buffer = |name| {
+            render_device.create_buffer(&BufferDescriptor {
+                label: Some(name),
+                size: variance_moments_size,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let variance_moments_a = variance_moments_buffer("solari_lighting_variance_moments_a");
+        let variance_moments_b = variance_moments_buffer("solari_lighting_variance_moments_b");
+
+        let variance_stats = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_variance_stats"),
+            size: VARIANCE_STATS_STRUCT_SIZE,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         commands.entity(entity).insert(SolariLightingResources {
             constants,
             light_tile_samples,
@@ -290,6 +371,10 @@ pub fn prepare_solari_lighting_resources(
             world_cache_active_cell_indices,
             world_cache_active_cells_count,
             world_cache_active_cells_dispatch,
+            variance_moments_a,
+            variance_moments_b,
+            variance_stats,
+            variance_enabled,
             view_size,
         });
 

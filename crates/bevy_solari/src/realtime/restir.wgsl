@@ -7,13 +7,27 @@ enable wgpu_ray_query;
 #import bevy_solari::brdf::{brdf_pdf, evaluate_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::initial_path::{generate_initial_reservoir, InitialSamplingResult}
-#import bevy_solari::realtime_bindings::{depth_buffer, empty_reservoir, gbuffer, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output}
+#import bevy_solari::realtime_bindings::{depth_buffer, empty_reservoir, gbuffer, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output, PATH_ISO_INDIRECT, PATH_ISO_WORLD_CACHE, DEBUG_FLAG_DISABLE_TEMPORAL_REUSE, DEBUG_FLAG_DISABLE_SPATIAL_REUSE, DEBUG_FLAG_DISABLE_COLOR_NOISE_REDUCTION, DEBUG_FLAG_FORCE_DIFFUSE, DEBUG_FLAG_DISABLE_TEMPORAL_PERMUTATION}
 #import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
 #import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial}
 #import bevy_solari::world_cache::{query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD = 0.2;
+
+// Debug tooling: strip the specular lobe from a surface (roughness -> 1, metallic
+// -> 0) when DEBUG_FLAG_FORCE_DIFFUSE is set, to test whether specular is the
+// shimmer source. Applied to the primary surface at each ReSTIR entry point.
+fn maybe_force_diffuse(material: ResolvedMaterial) -> ResolvedMaterial {
+    if (constants.debug_flags & DEBUG_FLAG_FORCE_DIFFUSE) == 0u {
+        return material;
+    }
+    var m = material;
+    m.perceptual_roughness = 1.0;
+    m.roughness = 1.0;
+    m.metallic = 0.0;
+    return m;
+}
 
 @compute @workgroup_size(8, 8, 1)
 fn initial(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -27,7 +41,8 @@ fn initial(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invoc
         reservoirs_b[pixel_index] = empty_reservoir();
         return;
     }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    var surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    surface.material = maybe_force_diffuse(surface.material);
 
     let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.material, workgroup_id.xy, global_id.xy, &rng);
 
@@ -44,10 +59,16 @@ fn temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 { return; }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    var surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    surface.material = maybe_force_diffuse(surface.material);
 
     // Performance improvement: Skip resampling for low-roughness metallic surfaces
     if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
+        return;
+    }
+
+    // Debug tooling: skip temporal reuse (leave this pixel's initial reservoir).
+    if (constants.debug_flags & DEBUG_FLAG_DISABLE_TEMPORAL_REUSE) != 0u {
         return;
     }
 
@@ -73,7 +94,8 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
         reservoirs_a[pixel_index] = empty_reservoir();
         return;
     }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    var surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    surface.material = maybe_force_diffuse(surface.material);
 
     let input_reservoir = reservoirs_b[pixel_index];
     let wo = normalize(view.world_position - surface.world_position);
@@ -81,28 +103,53 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let F_ab = F_AB(surface.material.perceptual_roughness, NdotV);
 
     var combined_reservoir: Reservoir;
-    var shade_brdf_radiance: vec3<f32>;
-    if mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD {
-        // Performance improvement: Skip resampling for low-roughness metallic surfaces
+    var shade_radiance: vec3<f32>; // F*W contribution, ready to composite
+    // Skip spatial resampling for low-roughness metallic surfaces (perf), or when
+    // the debug tooling disables spatial reuse (to isolate its per-frame flicker).
+    let skip_spatial = mix(1.0, surface.material.perceptual_roughness, surface.material.metallic) < SPECULAR_DOMINANCE_SKIP_RESAMPLING_THRESHOLD
+        || (constants.debug_flags & DEBUG_FLAG_DISABLE_SPATIAL_REUSE) != 0u;
+    if skip_spatial {
         combined_reservoir = input_reservoir;
         var resolved: ResolvedLightSample;
         if input_reservoir.light_sample.light_id != NULL_LIGHT_ID {
             resolved = resolve_light_sample(input_reservoir.light_sample, light_sources[input_reservoir.light_sample.light_id >> 16u]);
         }
-        shade_brdf_radiance = reservoir_contribution(input_reservoir, resolved, surface.world_position, surface.world_normal, wo, surface.material, F_ab).brdf_radiance;
+        // Single sample (M = 1), so no marginalization gain: shade is plain F*W.
+        shade_radiance = reservoir_contribution(input_reservoir, resolved, surface.world_position, surface.world_normal, wo, surface.material, F_ab).brdf_radiance * input_reservoir.unbiased_contribution_weight;
     } else {
         let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
         let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
             spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, view.world_position, true, &rng);
         combined_reservoir = merge_result.merged_reservoir;
-        shade_brdf_radiance = merge_result.selected_sample_brdf_radiance;
+        // Vector-valued, already includes the reservoir weight.
+        shade_radiance = merge_result.shade_radiance;
     }
 
     reservoirs_a[pixel_index] = combined_reservoir;
 
-    var pixel_color = shade_brdf_radiance * combined_reservoir.unbiased_contribution_weight;
-    pixel_color += surface.material.emissive;
-    pixel_color += textureLoad(view_output, global_id.xy).rgb;
+    // Total ReSTIR lighting that can firefly: the direct reservoir contribution plus
+    // the directly-shaded indirect (reconnection / world-cache) radiance in
+    // view_output. Both carry `weight/target_function` spikes, so clamp them
+    // together -- clamping only the direct term misses the indirect fireflies.
+    var lit = shade_radiance + textureLoad(view_output, global_id.xy).rgb;
+
+    // Firefly clamp: bound the lit contribution's post-exposure luminance so a single
+    // resampled sample can't blow up into a sparse spike the denoiser can't remove.
+    // Preserves hue; 0 disables. Directly-visible emission is excluded (added below),
+    // since real emitters are legitimately bright. Debug knob.
+    if constants.firefly_clamp > 0.0 {
+        let display_luminance = luminance(lit) * view.exposure;
+        if display_luminance > constants.firefly_clamp {
+            lit *= constants.firefly_clamp / display_luminance;
+        }
+    }
+
+    var pixel_color = lit;
+    // Path-isolation debug: directly-visible emission is a bounce-0 "direct" term,
+    // so drop it from the indirect-only and world-cache-only views.
+    if constants.path_isolation != PATH_ISO_INDIRECT && constants.path_isolation != PATH_ISO_WORLD_CACHE {
+        pixel_color += surface.material.emissive;
+    }
     pixel_color *= view.exposure;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
 
@@ -127,8 +174,14 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
         point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
     }
 
-    var permute_rng = constants.frame_rng;
-    let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, rand_u(&permute_rng), view.main_pass_viewport.zw);
+    // Debug tooling: the permutation reads a frame-varying ±3px neighbor's history
+    // (decorrelates reuse), which can read as temporal shimmer on static surfaces.
+    // Disable it to read the exact reprojected pixel and test that hypothesis.
+    var permuted_temporal_pixel_id = point_temporal_pixel_id;
+    if (constants.debug_flags & DEBUG_FLAG_DISABLE_TEMPORAL_PERMUTATION) == 0u {
+        var permute_rng = constants.frame_rng;
+        permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, rand_u(&permute_rng), view.main_pass_viewport.zw);
+    }
 
     // Check if the pixel features have changed heavily between the current and previous frame
     let temporal_depth = textureLoad(previous_depth_buffer, permuted_temporal_pixel_id, 0);
@@ -212,7 +265,11 @@ fn jacobian(
 
 struct ReservoirMergeResult {
     merged_reservoir: Reservoir,
-    selected_sample_brdf_radiance: vec3<f32>,
+    // Vector-valued shade contribution (already F*W, summed over the candidates rather than taken
+    // from the single selected sample). Marginalizing over the selection index Rao-Blackwellizes
+    // the chroma, cutting color noise. Already includes the reservoir weight, so it is NOT
+    // multiplied by unbiased_contribution_weight again at shade time.
+    shade_radiance: vec3<f32>,
 }
 
 fn merge_reservoirs(
@@ -240,7 +297,8 @@ fn merge_reservoirs(
 
     // Skip resampling empty reservoirs
     if other_reservoir.confidence_weight == 0.0 {
-        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
+        // M = 1, so the marginalized shade is just F*W for the canonical sample.
+        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance * canonical_reservoir.unbiased_contribution_weight);
     }
 
     var other_resolved: ResolvedLightSample;
@@ -285,10 +343,13 @@ fn merge_reservoirs(
         canonical_sample_at_other_jacobian = 0.0;
     }
 
-    // Visibility for the cross-domain targets
+    // Visibility for the cross-domain targets. Fold it into brdf_radiance too, not just the scalar
+    // target_function, so the vector-valued shade weight below zeroes out occluded candidates
+    // rather than leaking their color (F_i and p_hat_i must stay consistent, F_i/p_hat_i = chroma).
     if other_sample_at_canonical.target_function > 0.0 && other_sample_at_canonical_jacobian > 0.0 {
         let visibility = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
         other_sample_at_canonical.target_function *= visibility;
+        other_sample_at_canonical.brdf_radiance *= visibility;
     }
     if canonical_sample_at_other.target_function > 0.0 && canonical_sample_at_other_jacobian > 0.0 {
         let visibility = trace_light_visibility(other_world_position + other_world_normal * RAY_T_MIN, canonical_sample_at_other.sample_world_position);
@@ -315,6 +376,15 @@ fn merge_reservoirs(
     let other_sample_mis_weight = mix(other_balance_mis_weight, 0.0, defensive_t_c);
     let other_sample_resampling_weight = other_sample_mis_weight * other_sample_at_canonical.target_function * other_reservoir.unbiased_contribution_weight * other_sample_at_canonical_jacobian;
 
+    // Vector-valued shade weight: the scalar resampling weights above with the scalar target
+    // function p_hat swapped for the RGB integrand F (brdf_radiance). Summing both candidates
+    // marginalizes over which one the reservoir selects, averaging their chroma (ReSTIR PT
+    // Enhanced supplemental 6.3). Used only for shading; the scalar reservoir below still drives
+    // future resampling.
+    let shade_radiance = canonical_sample_mis_weight * canonical_reservoir.unbiased_contribution_weight * canonical_sample_at_canonical.brdf_radiance
+        + other_sample_mis_weight * other_reservoir.unbiased_contribution_weight * other_sample_at_canonical_jacobian * other_sample_at_canonical.brdf_radiance;
+    let color_noise_reduction = (constants.debug_flags & DEBUG_FLAG_DISABLE_COLOR_NOISE_REDUCTION) == 0u;
+
     // Perform resampling
     var combined_reservoir = empty_reservoir();
     combined_reservoir.confidence_weight = canonical_reservoir.confidence_weight + other_reservoir.confidence_weight;
@@ -329,7 +399,8 @@ fn merge_reservoirs(
         let inverse_target_function = select(0.0, 1.0 / other_sample_at_canonical.target_function, other_sample_at_canonical.target_function > 0.0);
         combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
-        return ReservoirMergeResult(combined_reservoir, other_sample_at_canonical.brdf_radiance);
+        let out = select(other_sample_at_canonical.brdf_radiance * combined_reservoir.unbiased_contribution_weight, shade_radiance, color_noise_reduction);
+        return ReservoirMergeResult(combined_reservoir, out);
     } else {
         combined_reservoir.sample_point_world_position = canonical_reservoir.sample_point_world_position;
         combined_reservoir.sample_point_world_normal = canonical_reservoir.sample_point_world_normal;
@@ -339,7 +410,8 @@ fn merge_reservoirs(
         let inverse_target_function = select(0.0, 1.0 / canonical_sample_at_canonical.target_function, canonical_sample_at_canonical.target_function > 0.0);
         combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
-        return ReservoirMergeResult(combined_reservoir, canonical_sample_at_canonical.brdf_radiance);
+        let out = select(canonical_sample_at_canonical.brdf_radiance * combined_reservoir.unbiased_contribution_weight, shade_radiance, color_noise_reduction);
+        return ReservoirMergeResult(combined_reservoir, out);
     }
 }
 

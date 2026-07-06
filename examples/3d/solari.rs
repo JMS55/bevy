@@ -8,12 +8,11 @@ use bevy::{
     gltf::GltfMaterialName,
     image::{ImageAddressMode, ImageLoaderSettings},
     mesh::{Indices, VertexAttributeValues},
-    post_process::bloom::Bloom,
     prelude::*,
     render::{diagnostic::RenderDiagnosticsPlugin, render_resource::TextureUsages},
     solari::{
         pathtracer::{Pathtracer, PathtracingPlugin},
-        prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins},
+        prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins, SolariVarianceDebug},
     },
     world_serialization::WorldInstanceReady,
 };
@@ -86,7 +85,9 @@ fn main() {
 
         if args.moving_mirror == Some(true) {
             app.add_systems(Update, (pause_scene, move_mirror));
-        } else if args.many_lights != Some(true) && args.gi_double_count != Some(true) {
+        } else if args.many_lights == Some(true) {
+            app.add_systems(Update, toggle_color_noise_reduction);
+        } else if args.gi_double_count != Some(true) {
             app.add_systems(Update, (pause_scene, toggle_lights, patrol_path));
         }
         app.add_systems(PostUpdate, (update_control_text, update_performance_text));
@@ -350,16 +351,14 @@ fn setup_many_lights(
         // Msaa::Off and CameraMainTextureUsages with STORAGE_BINDING are required for Solari
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
         Msaa::Off,
-        Bloom {
-            intensity: 0.1,
-            ..Bloom::NATURAL
-        },
     ));
 
     if args.pathtracer == Some(true) {
         camera.insert(Pathtracer::default());
     } else {
-        camera.insert(SolariLighting::default());
+        // SolariVarianceDebug carries the `disable_color_noise_reduction` toggle (key C).
+        // Its presence also enables per-frame variance accumulation, a small overhead.
+        camera.insert((SolariLighting::default(), SolariVarianceDebug::default()));
     }
 
     // Using DLSS Ray Reconstruction for denoising (and cheaper rendering via upscaling) is _highly_ recommended when using Solari
@@ -843,6 +842,19 @@ fn pause_scene(mut time: ResMut<Time<Virtual>>, key_input: Res<ButtonInput<KeyCo
     }
 }
 
+/// `C` toggles chroma-marginalized (color-noise-reduced) shading, to A/B the
+/// vector-valued shading in the spatial merge and light RIS (many-lights scene).
+fn toggle_color_noise_reduction(
+    key_input: Res<ButtonInput<KeyCode>>,
+    mut variance: Query<&mut SolariVarianceDebug, With<SolariLighting>>,
+) {
+    if key_input.just_pressed(KeyCode::KeyC)
+        && let Ok(mut variance) = variance.single_mut()
+    {
+        variance.disable_color_noise_reduction = !variance.disable_color_noise_reduction;
+    }
+}
+
 #[derive(Resource)]
 struct RobotLightMaterial(Handle<StandardMaterial>);
 
@@ -944,6 +956,7 @@ fn update_control_text(
     directional_light: Query<Entity, With<DirectionalLight>>,
     time: Res<Time<Virtual>>,
     args: Res<Args>,
+    variance: Query<&SolariVarianceDebug, With<SolariLighting>>,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] dlss_rr_supported: Option<
         Res<DlssRayReconstructionSupported>,
     >,
@@ -992,6 +1005,14 @@ fn update_control_text(
     #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
     text.0
         .push_str("\nDenoising: App not compiled with DLSS support");
+
+    if let Ok(variance) = variance.single() {
+        if variance.disable_color_noise_reduction {
+            text.0.push_str("\n(C): Enable color-noise reduction");
+        } else {
+            text.0.push_str("\n(C): Disable color-noise reduction");
+        }
+    }
 }
 
 #[derive(Component)]

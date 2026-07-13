@@ -92,6 +92,18 @@ fn isnan(x: f32) -> bool {
 }
 
 const NULL_LIGHT_ID = 0xFFFFFFFFu;
+// Marks a GI reservoir sample whose reconnection vertex sits behind a specular prefix, so the
+// hybrid shift must random-replay that prefix before reconnecting. Stored in `LightSample.light_id`
+// alongside the replay RNG seed in `LightSample.seed`. Chosen just below NULL_LIGHT_ID so the two
+// GI markers occupy the top of the id space and real light ids (which pack `light << 16 | triangle`)
+// stay strictly below both.
+const HYBRID_GI_LIGHT_ID = 0xFFFFFFFEu;
+
+// A reservoir carries a direct-light sample (resolved by reference each frame) iff its light_id is a
+// real light id, i.e. below both GI markers. NULL_LIGHT_ID and HYBRID_GI_LIGHT_ID are GI samples.
+fn is_di_light_sample(light_id: u32) -> bool {
+    return light_id < HYBRID_GI_LIGHT_ID;
+}
 
 struct LightSample {
     light_id: u32,

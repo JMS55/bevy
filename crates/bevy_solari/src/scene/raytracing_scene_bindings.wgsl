@@ -56,6 +56,18 @@ const TEXTURE_MAP_NONE = 0xFFFFFFFFu;
 
 const MIRROR_ROUGHNESS_THRESHOLD = 0.001f;
 
+// Minimum perceptual roughness for a vertex to serve as a reconnection anchor. Shared by initial
+// sampling (anchor placement) and the hybrid shift (anchor detection during replay); lives here so
+// both modules import the one definition (naga_oil does not resolve consts imported from
+// bevy_solari::initial_path).
+const RECONNECTION_ROUGHNESS_MIN = 0.6f;
+
+// Hybrid shift toggle: how long a specular prefix the shift will random-replay before reconnecting
+// at the first rough vertex. 0u = pure reconnection shift (previous behavior), 1u = single specular
+// bounce (e.g. mirror floor -> diffuse wall), >1 = longer specular chains. Read by both initial
+// sampling and the shift, so they stay in lockstep.
+const MAX_REPLAY_BOUNCES = 3u;
+
 struct LightSource {
     kind: u32, // 1 bit for kind, 31 bits for extra data
     id: u32,

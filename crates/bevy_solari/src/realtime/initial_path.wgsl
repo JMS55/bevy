@@ -3,14 +3,14 @@ enable wgpu_ray_query;
 #define_import_path bevy_solari::initial_path
 
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
-#import bevy_pbr::utils::{rand_f, rand_range_u}
+#import bevy_pbr::utils::{rand_f, rand_range_u, rand_u}
 #import bevy_render::maths::PI
 #import bevy_render::utils::octahedral_encode
 #import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
 #import bevy_solari::realtime_bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view}
-#import bevy_solari::sampling::{calculate_resolved_light_contribution, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_light_visibility}
-#import bevy_solari::scene_bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
+#import bevy_solari::sampling::{calculate_resolved_light_contribution, HYBRID_GI_LIGHT_ID, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_light_visibility}
+#import bevy_solari::scene_bindings::{light_sources, MAX_REPLAY_BOUNCES, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, RECONNECTION_ROUGHNESS_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 #ifdef DLSS_RR_GUIDE_BUFFERS
 #import bevy_pbr::pbr_functions::{calculate_diffuse_color, calculate_F0}
@@ -19,8 +19,9 @@ enable wgpu_ray_query;
 #endif
 
 const RECONNECTION_FOOTPRINT_KAPPA = 0.02;
-const RECONNECTION_ROUGHNESS_MIN = 0.6;
 const RECONNECTION_RELAX_DISTANCE = 1.0;
+// RECONNECTION_ROUGHNESS_MIN and the hybrid shift toggle MAX_REPLAY_BOUNCES live in
+// bevy_solari::scene_bindings so both initial sampling and the shift can import the one definition.
 
 const CACHE_TERMINATION_MIN_SOLID_ANGLE = PI;
 
@@ -30,22 +31,46 @@ struct InitialSamplingResult {
 }
 
 // Path vertices use the following convention: x0 = camera, x1 = primary ray hit (the G-buffer
-// surface), x2 = first BRDF-sampled hit (the reconnection vertex).
+// surface), x2 = first BRDF-sampled hit.
+//
+// Two reconnection bases are tracked in parallel:
+//   * The "shading base" (x1 fields) drives local shading into non_resampled_radiance. It is
+//     unchanged from the pure-reconnection implementation and always anchored at x1.
+//   * The "reuse base" (anchor fields) drives what gets published to the reservoir. For a rough x1
+//     the anchor IS x1 and the two bases coincide, so behavior is byte-for-byte the old reconnection
+//     shift. For a specular x1 the anchor is pushed forward past the specular prefix to the first
+//     rough vertex, and the reservoir sample is tagged hybrid so the shift knows to replay the
+//     prefix before reconnecting.
 struct PathState {
     ray_origin: vec3<f32>,
     normal: vec3<f32>,
     wo: vec3<f32>,
     material: ResolvedMaterial,
-    // Throughput past x1, excluding brdf*cos at x1
+    // Throughput past x1, excluding brdf*cos at x1 (shading base, for local shading)
     throughput_past_first_hit: vec3<f32>,
-    // Reconnection vertex x2, the first BRDF-sampled hit shared by every length >= 2 candidate
-    x2_position: vec3<f32>,
-    x2_normal: vec3<f32>,
-    // If false, candidates built on x2 are shaded directly into non_resampled_radiance instead of
-    // published to the reservoir
-    x2_reusable: bool,
-    // brdf*cos at x1 for the direction toward x2
+    // brdf*cos at x1 for the direction toward x2 (shading base)
     x1_brdf: vec3<f32>,
+
+    // --- reuse base (reconnection anchor) ---
+    // Whether the anchor has been fixed yet (the first rough vertex has been reached)
+    anchor_committed: bool,
+    // Bounce index at which the anchor was committed (0 => anchor is x1, the pure-reconnection case)
+    anchor_bounce: u32,
+    // True once the anchor sits behind a specular prefix (anchor_bounce > 0)
+    is_hybrid: bool,
+    // path_rng seed captured at path start, replayed by the shift to regenerate the specular prefix
+    replay_seed: u32,
+    // brdf*cos at the anchor for the direction toward the anchor's reconnection vertex
+    anchor_brdf: vec3<f32>,
+    // Reconnection vertex for the reuse base: the first BRDF-sampled hit past the anchor
+    recon_position: vec3<f32>,
+    recon_normal: vec3<f32>,
+    // Reconnection safety for the anchor -> recon segment
+    recon_reusable: bool,
+    // Throughput past the anchor, excluding brdf*cos at the anchor (mirrors throughput_past_first_hit
+    // but based at the anchor rather than x1). Folded into the stored radiance so the replayed prefix
+    // and re-evaluated anchor brdf are excluded.
+    throughput_past_anchor: vec3<f32>,
 }
 
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, pixel_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
@@ -65,16 +90,33 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     let primary_NdotV = max(dot(world_normal, wo), 0.0001);
     let primary_F_ab = F_AB(material.perceptual_roughness, primary_NdotV);
 
+    // Dedicated RNG for the geometry-defining BRDF direction samples only (NEE, russian roulette,
+    // and the world cache keep using the main `rng`). The shift replays the specular prefix by
+    // reseeding this stream to `replay_seed`, so nothing else may consume from it or the replay
+    // desyncs.
+    let replay_seed = rand_u(rng);
+    var path_rng = replay_seed;
+
     var path: PathState;
     path.ray_origin = world_position + (world_normal * RAY_T_MIN);
     path.normal = world_normal;
     path.wo = wo;
     path.material = material;
     path.throughput_past_first_hit = vec3(1.0);
-    path.x2_position = vec3(0.0);
-    path.x2_normal = vec3(0.0);
-    path.x2_reusable = false;
     path.x1_brdf = vec3(0.0);
+    path.anchor_committed = false;
+    path.anchor_bounce = 0u;
+    path.is_hybrid = false;
+    path.replay_seed = replay_seed;
+    path.anchor_brdf = vec3(0.0);
+    path.recon_position = vec3(0.0);
+    path.recon_normal = vec3(0.0);
+    path.recon_reusable = false;
+    path.throughput_past_anchor = vec3(1.0);
+
+    // World-space position of the current vertex (x1 initially). Fed to reconnection_reusable so the
+    // anchor's footprint test uses the anchor's location rather than always x1's.
+    var vertex_position = world_position;
 
     for (var bounce = 0u; bounce < constants.max_bounces; bounce++) {
         let NdotV = max(dot(path.normal, path.wo), 0.0001);
@@ -88,8 +130,8 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         generate_nee_candidate(&reservoir, &weight_sum, &selected_target_function, &non_resampled_radiance,
             path, F_ab, p_nee, di_samples, workgroup_id, bounce, rng);
 
-        // Sample the BRDF and trace the next ray
-        let next_bounce = evaluate_and_sample_brdf(path.wo, path.normal, path.material, F_ab, rng);
+        // Sample the BRDF and trace the next ray. The direction sample comes from the replay stream.
+        let next_bounce = evaluate_and_sample_brdf(path.wo, path.normal, path.material, F_ab, &path_rng);
         if next_bounce.pdf == 0.0 { break; }
         let ray = trace_ray(path.ray_origin, next_bounce.wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
         if ray.kind == RAY_QUERY_INTERSECTION_NONE { break; }
@@ -111,14 +153,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         }
 #endif
 
-        // Capture x2, the first BRDF-sampled hit
+        // Shading base: capture x1's brdf and throughput at bounce 0. Drives local shading of any
+        // candidate that has no reuse-safe reconnection vertex (the specular prefix, mostly).
         if bounce == 0u {
-            path.x2_position = ray_hit.world_position;
-            path.x2_normal = ray_hit.world_normal;
-
             path.x1_brdf = evaluate_brdf(wo, next_bounce.wi, world_normal, material, primary_F_ab);
-
-            path.x2_reusable = reconnection_reusable(ray.t, p_brdf, next_bounce.wi, next_bounce.diffuse_selected, ray_hit, world_position, material.perceptual_roughness, primary_NdotV);
 
             // The primary brdf*cos is applied at shade time, so divide it out of next_bounce.throughput
             // to leave 1/pdf (or 1/specular_weight for mirrors, avoiding the 1/INF = 0 that would kill
@@ -127,6 +165,28 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         } else {
             // Later bounces keep the full brdf*cos/pdf for L_at_reconnection.
             path.throughput_past_first_hit *= next_bounce.throughput;
+        }
+
+        // Reuse base: commit the reconnection anchor at the first vertex whose sampled lobe is broad
+        // enough to reconnect from, within the replay budget. For a rough x1 this fires at bounce 0
+        // (anchor == x1, is_hybrid == false) and every anchor field mirrors the shading base, so
+        // published samples are identical to the old reconnection shift. For a specular x1 the anchor
+        // is pushed forward and the sample is tagged hybrid.
+        if !path.anchor_committed {
+            let anchor_lobe_ok = next_bounce.diffuse_selected || path.material.perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN;
+            if anchor_lobe_ok && bounce <= MAX_REPLAY_BOUNCES {
+                path.anchor_committed = true;
+                path.anchor_bounce = bounce;
+                path.is_hybrid = bounce > 0u;
+                path.anchor_brdf = evaluate_brdf(path.wo, next_bounce.wi, path.normal, path.material, F_ab);
+                path.recon_position = ray_hit.world_position;
+                path.recon_normal = ray_hit.world_normal;
+                path.recon_reusable = reconnection_reusable(ray.t, p_brdf, next_bounce.wi, next_bounce.diffuse_selected, ray_hit, vertex_position, path.material.perceptual_roughness, NdotV);
+                // Anchor brdf*cos is re-evaluated at shift time, so divide it out to leave 1/pdf.
+                path.throughput_past_anchor = next_bounce.throughput / max(path.anchor_brdf, vec3(0.0001));
+            }
+        } else if bounce > path.anchor_bounce {
+            path.throughput_past_anchor *= next_bounce.throughput;
         }
 
         // Resample emissive hits
@@ -145,9 +205,14 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         path.normal = ray_hit.world_normal;
         path.wo = -next_bounce.wi;
         path.material = ray_hit.material;
+        vertex_position = ray_hit.world_position;
 
-        // Russian roulette for early termination
-        if bounce > 0u {
+        // Russian roulette for early termination. Gated on being past the reconnection anchor: the
+        // shift regenerates the specular prefix by replay and does not apply RR there, so running RR
+        // during the prefix would desync the replayed throughput. For a rough x1 the anchor is bounce
+        // 0, so this reduces to the old `bounce > 0` gate. The survival scale is applied to both the
+        // shading-base and anchor-base throughputs so the stored radiance stays consistent.
+        if path.anchor_committed && bounce > path.anchor_bounce {
             // throughput_past_first_hit has the primary brdf*cos divided out (so it can be re-applied at shade
             // time), which inflates it. Multiply x1_brdf back in to get the true energy-bounded path
             // throughput, which is the correct quantity for the RR survival probability.
@@ -155,6 +220,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             let rr = saturate(luminance(full_throughput));
             if rand_f(rng) >= rr { break; }
             path.throughput_past_first_hit /= rr;
+            path.throughput_past_anchor /= rr;
         }
     }
 
@@ -205,25 +271,43 @@ fn generate_nee_candidate(
             *selected_target_function = target_function;
         }
     } else {
-        // Deeper bounces: Candidate is the reconnection radiance at x2
-        let L_at_reconnection = path.throughput_past_first_hit * di.brdf_radiance * di.unbiased_contribution_weight * nee_mis_weight / p_nee;
-        if !path.x2_reusable {
-            // x1 -> x2 not reuse-safe: shade directly at this pixel instead of publishing.
-            *non_resampled_radiance += path.x1_brdf * L_at_reconnection;
-        } else {
-            let target_function = luminance(path.x1_brdf * L_at_reconnection);
+        // Deeper bounces: candidate is reconnection radiance baked toward a reconnection vertex. X is
+        // this vertex's direct light; it is common to every case below.
+        let X = di.brdf_radiance * di.unbiased_contribution_weight * nee_mis_weight / p_nee;
+
+        // Reuse-safe only past the anchor: the anchor's own direct light (bounce == anchor_bounce)
+        // reconnects at the anchor, which is unreachable through a specular prefix, so it stays local.
+        let reuse = path.anchor_committed && bounce > path.anchor_bounce && path.recon_reusable;
+        if reuse {
+            // Target uses the full x1-based throughput (the sample's real contribution at this pixel);
+            // the stored radiance uses the anchor-based throughput so the replayed prefix and the
+            // re-evaluated anchor brdf are excluded from what is baked in.
+            let target_function = luminance(path.x1_brdf * path.throughput_past_first_hit * X);
             let resampling_weight = target_function;
 
             *weight_sum += resampling_weight;
             if rand_f(rng) * (*weight_sum) < resampling_weight {
-                (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, 0u);
-                (*reservoir).sample_point_world_position = path.x2_position;
-                (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
-                (*reservoir).radiance = L_at_reconnection;
+                (*reservoir).light_sample = hybrid_gi_marker(path);
+                (*reservoir).sample_point_world_position = path.recon_position;
+                (*reservoir).sample_point_world_normal = octahedral_encode(path.recon_normal);
+                (*reservoir).radiance = path.throughput_past_anchor * X;
                 *selected_target_function = target_function;
             }
+        } else {
+            // No reuse-safe reconnection vertex: shade directly at this pixel instead of publishing.
+            *non_resampled_radiance += path.x1_brdf * path.throughput_past_first_hit * X;
         }
     }
+}
+
+// Marks a published GI reservoir sample: a plain reconnection sample (light_id = NULL_LIGHT_ID) when
+// the anchor is x1, or a hybrid sample carrying the prefix replay seed when the anchor sits behind a
+// specular prefix.
+fn hybrid_gi_marker(path: PathState) -> LightSample {
+    return LightSample(
+        select(NULL_LIGHT_ID, HYBRID_GI_LIGHT_ID, path.is_hybrid),
+        select(0u, path.replay_seed, path.is_hybrid),
+    );
 }
 
 struct DiSample {
@@ -301,38 +385,44 @@ fn generate_emissive_candidate(
     let p_light = area_pdf * ray_t * ray_t / NdotV_hit;
     let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(di_samples));
 
-    if !path.x2_reusable {
-        // x1 -> x2 not reuse-safe (mirror/sharp lobe or failed gate): shade directly at this pixel
-        // instead of publishing, since a reuse shift would waste it or make a firefly. Mirror lobes
-        // always land here (p_brdf = INF, footprint 0), where emissive_mis_weight is 1.
+    // Reuse-safe from the anchor's reconnection vertex onward. The emissive hit at the anchor bounce
+    // IS that vertex; deeper emissive hits fold into it through throughput_past_anchor.
+    let reuse = path.anchor_committed && bounce >= path.anchor_bounce && path.recon_reusable;
+    if !reuse {
+        // Not reuse-safe (mirror/sharp prefix or failed gate): shade directly at this pixel instead
+        // of publishing, since a reuse shift would waste it or make a firefly. Mirror lobes land here
+        // during the prefix (p_brdf = INF, footprint 0), where emissive_mis_weight is 1.
         *non_resampled_radiance += path.x1_brdf * path.throughput_past_first_hit * ray_hit.material.emissive * emissive_mis_weight;
         return;
     }
 
-    if bounce == 0u {
-        // Bounce 0: Candidate is the emissive hit
-        let target_function = luminance(path.x1_brdf * ray_hit.material.emissive) * emissive_mis_weight;
-        let resampling_weight = luminance(path.x1_brdf * path.throughput_past_first_hit * ray_hit.material.emissive) * emissive_mis_weight;
+    if bounce == path.anchor_bounce && !path.is_hybrid {
+        // Anchor is x1 and the emissive hit is the reconnection vertex itself: store the raw emission
+        // plus the area pdf in the seed, so the MIS weight against NEE is rebuilt per-pixel on reuse.
+        // Only valid without a specular prefix, where the seed is free; hybrid samples fall through.
+        let target_function = luminance(path.anchor_brdf * ray_hit.material.emissive) * emissive_mis_weight;
+        let resampling_weight = luminance(path.anchor_brdf * path.throughput_past_anchor * ray_hit.material.emissive) * emissive_mis_weight;
 
         *weight_sum += resampling_weight;
         if rand_f(rng) * (*weight_sum) < resampling_weight {
             (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, bitcast<u32>(area_pdf));
-            (*reservoir).sample_point_world_position = path.x2_position;
-            (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
+            (*reservoir).sample_point_world_position = path.recon_position;
+            (*reservoir).sample_point_world_normal = octahedral_encode(path.recon_normal);
             (*reservoir).radiance = ray_hit.material.emissive;
             *selected_target_function = target_function;
         }
     } else {
-        // Deeper bounces: Candidate is the reconnection radiance at x2
-        let emissive_L_at_reconnection = path.throughput_past_first_hit * ray_hit.material.emissive * emissive_mis_weight;
-        let target_function = luminance(path.x1_brdf * emissive_L_at_reconnection);
+        // Deeper or hybrid emissive: bake the MIS weight into the stored radiance. Target uses the
+        // full x1-based throughput; stored radiance uses the anchor-based throughput.
+        let emissive_L_at_reconnection = path.throughput_past_anchor * ray_hit.material.emissive * emissive_mis_weight;
+        let target_function = luminance(path.x1_brdf * path.throughput_past_first_hit * ray_hit.material.emissive * emissive_mis_weight);
         let resampling_weight = target_function;
 
         *weight_sum += resampling_weight;
         if rand_f(rng) * (*weight_sum) < resampling_weight {
-            (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, 0u);
-            (*reservoir).sample_point_world_position = path.x2_position;
-            (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
+            (*reservoir).light_sample = hybrid_gi_marker(path);
+            (*reservoir).sample_point_world_position = path.recon_position;
+            (*reservoir).sample_point_world_normal = octahedral_encode(path.recon_normal);
             (*reservoir).radiance = emissive_L_at_reconnection;
             *selected_target_function = target_function;
         }
@@ -368,20 +458,23 @@ fn terminate_into_cache(
     let cached_radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray_t, WORLD_CACHE_CELL_LIFETIME, rng);
 
     let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
-    let cache_L_at_reconnection = path.throughput_past_first_hit * cache_outgoing;
-    if !path.x2_reusable {
-        *non_resampled_radiance += path.x1_brdf * cache_L_at_reconnection;
+
+    let reuse = path.anchor_committed && bounce >= path.anchor_bounce && path.recon_reusable;
+    if !reuse {
+        *non_resampled_radiance += path.x1_brdf * path.throughput_past_first_hit * cache_outgoing;
         return true;
     }
 
-    let target_function = luminance(path.x1_brdf * cache_L_at_reconnection);
+    // Target uses the full x1-based throughput; stored radiance uses the anchor-based throughput so
+    // the replayed prefix and re-evaluated anchor brdf are excluded.
+    let target_function = luminance(path.x1_brdf * path.throughput_past_first_hit * cache_outgoing);
     let resampling_weight = target_function;
     *weight_sum += resampling_weight;
     if rand_f(rng) * (*weight_sum) < resampling_weight {
-        (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, 0u);
-        (*reservoir).sample_point_world_position = path.x2_position;
-        (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
-        (*reservoir).radiance = cache_L_at_reconnection;
+        (*reservoir).light_sample = hybrid_gi_marker(path);
+        (*reservoir).sample_point_world_position = path.recon_position;
+        (*reservoir).sample_point_world_normal = octahedral_encode(path.recon_normal);
+        (*reservoir).radiance = path.throughput_past_anchor * cache_outgoing;
         *selected_target_function = target_function;
     }
 

@@ -4,12 +4,12 @@ enable wgpu_ray_query;
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::utils::{rand_f, rand_u, sample_disk}
 #import bevy_render::utils::octahedral_decode
-#import bevy_solari::brdf::{brdf_pdf, evaluate_brdf, F_AB}
+#import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::initial_path::{generate_initial_reservoir, InitialSamplingResult}
 #import bevy_solari::realtime_bindings::{depth_buffer, empty_reservoir, gbuffer, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output}
-#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
-#import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial}
+#import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, HYBRID_GI_LIGHT_ID, is_di_light_sample, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_light_visibility}
+#import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, MAX_REPLAY_BOUNCES, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, RECONNECTION_ROUGHNESS_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
 #import bevy_solari::world_cache::{query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
@@ -106,7 +106,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     var temporal = NeighborInfo(reservoirs_a[temporal_pixel_index], temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material);
 
     // Check if the light selected in the previous frame no longer exists in the current frame (e.g. entity despawned)
-    if temporal.reservoir.light_sample.light_id != NULL_LIGHT_ID {
+    if is_di_light_sample(temporal.reservoir.light_sample.light_id) {
         let previous_light_id = temporal.reservoir.light_sample.light_id >> 16u;
         let triangle_id = temporal.reservoir.light_sample.light_id & 0xFFFFu;
         let light_id = previous_frame_light_id_translations[previous_light_id];
@@ -194,7 +194,7 @@ fn merge_reservoirs(
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
     var canonical_resolved: ResolvedLightSample;
-    if canonical_reservoir.light_sample.light_id != NULL_LIGHT_ID {
+    if is_di_light_sample(canonical_reservoir.light_sample.light_id) {
         canonical_resolved = resolve_light_sample(canonical_reservoir.light_sample, light_sources[canonical_reservoir.light_sample.light_id >> 16u]);
     }
 
@@ -209,7 +209,7 @@ fn merge_reservoirs(
     }
 
     var other_resolved: ResolvedLightSample;
-    if other_reservoir.light_sample.light_id != NULL_LIGHT_ID {
+    if is_di_light_sample(other_reservoir.light_sample.light_id) {
         other_resolved = resolve_light_sample(other_reservoir.light_sample, light_sources[other_reservoir.light_sample.light_id >> 16u]);
     }
     let other_wo = normalize(other_view_position - other_world_position);
@@ -221,22 +221,26 @@ fn merge_reservoirs(
     var canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
     let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
 
-    // Jacobians for resampling and MIS. Light samples don't need a reprojection jacobian,
-    // since calculate_resolved_light_contribution already accounts for the shading point's geometry.
+    // Jacobians for resampling and MIS. Light samples don't need a reprojection jacobian, since
+    // calculate_resolved_light_contribution already accounts for the shading point's geometry. GI and
+    // hybrid GI samples reconnect at a stored vertex, so they do. The reconnection segment starts from
+    // reconnect_from, which is the shading point x1 for a pure reconnection sample and the replayed
+    // anchor for a hybrid sample; the replayed prefix itself contributes a unit Jacobian (primary
+    // sample space), so only this final segment is measured here.
     var other_sample_at_canonical_jacobian = 1.0;
-    if other_reservoir.light_sample.light_id == NULL_LIGHT_ID {
+    if !is_di_light_sample(other_reservoir.light_sample.light_id) {
         other_sample_at_canonical_jacobian = jacobian(
-            canonical_world_position,
-            other_world_position,
+            other_sample_at_canonical.reconnect_from,
+            other_sample_at_other.reconnect_from,
             other_reservoir.sample_point_world_position,
             octahedral_decode(other_reservoir.sample_point_world_normal)
         );
     }
     var canonical_sample_at_other_jacobian = 1.0;
-    if canonical_reservoir.light_sample.light_id == NULL_LIGHT_ID {
+    if !is_di_light_sample(canonical_reservoir.light_sample.light_id) {
         canonical_sample_at_other_jacobian = jacobian(
-            other_world_position,
-            canonical_world_position,
+            canonical_sample_at_other.reconnect_from,
+            canonical_sample_at_canonical.reconnect_from,
             canonical_reservoir.sample_point_world_position,
             octahedral_decode(canonical_reservoir.sample_point_world_normal)
         );
@@ -250,13 +254,14 @@ fn merge_reservoirs(
         canonical_sample_at_other_jacobian = 0.0;
     }
 
-    // Visibility for the cross-domain targets
+    // Visibility for the cross-domain targets, traced from the reconnection segment's start (x1 for a
+    // pure reconnection sample, the replayed anchor for a hybrid sample) to the reconnection vertex.
     if other_sample_at_canonical.target_function > 0.0 && other_sample_at_canonical_jacobian > 0.0 {
-        let visibility = trace_light_visibility(canonical_world_position + canonical_world_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
+        let visibility = trace_light_visibility(other_sample_at_canonical.reconnect_from + other_sample_at_canonical.reconnect_from_normal * RAY_T_MIN, other_sample_at_canonical.sample_world_position);
         other_sample_at_canonical.target_function *= visibility;
     }
     if canonical_sample_at_other.target_function > 0.0 && canonical_sample_at_other_jacobian > 0.0 {
-        let visibility = trace_light_visibility(other_world_position + other_world_normal * RAY_T_MIN, canonical_sample_at_other.sample_world_position);
+        let visibility = trace_light_visibility(canonical_sample_at_other.reconnect_from + canonical_sample_at_other.reconnect_from_normal * RAY_T_MIN, canonical_sample_at_other.sample_world_position);
         canonical_sample_at_other.target_function *= visibility;
     }
 
@@ -312,10 +317,15 @@ struct ReservoirContribution {
     brdf_radiance: vec3<f32>,
     target_function: f32,
     sample_world_position: vec4<f32>,
+    // Vertex the reconnection segment starts from, and its normal. For a light sample or a pure
+    // reconnection GI sample this is the shading point x1; for a hybrid GI sample it is the anchor
+    // reached after replaying the specular prefix. Used by the jacobian and the visibility ray.
+    reconnect_from: vec3<f32>,
+    reconnect_from_normal: vec3<f32>,
 }
 
 fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> ReservoirContribution {
-    if reservoir.light_sample.light_id != NULL_LIGHT_ID {
+    if is_di_light_sample(reservoir.light_sample.light_id) {
         let light_contribution = calculate_resolved_light_contribution(resolved, world_position, world_normal);
 
         // MIS weight against the bounce-0 BRDF-emissive strategy, recomputed from this surface's
@@ -332,7 +342,10 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         }
 
         let brdf_radiance = light_contribution.radiance * evaluate_brdf(wo, light_contribution.wi, world_normal, material, F_ab) * nee_mis_weight;
-        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), resolved.world_position);
+        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), resolved.world_position, world_position, world_normal);
+    } else if reservoir.light_sample.light_id == HYBRID_GI_LIGHT_ID {
+        // Hybrid GI: random-replay the specular prefix from x1, then reconnect at the stored vertex.
+        return hybrid_gi_contribution(reservoir, world_position, world_normal, wo, material, F_ab);
     } else if any(reservoir.radiance != vec3(0.0)) {
         let delta = reservoir.sample_point_world_position - (world_position + world_normal * RAY_T_MIN);
         let sample_distance = length(delta);
@@ -357,8 +370,62 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
             }
         }
 
-        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), vec4(reservoir.sample_point_world_position, 1.0));
+        return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), vec4(reservoir.sample_point_world_position, 1.0), world_position, world_normal);
     } else {
-        return ReservoirContribution(vec3(0.0), 0.0, vec4(reservoir.sample_point_world_position, 1.0));
+        return ReservoirContribution(vec3(0.0), 0.0, vec4(reservoir.sample_point_world_position, 1.0), world_position, world_normal);
     }
+}
+
+// Hybrid shift: regenerate the specular prefix that precedes the reconnection vertex by replaying the
+// path's stored BRDF random numbers from the shading point x1, then reconnect the resulting anchor to
+// the stored reconnection vertex. When the shading surface is itself rough the loop reconnects at x1
+// with an empty prefix, so this reduces exactly to the pure reconnection GI branch above.
+fn hybrid_gi_contribution(reservoir: Reservoir, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> ReservoirContribution {
+    let sample_point = reservoir.sample_point_world_position;
+
+    // Replay the specular prefix. This mirrors the anchor search in generate_initial_reservoir: sample
+    // the BRDF direction from the same seed, and stop at the first vertex whose lobe is broad enough
+    // to reconnect from (the anchor). Only that geometry is regenerated here; NEE and the light
+    // connection are baked into reservoir.radiance and are not replayed.
+    var rng = reservoir.light_sample.seed;
+    var pos = world_position;
+    var normal = world_normal;
+    var mat = material;
+    var v_wo = wo;
+    var v_F_ab = F_ab;
+    var origin = world_position + world_normal * RAY_T_MIN;
+    var throughput = vec3(1.0);
+    var found_anchor = false;
+    for (var b = 0u; b <= MAX_REPLAY_BOUNCES; b++) {
+        let s = evaluate_and_sample_brdf(v_wo, normal, mat, v_F_ab, &rng);
+        if s.pdf == 0.0 { break; }
+        let anchor_lobe_ok = s.diffuse_selected || mat.perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN;
+        if anchor_lobe_ok {
+            found_anchor = true;
+            break;
+        }
+        let ray = trace_ray(origin, s.wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+        if ray.kind == RAY_QUERY_INTERSECTION_NONE { break; }
+        let ray_hit = resolve_ray_hit_full(ray);
+        throughput *= s.throughput;
+        pos = ray_hit.world_position;
+        normal = ray_hit.world_normal;
+        mat = ray_hit.material;
+        v_wo = -s.wi;
+        origin = ray_hit.world_position + (ray_hit.geometric_world_normal * RAY_T_MIN);
+        v_F_ab = F_AB(mat.perceptual_roughness, max(dot(normal, v_wo), 0.0001));
+    }
+    if !found_anchor {
+        // The shift domain never reaches a reconnectable anchor (prefix ran off screen or exceeded the
+        // replay budget); treat as a shift failure with zero contribution.
+        return ReservoirContribution(vec3(0.0), 0.0, vec4(sample_point, 1.0), world_position, world_normal);
+    }
+
+    // Reconnect the anchor to the stored reconnection vertex.
+    let delta = sample_point - origin;
+    let sample_distance = length(delta);
+    let wi = delta / sample_distance;
+    let anchor_brdf = evaluate_brdf(v_wo, wi, normal, mat, v_F_ab);
+    let brdf_radiance = throughput * anchor_brdf * reservoir.radiance;
+    return ReservoirContribution(brdf_radiance, luminance(brdf_radiance), vec4(sample_point, 1.0), pos, normal);
 }

@@ -7,6 +7,7 @@ use bevy_ecs::{
 use bevy_mesh::{Indices, Mesh};
 use bevy_platform::collections::HashMap;
 use bevy_render::{
+    diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
     mesh::{
         allocator::{MeshAllocator, MeshBufferSlice},
         RenderMesh,
@@ -24,11 +25,16 @@ const MAX_COMPACTION_VERTICES_PER_FRAME: u32 = 400_000;
 pub struct BlasManager {
     blas: HashMap<AssetId<Mesh>, Blas>,
     compaction_queue: VecDeque<(AssetId<Mesh>, u32, bool)>,
+    revision: u64,
 }
 
 impl BlasManager {
     pub fn get(&self, mesh: &AssetId<Mesh>) -> Option<&Blas> {
         self.blas.get(mesh)
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 }
 
@@ -38,6 +44,7 @@ pub fn prepare_raytracing_blas(
     mesh_allocator: Res<MeshAllocator>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    mut diagnostics: Option<ResMut<DiagnosticsRecorder>>,
 ) {
     // Delete BLAS for deleted or modified meshes
     for asset_id in extracted_meshes
@@ -45,7 +52,9 @@ pub fn prepare_raytracing_blas(
         .iter()
         .chain(extracted_meshes.modified.iter())
     {
-        blas_manager.blas.remove(asset_id);
+        if blas_manager.blas.remove(asset_id).is_some() {
+            blas_manager.revision = blas_manager.revision.wrapping_add(1);
+        }
     }
 
     if extracted_meshes.extracted.is_empty() {
@@ -65,6 +74,7 @@ pub fn prepare_raytracing_blas(
                 allocate_blas(&vertex_slice, &index_slice, asset_id, &render_device);
 
             blas_manager.blas.insert(*asset_id, blas);
+            blas_manager.revision = blas_manager.revision.wrapping_add(1);
             blas_manager
                 .compaction_queue
                 .push_back((*asset_id, blas_size.vertex_count, false));
@@ -97,7 +107,13 @@ pub fn prepare_raytracing_blas(
     let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("build_blas_command_encoder"),
     });
+    let time_span = diagnostics.as_mut().map(|diagnostics| {
+        diagnostics.time_span(&mut command_encoder, "raytracing_scene/blas_build")
+    });
     command_encoder.build_acceleration_structures(&build_entries, &[]);
+    if let Some(time_span) = time_span {
+        time_span.end(&mut command_encoder);
+    }
     render_queue.submit([command_encoder.finish()]);
 }
 
@@ -129,6 +145,7 @@ pub fn compact_raytracing_blas(
         if blas.ready_for_compaction() {
             let compacted_blas = render_queue.compact_blas(blas);
             blas_manager.blas.insert(mesh, compacted_blas);
+            blas_manager.revision = blas_manager.revision.wrapping_add(1);
 
             vertices_compacted += vertex_count;
             continue;

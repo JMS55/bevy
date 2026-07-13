@@ -11,7 +11,6 @@ use crate::SolariPlugins;
 use bevy_app::{App, Plugin};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
-    extract_resource::ExtractResourcePlugin,
     mesh::{
         allocator::{allocate_and_free_meshes, MeshAllocatorSettings},
         RenderMesh,
@@ -23,7 +22,10 @@ use bevy_render::{
 };
 use binder::prepare_raytracing_scene_bindings;
 use blas::{compact_raytracing_blas, prepare_raytracing_blas, BlasManager};
-use extract::{extract_raytracing_scene, StandardMaterialAssets};
+use extract::{
+    extract_raytracing_scene, extract_standard_material_assets, ExtractedRaytracingScene,
+    RaytracingSceneExtractionQueues, StandardMaterialAssets,
+};
 use tracing::warn;
 
 /// Creates acceleration structures and binding arrays of resources for raytracing.
@@ -48,8 +50,6 @@ impl Plugin for RaytracingScenePlugin {
             return;
         }
 
-        app.add_plugins(ExtractResourcePlugin::<StandardMaterialAssets>::default());
-
         let render_app = app.sub_app_mut(RenderApp);
 
         render_app
@@ -60,8 +60,13 @@ impl Plugin for RaytracingScenePlugin {
         render_app
             .init_gpu_resource::<BlasManager>()
             .init_gpu_resource::<StandardMaterialAssets>()
+            .init_gpu_resource::<ExtractedRaytracingScene>()
+            .init_gpu_resource::<RaytracingSceneExtractionQueues>()
             .insert_resource(RaytracingSceneBindings::new())
-            .add_systems(ExtractSchedule, extract_raytracing_scene)
+            .add_systems(
+                ExtractSchedule,
+                (extract_raytracing_scene, extract_standard_material_assets),
+            )
             .add_systems(
                 Render,
                 (

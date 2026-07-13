@@ -407,11 +407,15 @@ fn reconnection_reusable(ray_t: f32, p_brdf: f32, wi: vec3<f32>, diffuse_selecte
     let x1_lobe_ok = diffuse_selected || x1_perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN;
 
     // Guard at x2. A sharp reflector there makes the stored radiance view-dependent and wrong to
-    // reuse from a neighbor's direction. The roughness floor relaxes with segment length: a distant
-    // glossy x2 is seen by neighbors from nearly the same direction, so the view-dependence washes out.
-    // Diffuse, rough, and emissive vertices are always reuse-safe.
+    // reuse from a neighbor's direction. Use the actual perceptual roughness here, including for
+    // dielectrics: a smooth dielectric has a sharp, view-dependent specular lobe and must be rejected.
+    // Weighting the roughness by metallic (so dielectrics always read as fully rough, 1.0) waved every
+    // dielectric through this gate regardless of its real roughness, reusing view-dependent radiance
+    // from the wrong directions and producing fireflies. The roughness floor relaxes with segment
+    // length: a distant glossy x2 is seen by neighbors from nearly the same direction, so the
+    // view-dependence washes out. Diffuse, rough, and emissive vertices are always reuse-safe.
     let x2_is_light = any(ray_hit.material.emissive > vec3(0.0));
-    let x2_roughness = mix(1.0, ray_hit.material.perceptual_roughness, ray_hit.material.metallic);
+    let x2_roughness = ray_hit.material.perceptual_roughness;
     let x2_roughness_floor = RECONNECTION_ROUGHNESS_MIN * saturate(RECONNECTION_RELAX_DISTANCE / ray_t);
     let x2_end_ok = x2_is_light || x2_roughness >= x2_roughness_floor;
 

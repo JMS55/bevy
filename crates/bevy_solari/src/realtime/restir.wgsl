@@ -383,11 +383,16 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
 fn hybrid_gi_contribution(reservoir: Reservoir, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> ReservoirContribution {
     let sample_point = reservoir.sample_point_world_position;
 
+    // The base path stored its anchor depth (replay length) in the top 4 bits of the seed; the low 28
+    // bits are the RNG seed. The shift must reconnect at the SAME depth, otherwise it maps between
+    // paths of different vertex counts and is not an invertible bijection (GRIS Sec 7.4).
+    let target_depth = reservoir.light_sample.seed >> 28u;
+
     // Replay the specular prefix. This mirrors the anchor search in generate_initial_reservoir: sample
     // the BRDF direction from the same seed, and stop at the first vertex whose lobe is broad enough
     // to reconnect from (the anchor). Only that geometry is regenerated here; NEE and the light
     // connection are baked into reservoir.radiance and are not replayed.
-    var rng = reservoir.light_sample.seed;
+    var rng = reservoir.light_sample.seed & 0x0FFFFFFFu;
     var pos = world_position;
     var normal = world_normal;
     var mat = material;
@@ -396,12 +401,14 @@ fn hybrid_gi_contribution(reservoir: Reservoir, world_position: vec3<f32>, world
     var origin = world_position + world_normal * RAY_T_MIN;
     var throughput = vec3(1.0);
     var found_anchor = false;
+    var anchor_depth = 0u;
     for (var b = 0u; b <= MAX_REPLAY_BOUNCES; b++) {
         let s = evaluate_and_sample_brdf(v_wo, normal, mat, v_F_ab, &rng);
         if s.pdf == 0.0 { break; }
         let anchor_lobe_ok = s.diffuse_selected || mat.perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN;
         if anchor_lobe_ok {
             found_anchor = true;
+            anchor_depth = b;
             break;
         }
         let ray = trace_ray(origin, s.wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
@@ -415,9 +422,12 @@ fn hybrid_gi_contribution(reservoir: Reservoir, world_position: vec3<f32>, world
         origin = ray_hit.world_position + (ray_hit.geometric_world_normal * RAY_T_MIN);
         v_F_ab = F_AB(mat.perceptual_roughness, max(dot(normal, v_wo), 0.0001));
     }
-    if !found_anchor {
-        // The shift domain never reaches a reconnectable anchor (prefix ran off screen or exceeded the
-        // replay budget); treat as a shift failure with zero contribution.
+    // Shift is undefined (zero contribution) if the shading domain never reaches a reconnectable
+    // anchor (prefix ran off screen or exceeded the replay budget), OR reaches one at a different
+    // depth than the base path used. The latter is the Sec 7.4 invertibility guard: e.g. a hybrid
+    // sample from a glossy pixel (anchor at depth 1) reused at a rough neighbor would otherwise
+    // reconnect at depth 0 with the wrong pdf/Jacobian, biasing glossy/rough boundaries.
+    if !found_anchor || anchor_depth != target_depth {
         return ReservoirContribution(vec3(0.0), 0.0, vec4(sample_point, 1.0), world_position, world_normal);
     }
 

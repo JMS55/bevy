@@ -5,7 +5,7 @@ enable wgpu_ray_query;
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::lighting::{D_GGX, V_SmithGGXCorrelated, specular_multiscatter}
 #import bevy_pbr::pbr_functions::calculate_F0_dielectric
-#import bevy_pbr::utils::{rand_f, sample_cosine_hemisphere}
+#import bevy_pbr::utils::{rand_f, rand_u, sample_cosine_hemisphere}
 #import bevy_render::maths::{PI, orthonormalize}
 #import bevy_solari::sampling::{sample_ggx_vndf, ggx_vndf_pdf, ggx_vndf_sample_invalid}
 #import bevy_solari::scene_bindings::{ResolvedMaterial, MIRROR_ROUGHNESS_THRESHOLD, brdf_dfg_lut, brdf_dfg_lut_sampler}
@@ -50,6 +50,14 @@ fn evaluate_and_sample_brdf(
     F_ab: vec2<f32>,
     rng: ptr<function, u32>,
 ) -> EvaluateAndSampleBrdfResult {
+    // Advance the caller's stream by a single, branch-independent draw, then do all lobe sampling on a
+    // private stream seeded from it. A lobe consumes a variable number of raw draws (a mirror lobe
+    // takes none, diffuse/rough-specular take more), so sampling directly from the caller's stream
+    // would advance it by an amount that depends on the surface. The hybrid shift replays these BRDF
+    // samples across neighbor pixels, where a vertex can be classified differently (mirror vs rough)
+    // than on the base path; a fixed one-draw advance keeps that replay in sync past the first bounce.
+    var brdf_rng = rand_u(rng);
+
     let NdotV = dot(world_normal, wo);
     if NdotV < 0.0001 { return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false); }
     let F0_metal = material.base_color;
@@ -67,12 +75,12 @@ fn evaluate_and_sample_brdf(
 
     var wi: vec3<f32>;
     var wi_tangent: vec3<f32>;
-    let diffuse_selected = rand_f(rng) < diffuse_weight;
+    let diffuse_selected = rand_f(&brdf_rng) < diffuse_weight;
     if diffuse_selected {
-        wi = sample_cosine_hemisphere(world_normal, rng);
+        wi = sample_cosine_hemisphere(world_normal, &brdf_rng);
         wi_tangent = vec3(dot(wi, T), dot(wi, B), dot(wi, N));
     } else {
-        wi_tangent = sample_ggx_vndf(wo_tangent, material.roughness, rng);
+        wi_tangent = sample_ggx_vndf(wo_tangent, material.roughness, &brdf_rng);
         if ggx_vndf_sample_invalid(wi_tangent) {
             return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false);
         }

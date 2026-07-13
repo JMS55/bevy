@@ -19,7 +19,6 @@ enable wgpu_ray_query;
 #endif
 
 const RECONNECTION_FOOTPRINT_KAPPA = 0.02;
-const RECONNECTION_RELAX_DISTANCE = 1.0;
 // RECONNECTION_ROUGHNESS_MIN and the hybrid shift toggle MAX_REPLAY_BOUNCES live in
 // bevy_solari::scene_bindings so both initial sampling and the shift can import the one definition.
 
@@ -93,8 +92,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     // Dedicated RNG for the geometry-defining BRDF direction samples only (NEE, russian roulette,
     // and the world cache keep using the main `rng`). The shift replays the specular prefix by
     // reseeding this stream to `replay_seed`, so nothing else may consume from it or the replay
-    // desyncs.
-    let replay_seed = rand_u(rng);
+    // desyncs. Only 28 bits: the top 4 bits of the stored seed carry the anchor depth (see
+    // hybrid_gi_marker), which the shift needs to reject depth-divergent reuse.
+    let replay_seed = rand_u(rng) & 0x0FFFFFFFu;
     var path_rng = replay_seed;
 
     var path: PathState;
@@ -113,10 +113,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     path.recon_normal = vec3(0.0);
     path.recon_reusable = false;
     path.throughput_past_anchor = vec3(1.0);
-
-    // World-space position of the current vertex (x1 initially). Fed to reconnection_reusable so the
-    // anchor's footprint test uses the anchor's location rather than always x1's.
-    var vertex_position = world_position;
 
     for (var bounce = 0u; bounce < constants.max_bounces; bounce++) {
         let NdotV = max(dot(path.normal, path.wo), 0.0001);
@@ -181,7 +177,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
                 path.anchor_brdf = evaluate_brdf(path.wo, next_bounce.wi, path.normal, path.material, F_ab);
                 path.recon_position = ray_hit.world_position;
                 path.recon_normal = ray_hit.world_normal;
-                path.recon_reusable = reconnection_reusable(ray.t, p_brdf, next_bounce.wi, next_bounce.diffuse_selected, ray_hit, vertex_position, path.material.perceptual_roughness, NdotV);
+                path.recon_reusable = reconnection_reusable(ray.t, p_brdf, next_bounce.wi, next_bounce.diffuse_selected, ray_hit, world_position, path.material.perceptual_roughness, path.normal, primary_NdotV);
                 // Anchor brdf*cos is re-evaluated at shift time, so divide it out to leave 1/pdf.
                 path.throughput_past_anchor = next_bounce.throughput / max(path.anchor_brdf, vec3(0.0001));
             }
@@ -205,7 +201,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         path.normal = ray_hit.world_normal;
         path.wo = -next_bounce.wi;
         path.material = ray_hit.material;
-        vertex_position = ray_hit.world_position;
 
         // Russian roulette for early termination. Gated on being past the reconnection anchor: the
         // shift regenerates the specular prefix by replay and does not apply RR there, so running RR
@@ -302,11 +297,14 @@ fn generate_nee_candidate(
 
 // Marks a published GI reservoir sample: a plain reconnection sample (light_id = NULL_LIGHT_ID) when
 // the anchor is x1, or a hybrid sample carrying the prefix replay seed when the anchor sits behind a
-// specular prefix.
+// specular prefix. For a hybrid sample the anchor depth (= number of replayed prefix bounces) is
+// packed into the top 4 bits of the seed; the shift replays exactly that many bounces and rejects
+// the reuse if its own anchor lands at a different depth, which GRIS Sec 7.4 requires for the shift
+// to stay an invertible bijection. (Assumes MAX_REPLAY_BOUNCES <= 15.)
 fn hybrid_gi_marker(path: PathState) -> LightSample {
     return LightSample(
         select(NULL_LIGHT_ID, HYBRID_GI_LIGHT_ID, path.is_hybrid),
-        select(0u, path.replay_seed, path.is_hybrid),
+        select(0u, (path.anchor_bounce << 28u) | path.replay_seed, path.is_hybrid),
     );
 }
 
@@ -484,31 +482,49 @@ fn terminate_into_cache(
 // ReSTIR PT Enhanced: Algorithmic Advances for Faster and More Robust ReSTIR Path Tracing
 // Section 4 (sorta)
 // https://research.nvidia.com/labs/rtr/publication/lin2026restirptenhanced/lin2026restirptenhanced.pdf
-fn reconnection_reusable(ray_t: f32, p_brdf: f32, wi: vec3<f32>, diffuse_selected: bool, ray_hit: ResolvedRayHitFull, world_position: vec3<f32>, x1_perceptual_roughness: f32, primary_NdotV: f32) -> bool {
-    // ray_footprint = t^2 / (p_brdf * cos_x2) is the area a sample represents at x2. It goes to 0 for
-    // mirror lobes (p_brdf = INF) and shrinks for sharp lobes or short segments. Compared against a
-    // uniform 1/(4*PI) primary footprint, so the test trades roughness against distance.
+// `from_*` describe the reconnect-from vertex x_{k-1} (the anchor: where the reconnection segment
+// starts and whose lobe must be broad enough). `primary_*` describe the true primary hit x1 and are
+// only the normalization for Eq 5's RHS footprint (a per-pixel constant, independent of where along
+// the path the reconnection happens). For a rough x1 these coincide; for a hybrid sample the anchor
+// sits past the specular prefix, so they must be passed separately.
+fn reconnection_reusable(ray_t: f32, p_brdf: f32, wi: vec3<f32>, diffuse_selected: bool, ray_hit: ResolvedRayHitFull, primary_world_position: vec3<f32>, from_perceptual_roughness: f32, from_world_normal: vec3<f32>, primary_NdotV: f32) -> bool {
+    // Dual ray footprint (Eq. 5). The reconnection edge x_{k-1} <-> x2 is reuse-safe only if BOTH
+    // endpoints' BSDF lobes spread it over a large enough area: the reconnect-from lobe (forward) and
+    // the reconnect-to lobe (inverse). Each footprint has the form (lobe solid angle) * t^2 / cos, so a
+    // sharp lobe -> tiny footprint -> rejected; the t^2 factor makes distant reconnections more
+    // tolerant (a far x2 is seen by neighbors from nearly the same direction). Both are compared
+    // against the primary ray footprint at x1 (the RHS, a per-pixel constant).
     let cos_x2 = max(dot(ray_hit.world_normal, -wi), 0.0001);
-    let ray_footprint = (ray_t * ray_t) / (p_brdf * cos_x2);
-    let primary_dist = length(view.world_position - world_position);
-    let primary_footprint = 4.0 * PI * primary_dist * primary_dist / primary_NdotV;
-    let footprint_ok = ray_footprint >= (RECONNECTION_FOOTPRINT_KAPPA / 100.0) * primary_footprint;
+    let cos_from = max(dot(from_world_normal, wi), 0.0001);
 
-    // Roughness floor at x1, only for specular lobes (a diffuse bounce is always rough). Guards
-    // low-roughness specular lobes that resample with poorly-conditioned MIS/jacobian. The footprint
-    // test alone is too permissive here.
-    let x1_lobe_ok = diffuse_selected || x1_perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN;
+    // Forward: the reconnect-from lobe onto x2. 1/p_brdf is that lobe's solid angle; it goes to 0 for a
+    // mirror lobe (p_brdf = INF), rejecting reconnection from a sharp source.
+    let forward_footprint = (ray_t * ray_t) / (p_brdf * cos_x2);
 
-    // Guard at x2. A sharp reflector there makes the stored radiance view-dependent and wrong to
-    // reuse from a neighbor's direction. The roughness floor relaxes with segment length: a distant
-    // glossy x2 is seen by neighbors from nearly the same direction, so the view-dependence washes out.
-    // Diffuse, rough, and emissive vertices are always reuse-safe.
+    // Inverse: x2's lobe back onto the reconnect-from vertex, bounding the view-dependence of the
+    // stored radiance. The exact term (Eq. 5) needs the vertex *past* x2, which this baked-radiance
+    // reservoir doesn't retain, so x2's outgoing coherence is approximated by its GGX specular lobe
+    // solid angle ~= PI * alpha^2 (alpha = linear roughness). A smooth x2 (small alpha) -> tiny
+    // footprint -> rejected, whether metal or dielectric. Skipped for an emissive x2, whose emission is
+    // view-independent and always safe to reuse.
+    let x2_alpha = ray_hit.material.roughness;
+    let x2_lobe_solid_angle = PI * x2_alpha * x2_alpha;
+    let inverse_footprint = (ray_t * ray_t) * x2_lobe_solid_angle / cos_from;
+
     let x2_is_light = any(ray_hit.material.emissive > vec3(0.0));
-    let x2_roughness = mix(1.0, ray_hit.material.perceptual_roughness, ray_hit.material.metallic);
-    let x2_roughness_floor = RECONNECTION_ROUGHNESS_MIN * saturate(RECONNECTION_RELAX_DISTANCE / ray_t);
-    let x2_end_ok = x2_is_light || x2_roughness >= x2_roughness_floor;
+    let combined_footprint = select(min(forward_footprint, inverse_footprint), forward_footprint, x2_is_light);
 
-    return footprint_ok && x1_lobe_ok && x2_end_ok;
+    let primary_dist = length(view.world_position - primary_world_position);
+    let primary_footprint = 4.0 * PI * primary_dist * primary_dist / primary_NdotV;
+    let footprint_ok = combined_footprint >= (RECONNECTION_FOOTPRINT_KAPPA / 100.0) * primary_footprint;
+
+    // Roughness floor at the reconnect-from vertex x_{k-1} (the paper's single-vertex threshold,
+    // Sec 4.2), only for specular lobes (a diffuse bounce is always rough). Guards low-roughness
+    // specular lobes that resample with poorly-conditioned MIS/jacobian. The footprint test alone is
+    // too permissive here.
+    let x1_lobe_ok = diffuse_selected || from_perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN;
+
+    return footprint_ok && x1_lobe_ok;
 }
 
 #ifdef DLSS_RR_GUIDE_BUFFERS

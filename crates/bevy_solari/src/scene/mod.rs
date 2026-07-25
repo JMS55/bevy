@@ -1,8 +1,10 @@
 mod binder;
 mod blas;
 mod extract;
+mod tlas_build;
 mod types;
 
+use bevy_asset::embedded_asset;
 use bevy_shader::load_shader_library;
 pub use binder::RaytracingSceneBindings;
 pub use types::RaytracingMesh3d;
@@ -16,14 +18,15 @@ use bevy_render::{
         RenderMesh,
     },
     render_asset::prepare_assets,
-    render_resource::BufferUsages,
+    render_resource::{update_sparse_buffers, BufferUsages},
     renderer::{RenderDevice, RenderGraph, RenderGraphSystems},
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 use binder::{
-    build_raytracing_tlas, prepare_raytracing_scene_bind_group, prepare_raytracing_scene_resources,
+    build_raytracing_tlas, pack_raytracing_tlas_instances, prepare_raytracing_scene_bind_group,
+    prepare_raytracing_scene_resources, TlasInstancePackPipeline,
 };
-use blas::{compact_raytracing_blas, prepare_raytracing_blas, BlasManager};
+use blas::{compact_raytracing_blas, prepare_dummy_blas, prepare_raytracing_blas, BlasManager};
 use extract::{
     extract_raytracing_material_assets, extract_raytracing_scene_meshes_and_materials,
     extract_raytracing_scene_structural, extract_raytracing_scene_transforms,
@@ -39,6 +42,7 @@ impl Plugin for RaytracingScenePlugin {
         load_shader_library!(app, "brdf.wgsl");
         load_shader_library!(app, "raytracing_scene_bindings.wgsl");
         load_shader_library!(app, "sampling.wgsl");
+        embedded_asset!(app, "tlas_instances.wgsl");
     }
 
     fn finish(&self, app: &mut App) {
@@ -53,6 +57,17 @@ impl Plugin for RaytracingScenePlugin {
             return;
         }
 
+        // The TLAS is built through `wgpu_hal`, which means knowing the backend's instance
+        // descriptor layout. There is no portable fallback: `wgpu-core`'s own build costs more CPU
+        // per frame than everything else Solari does put together at scene scale.
+        if tlas_build::instance_layout(render_device).is_none() {
+            warn!(
+                "RaytracingScenePlugin not loaded. No TLAS build path for this backend; Solari \
+                 supports Vulkan, DX12 and Metal."
+            );
+            return;
+        }
+
         let render_app = app.sub_app_mut(RenderApp);
 
         render_app
@@ -63,6 +78,7 @@ impl Plugin for RaytracingScenePlugin {
         render_app
             .init_gpu_resource::<BlasManager>()
             .init_gpu_resource::<StandardMaterialAssets>()
+            .init_gpu_resource::<TlasInstancePackPipeline>()
             .init_gpu_resource::<RaytracingSceneBindings>()
             .add_systems(
                 ExtractSchedule,
@@ -76,6 +92,11 @@ impl Plugin for RaytracingScenePlugin {
             .add_systems(
                 Render,
                 (
+                    // Dead instance slots point at this on backends where a null reference isn't
+                    // legal, so it has to exist before any instance resolves.
+                    prepare_dummy_blas
+                        .in_set(RenderSystems::PrepareAssets)
+                        .before(prepare_raytracing_blas),
                     prepare_raytracing_blas
                         .in_set(RenderSystems::PrepareAssets)
                         .before(prepare_assets::<RenderMesh>)
@@ -89,8 +110,13 @@ impl Plugin for RaytracingScenePlugin {
             )
             .add_systems(
                 RenderGraph,
-                // The TLAS has to be built before any pass traces against it.
-                build_raytracing_tlas.in_set(RenderGraphSystems::Begin),
+                // The TLAS has to be built before any pass traces against it, and its instance
+                // descriptors packed before that — which in turn needs this frame's transforms and
+                // acceleration structure addresses to have reached the GPU.
+                (pack_raytracing_tlas_instances, build_raytracing_tlas)
+                    .chain()
+                    .after(update_sparse_buffers)
+                    .in_set(RenderGraphSystems::Begin),
             );
     }
 }

@@ -183,7 +183,11 @@ struct GpuSparseBufferUpdateMetadata {
 ///
 /// This runs as early in the pipeline as possible so that sparse buffers can be
 /// used for any subsequent pass.
-fn update_sparse_buffers(
+///
+/// Public so that anything reading a sparse buffer's GPU contents from within
+/// [`RenderGraphSystems::Begin`] can order itself after it. Passes in later
+/// [`RenderGraphSystems`] sets already run after it and don't need to.
+pub fn update_sparse_buffers(
     sparse_buffer_update_jobs: Res<SparseBufferUpdateJobs>,
     sparse_buffer_update_bind_groups: Res<SparseBufferUpdateBindGroups>,
     pipeline_cache: Res<PipelineCache>,

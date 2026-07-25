@@ -49,10 +49,23 @@ impl PluginGroup for SolariPlugins {
 impl SolariPlugins {
     /// [`WgpuFeatures`] required for these plugins to function.
     pub fn required_wgpu_features() -> WgpuFeatures {
-        WgpuFeatures::EXPERIMENTAL_RAY_QUERY
+        #[expect(unused_mut, reason = "only Apple targets add to this")]
+        let mut features = WgpuFeatures::EXPERIMENTAL_RAY_QUERY
             | WgpuFeatures::BUFFER_BINDING_ARRAY
             | WgpuFeatures::TEXTURE_BINDING_ARRAY
             | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
             | WgpuFeatures::PARTIALLY_BOUND_BINDING_ARRAY
+            // TLAS instance descriptors carry a 64-bit acceleration structure address, which
+            // `tlas_instances.wgsl` writes directly.
+            | WgpuFeatures::SHADER_INT64;
+
+        // Only the Metal descriptor layout needs the reference dead instance slots point at
+        // passed in; Vulkan and DXR use a constant zero. See `scene::tlas_build::InstanceLayout`.
+        #[cfg(target_vendor = "apple")]
+        {
+            features |= WgpuFeatures::IMMEDIATES;
+        }
+
+        features
     }
 }

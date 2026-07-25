@@ -74,11 +74,21 @@ impl BlasManager {
         self.generation += 1;
     }
 
-    /// Drops a mesh's acceleration structure. See [`Self::insert`].
+    /// Drops a mesh's acceleration structure, if it had one. See [`Self::insert`].
+    ///
+    /// Called for every mesh removed or modified this frame, most of which never had one — a mesh
+    /// that isn't raytracing compatible, or that no raytraced instance uses. The generation bump
+    /// is gated on something actually having been dropped, since bumping it for those would make
+    /// [`Self::generation`] report churn on frames where no acceleration structure moved, which is
+    /// exactly what it exists to rule out.
+    ///
+    /// [`Self::changed`] is still reported either way. It is a push onto a short list, and its
+    /// consumers are idempotent by contract.
     fn remove(&mut self, mesh: AssetId<Mesh>) {
-        self.blas.remove(&mesh);
         self.changed.push(mesh);
-        self.generation += 1;
+        if self.blas.remove(&mesh).is_some() {
+            self.generation += 1;
+        }
     }
 
     /// The device address to point a TLAS instance descriptor at.
@@ -112,15 +122,15 @@ impl BlasManager {
     }
 }
 
-/// Builds the degenerate acceleration structure dead instance slots point at, on the backends that
-/// need one.
+/// Builds an acceleration structure for every mesh that arrived or changed this frame.
 ///
-/// A single triangle at the origin with all coordinates zero: it has no area, and every instance
-/// referencing it is written with a zero mask, so it can never be hit. It exists purely so a hole
-/// in the slot allocation refers to something the driver is willing to dereference.
+/// A modified mesh has its old structure dropped first rather than reused: an acceleration
+/// structure is built from the geometry, so it says nothing about the new data. Both that and the
+/// rebuild are reported through [`BlasManager::changed`], which is what makes the instances using
+/// the mesh re-resolve and pick up the new address.
 ///
-/// Built here, at render startup, rather than from a system: it is needed before the first
-/// instance resolves and never again, so a system would spend every later frame re-deciding that
+/// The builds go out as their own submission rather than riding the frame's, because the TLAS
+/// build later in the frame reads the structures this produces.
 pub fn prepare_raytracing_blas(
     mut blas_manager: ResMut<BlasManager>,
     extracted_meshes: Res<ExtractedAssets<RenderMesh>>,

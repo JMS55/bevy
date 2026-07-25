@@ -1400,6 +1400,20 @@ impl RaytracingSceneBindings {
         // resolve still owns its slot, and the parallel move pass can reach it.
         self.reserve_slot(slot);
 
+        // Seeded when the slot is handed out rather than when the instance first resolves. A slot
+        // waiting on a mesh or a material still owns its transform, and the extract schedule only
+        // writes one when `GlobalTransform` changes — so an instance that resolves on a later
+        // frame and then never moves would otherwise trace against the zeroes `reserve_slot` grew
+        // into.
+        //
+        // Only for a new slot: after this the extract schedule owns the transforms, and the render
+        // world components read here are a snapshot from when the instance was spawned. Writing
+        // them back on a later refresh (a mesh finally loading, say) would undo every move the
+        // instance has made since.
+        if previous.is_none() {
+            self.write_transforms(slot, transform, previous_frame_transform);
+        }
+
         let mut instance = Instance {
             slot,
             mesh: mesh_id,
@@ -1407,15 +1421,7 @@ impl RaytracingSceneBindings {
             buffers: previous.and_then(|instance| instance.buffers),
         };
 
-        let resolved = self.resolve_instance(
-            entity,
-            &mut instance,
-            transform,
-            previous_frame_transform,
-            previous.is_none(),
-            blas_manager,
-            mesh_allocator,
-        );
+        let resolved = self.resolve_instance(entity, &mut instance, blas_manager, mesh_allocator);
 
         // Written back on both paths, so that a failed attempt keeps its slot and its reverse
         // index links and can simply be retried.
@@ -1431,9 +1437,6 @@ impl RaytracingSceneBindings {
         &mut self,
         entity: Entity,
         instance: &mut Instance,
-        transform: &GlobalTransform,
-        previous_frame_transform: &PreviousGlobalTransform,
-        seed_transforms: bool,
         blas_manager: &BlasManager,
         mesh_allocator: &MeshAllocator,
     ) -> bool {
@@ -1503,13 +1506,8 @@ impl RaytracingSceneBindings {
         );
         set_at(&mut self.material_ids, slot, GpuU32(material_slot));
 
-        // Only seed the transforms for a slot that has just been handed out. After that the
-        // extract schedule owns them, and the render world components this reads are a snapshot
-        // from when the instance was spawned — writing them back here would undo every move the
-        // instance has made since, on any later refresh (a mesh finally loading, say).
-        if seed_transforms {
-            self.write_transforms(slot, transform, previous_frame_transform);
-        }
+        // The transforms are `refresh_instance`'s job: they belong to the slot rather than to the
+        // instance being drawable, and are seeded when the slot is handed out.
         self.set_live(slot, blas_address);
 
         if self.emissive_materials.contains(&instance.material) {
@@ -1549,8 +1547,6 @@ impl RaytracingSceneBindings {
         self.write_transforms(slot, transform, previous_frame_transform);
     }
 
-    /// Writes an instance's transforms into the per-slot buffers, returning the current one in the
-    /// form a TLAS entry wants.
     /// Writes an instance's transforms into the per-slot buffers.
     ///
     /// Takes `&self` so it can be called from a parallel pass. `reserve_slot` has to
@@ -2015,7 +2011,8 @@ impl RaytracingSceneBindings {
 
     /// Returns this parity's bind group, building it if the cache is cold.
     ///
-    /// The result is only cached once a real previous-frame TLAS exists. On the first frame the
+    /// The result is only cached once a real previous-frame TLAS exists — which means built, not
+    /// merely allocated, exactly as [`Self::create_bind_group`] decides it. Until then the
     /// previous-frame entry aliases the current TLAS, and caching that would leave the alias in
     /// place every time this parity came around again.
     fn cache_bind_group(
@@ -2040,7 +2037,11 @@ impl RaytracingSceneBindings {
             dfg_sampler,
         );
 
-        if self.tlas[parity ^ 1].is_some() {
+        // `tlas_built` rather than `tlas.is_some()`: an allocated but never built parity is what
+        // `create_bind_group` aliases past, so caching on the weaker condition would pin the alias
+        // for as long as this parity's TLAS went un-reallocated. (Built implies allocated, so this
+        // covers both.)
+        if self.tlas_built[parity ^ 1] {
             self.cached_bind_groups[parity] = Some(bind_group.clone());
         }
 

@@ -47,6 +47,22 @@
     unsafe_code,
     reason = "Building the TLAS without wgpu-core's per-instance cost requires wgpu_hal."
 )]
+// On a target where neither backend is compiled in, every arm of `first_supported_backend` is
+// cfg'd away, so the per-backend helpers are never instantiated and the entry points ignore their
+// arguments. They still have to exist: Solari compiles everywhere and declines to load at runtime.
+#![cfg_attr(
+    not(any(
+        windows,
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd"
+    )),
+    expect(
+        dead_code,
+        unused_variables,
+        reason = "no backend with a raw TLAS build path is compiled in for this target"
+    )
+)]
 
 use bevy_render::{
     render_resource::{Blas, Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Tlas},
@@ -57,7 +73,11 @@ use wgpu::{hal, BufferUses};
 /// Size of one TLAS instance descriptor, on both Vulkan and DXR.
 pub const INSTANCE_DESCRIPTOR_SIZE: u64 = 64;
 
-/// Runs `$body` against each backend with a raw build path until one produces `Some`.
+/// Runs `$body` against each backend with a raw build path until one produces `Some<$ok>`.
+///
+/// The result type is spelled out by the caller rather than inferred from `$body`, because on a
+/// target where every arm is cfg'd away there is no `$body` left to infer it from — the expansion
+/// is a bare `None` and inference has nothing to go on.
 ///
 /// The cfgs mirror when `wgpu` actually exposes each `hal::api` type, which is *not* the same as
 /// `wgpu-hal`'s own aliases. `wgpu-hal`'s `vulkan` alias is every non-wasm target, but the feature
@@ -65,9 +85,13 @@ pub const INSTANCE_DESCRIPTOR_SIZE: u64 = 64;
 /// only a dependency on those targets; on Apple it would take `vulkan-portability`, and there is no
 /// reason to reach for `MoltenVK` when Metal is right there. `bevy_render` enables the `vulkan`,
 /// `dx12` and `metal` features unconditionally, so the features themselves need no check here.
+///
+/// Keep the cfgs in step with the module-level `dead_code` expectation above.
 macro_rules! first_supported_backend {
-    (|$api:ident| $body:block) => {{
-        let mut result = None;
+    ($ok:ty, |$api:ident| $body:block) => {{
+        // Shadowed rather than reassigned, so that a target with no arms at all doesn't leave an
+        // unused `mut` behind.
+        let result: Option<$ok> = None;
 
         #[cfg(any(
             windows,
@@ -75,16 +99,16 @@ macro_rules! first_supported_backend {
             target_os = "android",
             target_os = "freebsd"
         ))]
-        if result.is_none() {
+        let result = result.or_else(|| {
             type $api = hal::api::Vulkan;
-            result = $body;
-        }
+            $body
+        });
 
         #[cfg(target_os = "windows")]
-        if result.is_none() {
+        let result = result.or_else(|| {
             type $api = hal::api::Dx12;
-            result = $body;
-        }
+            $body
+        });
 
         result
     }};
@@ -96,7 +120,7 @@ macro_rules! first_supported_backend {
 pub fn supported(render_device: &RenderDevice) -> bool {
     let device = render_device.wgpu_device();
 
-    first_supported_backend!(|A| {
+    first_supported_backend!((), |A| {
         // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
         unsafe { device.as_hal::<A>() }.map(|_| ())
     })
@@ -109,7 +133,7 @@ pub fn tlas_scratch_size(
     instances: &Buffer,
     instance_count: u32,
 ) -> Option<u64> {
-    first_supported_backend!(|A| {
+    first_supported_backend!(u64, |A| {
         tlas_scratch_size_impl::<A>(render_device, instances, instance_count)
     })
 }
@@ -162,7 +186,9 @@ fn tlas_scratch_size_impl<A: hal::Api>(
 /// exclusively through `as_hal` is referenced by nothing. What actually earns the deferral is the
 /// caller transitioning it with `CommandEncoder::transition_resources` each frame it is used.
 pub fn create_scratch_buffer(render_device: &RenderDevice, size: u64) -> Option<Buffer> {
-    first_supported_backend!(|A| { create_scratch_buffer_impl::<A>(render_device, size) })
+    first_supported_backend!(Buffer, |A| {
+        create_scratch_buffer_impl::<A>(render_device, size)
+    })
 }
 
 fn create_scratch_buffer_impl<A: hal::Api>(
@@ -247,7 +273,7 @@ pub fn build_tlas(
     instance_count: u32,
     scratch: &Buffer,
 ) -> bool {
-    let built = first_supported_backend!(|A| {
+    let built = first_supported_backend!((), |A| {
         build_tlas_impl::<A>(encoder, tlas, instances, instance_count, scratch)
     })
     .is_some();

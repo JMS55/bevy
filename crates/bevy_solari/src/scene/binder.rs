@@ -1,7 +1,4 @@
-use super::{
-    blas::BlasManager, extract::StandardMaterialAssets, tlas_build, tlas_build::InstanceLayout,
-    RaytracingMesh3d,
-};
+use super::{blas::BlasManager, extract::StandardMaterialAssets, tlas_build, RaytracingMesh3d};
 use alloc::sync::Arc;
 use bevy_asset::{load_embedded_asset, AssetId};
 use bevy_color::{ColorToComponents, LinearRgba};
@@ -42,48 +39,39 @@ const MAX_TEXTURE_COUNT: NonZeroU32 = NonZeroU32::new(5_000).unwrap();
 const TEXTURE_MAP_NONE: u32 = u32::MAX;
 const LIGHT_NOT_PRESENT_THIS_FRAME: u32 = u32::MAX;
 
-/// TLAS instance capacity is rounded up to a multiple of this, so that adding a few instances
-/// doesn't force a reallocation every frame.
-const TLAS_CAPACITY_GRANULARITY: u32 = 128;
+/// Smallest TLAS instance capacity handed out, and the floor [`tlas_capacity_for`] grows from.
+const TLAS_MIN_CAPACITY: u32 = 128;
 
-/// How many frames a released acceleration structure is held for before being dropped.
+/// Instance capacity to allocate to hold `instance_count` slots.
 ///
-/// `wgpu-core` defers freeing a resource until every submission whose tracker references it has
-/// retired. A TLAS built through [`tlas_build`] never registers its BLAS dependencies, so nothing
-/// keeps them alive and dropping one destroys it immediately — while a submission that traces the
-/// TLAS pointing into it may still be running.
+/// Geometric rather than a fixed step, so that the number of reallocations over a scene's lifetime
+/// is logarithmic in its size rather than linear. That matters because a reallocation is not just
+/// the allocation: [`RaytracingSceneBindings::reserve_tlas`] invalidates the scene bind group, since
+/// the TLAS it binds really did change, and rebuilding that walks both mesh slab binding arrays and
+/// every bound texture. Growing 128 at a time meant paying that once per 128 instances that ever
+/// appeared — around 780 times per parity while a 100k-instance scene streamed in. At 1.5x it is
+/// about 18.
 ///
-/// Sized by assumption rather than proof: `wgpu` doesn't expose which submissions have retired at
-/// the point these are released, and this comfortably exceeds the frames a presentation loop keeps
-/// outstanding.
+/// The cost is up to 50% slack in the descriptor buffer and the TLAS, including `wgpu`'s CPU-side
+/// instance mirror. A few MB at scene scale, against work that scaled with instance count.
 ///
-/// TODO: this should be exact rather than a guess, and `wgpu` is one parameter away from letting
-/// it be. `CommandEncoder::mark_acceleration_structures_built` hardcodes an empty dependency list,
-/// but that list is what `wgpu-core` clones into `Tlas::dependencies`, which holds its BLASes for
-/// exactly as long as the TLAS lives. If it grew a dependencies argument, this whole ring could go
-/// away. Note the BLAS argument it already has is not that hook and must stay empty: it resets
-/// each BLAS's compaction state, and panics outright on one that has already been compacted —
-/// which, here, is all of them.
-const RESOURCE_RETIREMENT_FRAMES: usize = 4;
-
-/// GPU resources released on one frame, held until [`RESOURCE_RETIREMENT_FRAMES`] later.
-///
-/// Only acceleration structures need this. Every buffer on the raw path is transitioned through
-/// `wgpu-core` by `pack_raytracing_tlas_instances`, which is enough for it to hold them across the
-/// submission; there is no equivalent for a `Blas`, because the whole point of
-/// `mark_acceleration_structures_built` is that it records no dependencies.
-#[derive(Default)]
-struct RetiredResources {
-    blas: Vec<Blas>,
+/// A pure function of the count rather than a multiple of the previous capacity, so that the
+/// descriptor buffer and both TLASes agree on the capacity for a given slot count without having to
+/// coordinate — which is what lets [`RaytracingSceneBindings::reserve_tlas_scratch`] size scratch
+/// from one of them and have it cover the other.
+fn tlas_capacity_for(instance_count: u32) -> u32 {
+    let mut capacity = TLAS_MIN_CAPACITY;
+    while capacity < instance_count {
+        // 1.5x, rounded up so that it always makes progress, and saturating so that a count near
+        // `u32::MAX` terminates rather than wrapping.
+        capacity = capacity.saturating_add(capacity.div_ceil(2));
+    }
+    capacity
 }
 
-// ---------------------------------------------------------------------------
-// GPU types
-//
-// These are `Pod` rather than `ShaderType` so that they can be stored in an
-// `AtomicSparseBufferVec`. The layouts are written out to match std430: every
-// `Vec3` is followed by an `f32` so the pair fills one 16-byte slot.
-// ---------------------------------------------------------------------------
+/// Width of a TLAS instance's custom data in both Vulkan (`instanceCustomIndex`) and DXR
+/// (`InstanceID`). `tlas_instances.wgsl` packs instance slots into that field, so they have to fit.
+const TLAS_CUSTOM_DATA_BITS: u32 = 24;
 
 #[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
 #[repr(C)]
@@ -175,7 +163,10 @@ struct GpuU32(u32);
 
 /// The device address of a slot's acceleration structure.
 ///
-/// `tlas_instances.wgsl` copies this straight into the instance descriptor.
+/// `tlas_instances.wgsl` copies this straight into the instance descriptor. It reads the buffer as
+/// `array<vec2<u32>>` rather than `array<u64>`, since nothing does arithmetic on an address and
+/// declaring it 64-bit would cost a `SHADER_INT64` requirement; the two are the same bytes on any
+/// little-endian host.
 ///
 /// Zero means the slot has no acceleration structure — it was never handed out, or its instance
 /// isn't currently drawable. Both Vulkan and DXR define a zero reference as an inactive instance
@@ -298,10 +289,9 @@ impl FromWorld for TlasInstancePackPipeline {
             ),
         );
 
-        let Some(layout_kind) = tlas_build::instance_layout(world.resource::<RenderDevice>())
-        else {
+        if !tlas_build::supported(world.resource::<RenderDevice>()) {
             return Self { layout, id: None };
-        };
+        }
 
         let shader = load_embedded_asset!(world, "tlas_instances.wgsl");
         let id =
@@ -310,9 +300,7 @@ impl FromWorld for TlasInstancePackPipeline {
                 .queue_compute_pipeline(ComputePipelineDescriptor {
                     label: Some("tlas_instance_pack_pipeline".into()),
                     layout: vec![layout.clone()],
-                    immediate_size: layout_kind.immediate_size(),
                     shader,
-                    shader_defs: layout_kind.shader_defs(),
                     entry_point: Some("pack_tlas_instances".into()),
                     ..default()
                 });
@@ -710,13 +698,14 @@ pub struct RaytracingSceneBindings {
     /// keep them alive. A built TLAS holds pointers into that memory, and the off-parity one is
     /// still bound as the previous frame, so both parities' sets have to be retained.
     ///
-    /// One entry per distinct mesh rather than per instance, which is why refreshing this every
-    /// build is affordable.
+    /// One entry per distinct mesh rather than per instance.
     tlas_blas_handles: [Vec<Blas>; 2],
+    /// [`BlasManager::generation`] each parity's [`Self::tlas_blas_handles`] was built from, so that
+    /// the refresh is skipped on the frames the acceleration structures didn't change — which is
+    /// nearly all of them. Zero means never built.
+    tlas_blas_generation: [u64; 2],
     frame_parity: usize,
 
-    /// Descriptor layout this backend expects, resolved once at startup.
-    instance_layout: InstanceLayout,
     /// Packed TLAS instance descriptors, filled by `tlas_instances.wgsl`.
     ///
     /// GPU only: every field is either already on the GPU (the transform, the BLAS address) or
@@ -726,11 +715,21 @@ pub struct RaytracingSceneBindings {
     /// Scratch space for the TLAS build, grown to fit the largest build so far.
     tlas_scratch: Option<Buffer>,
     tlas_scratch_capacity: u64,
+    /// Descriptor capacity [`Self::tlas_scratch_capacity`] was queried for.
+    ///
+    /// The query is a driver call, and the answer only depends on the instance count, so this is
+    /// what keeps it from being asked again every frame.
+    tlas_scratch_sized_for: u32,
     /// Whether the pack pass recorded this frame, and with it the transitions the build needs.
     instances_packed: bool,
-    /// Acceleration structures released recently, held until no submission can still read them.
-    retired: [RetiredResources; RESOURCE_RETIREMENT_FRAMES],
-    retire_index: usize,
+    /// Acceleration structures no longer referenced by either TLAS, awaiting release.
+    ///
+    /// A TLAS built through [`tlas_build`] never registers its BLAS dependencies, so `wgpu-core`
+    /// won't hold these for us and dropping one destroys it immediately — while a submission that
+    /// traces the TLAS pointing into it may still be running. `retire_raytracing_resources` hands
+    /// them to `Queue::on_submitted_work_done` once this frame is submitted, which drops them at
+    /// exactly the right moment rather than after a guessed number of frames.
+    pending_retire: Vec<Blas>,
     /// Bind group for `tlas_instances.wgsl`, rebuilt whenever one of its three buffers moves.
     instance_pack_bind_group: Option<BindGroup>,
     /// The buffers [`Self::instance_pack_bind_group`] was built against.
@@ -830,18 +829,16 @@ impl FromWorld for RaytracingSceneBindings {
             tlas_capacity: [0, 0],
             tlas_built: [false, false],
             tlas_blas_handles: [Vec::new(), Vec::new()],
+            tlas_blas_generation: [0, 0],
             frame_parity: 0,
 
-            // Checked by `RaytracingScenePlugin`, which declines to load without a raw build path.
-            instance_layout: tlas_build::instance_layout(render_device)
-                .expect("RaytracingScenePlugin loaded on a backend with no TLAS build path"),
             instance_descriptors: None,
             instance_descriptor_capacity: 0,
             tlas_scratch: None,
             tlas_scratch_capacity: 0,
+            tlas_scratch_sized_for: 0,
             instances_packed: false,
-            retired: Default::default(),
-            retire_index: 0,
+            pending_retire: Vec::new(),
             instance_pack_bind_group: None,
             instance_pack_buffer_ids: None,
 
@@ -1668,12 +1665,21 @@ impl RaytracingSceneBindings {
         let _span = info_span!("advance_tlas").entered();
 
         // Nothing to trace and nothing to build. Worth returning before allocating rather than
-        // after: `reserve_tlas` rounds up to `TLAS_CAPACITY_GRANULARITY`, so it would otherwise
-        // hand out a TLAS for an empty scene that the pack pass then declines to fill, leaving an
-        // allocated-but-unbuilt structure to resurface as a later frame's previous-frame entry.
+        // after: `reserve_tlas` never allocates fewer than `TLAS_MIN_CAPACITY` instances, so it
+        // would otherwise hand out a TLAS for an empty scene that the pack pass then declines to
+        // fill, leaving an allocated-but-unbuilt structure to resurface as a later frame's
+        // previous-frame entry.
         if !build_ready || self.instance_slots.len() == 0 {
             return;
         }
+
+        // The custom data a hit is resolved through is 24 bits wide, and `tlas_instances.wgsl`
+        // masks rather than checks, so a slot past that would silently alias another.
+        debug_assert!(
+            self.instance_slots.len() < 1 << TLAS_CUSTOM_DATA_BITS,
+            "instance slot count {} does not fit in a TLAS instance's custom data",
+            self.instance_slots.len()
+        );
 
         // Everything the build reads is secured before the parity flip commits, for the same
         // reason as `build_ready` above: an allocation failure here would otherwise leave a TLAS
@@ -1687,23 +1693,24 @@ impl RaytracingSceneBindings {
         self.frame_parity ^= 1;
         let parity = self.frame_parity;
 
-        // Frees whatever was released `RESOURCE_RETIREMENT_FRAMES` ago, before anything new is put
-        // in its place.
-        self.retire_index = (self.retire_index + 1) % RESOURCE_RETIREMENT_FRAMES;
-        self.retired[self.retire_index] = RetiredResources::default();
-
         self.reserve_tlas(parity, render_device);
 
         // Refreshed rather than appended to, so a BLAS that no scene instance references any more
         // is eventually released. Bounded by the number of distinct meshes, so it's cheaper than
-        // tracking exactly which of them this parity ended up pointing at.
+        // tracking exactly which of them this parity ended up pointing at — but it is still an
+        // atomic refcount bump per mesh here and another when the retired copy is dropped, so it's
+        // gated on the set having actually changed rather than paid on every frame.
         //
         // Retired rather than dropped: the TLAS this parity held was traced by submissions that
         // may still be in flight, and since the build never told `wgpu-core` about these
         // dependencies, nothing else is keeping them alive.
-        let stale = core::mem::take(&mut self.tlas_blas_handles[parity]);
-        self.retired[self.retire_index].blas.extend(stale);
-        self.tlas_blas_handles[parity].extend(blas_manager.handles().cloned());
+        let generation = blas_manager.generation();
+        if self.tlas_blas_generation[parity] != generation {
+            let stale = core::mem::take(&mut self.tlas_blas_handles[parity]);
+            self.pending_retire.extend(stale);
+            self.tlas_blas_handles[parity].extend(blas_manager.handles().cloned());
+            self.tlas_blas_generation[parity] = generation;
+        }
     }
 
     /// Makes sure the instance descriptor buffer covers every slot, reallocating it if not.
@@ -1717,13 +1724,11 @@ impl RaytracingSceneBindings {
             return;
         }
 
-        let capacity = needed
-            .next_multiple_of(TLAS_CAPACITY_GRANULARITY)
-            .max(TLAS_CAPACITY_GRANULARITY);
+        let capacity = tlas_capacity_for(needed);
 
         self.instance_descriptors = Some(render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_tlas_instance_descriptors"),
-            size: u64::from(capacity) * self.instance_layout.size(),
+            size: u64::from(capacity) * tlas_build::INSTANCE_DESCRIPTOR_SIZE,
             usage: BufferUsages::STORAGE | BufferUsages::TLAS_INPUT,
             mapped_at_creation: false,
         }));
@@ -1735,12 +1740,22 @@ impl RaytracingSceneBindings {
     }
 
     /// Makes sure the build scratch buffer is big enough for this frame's instance count.
+    ///
+    /// Has to run after [`Self::reserve_instance_descriptors`], which is what sets the instance
+    /// count being sized for.
     fn reserve_tlas_scratch(&mut self, render_device: &RenderDevice) {
-        let Some(needed) =
-            tlas_build::tlas_scratch_size(render_device, self.instance_descriptor_capacity)
-        else {
+        let capacity = self.instance_descriptor_capacity;
+        if self.tlas_scratch.is_some() && capacity <= self.tlas_scratch_sized_for {
+            return;
+        }
+
+        let Some(instances) = self.instance_descriptors.as_ref() else {
             return;
         };
+        let Some(needed) = tlas_build::tlas_scratch_size(render_device, instances, capacity) else {
+            return;
+        };
+        self.tlas_scratch_sized_for = capacity;
 
         if self.tlas_scratch.is_some() && needed <= self.tlas_scratch_capacity {
             return;
@@ -1769,9 +1784,7 @@ impl RaytracingSceneBindings {
             return;
         }
 
-        let capacity = needed
-            .next_multiple_of(TLAS_CAPACITY_GRANULARITY)
-            .max(TLAS_CAPACITY_GRANULARITY);
+        let capacity = tlas_capacity_for(needed);
 
         self.tlas[parity] = Some(
             render_device
@@ -2094,11 +2107,19 @@ pub fn pack_raytracing_tlas_instances(
     mut bindings: ResMut<RaytracingSceneBindings>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<TlasInstancePackPipeline>,
-    blas_manager: Res<BlasManager>,
     mut render_context: RenderContext,
 ) {
     let bindings = &mut *bindings;
     bindings.instances_packed = false;
+
+    // `advance_tlas` only hands out a TLAS for a frame it can also build, so without one there is
+    // nothing to pack for. This isn't redundant with the checks below: the pipeline cache is
+    // processed between `advance_tlas` and here, so it can become ready on the very frame
+    // `advance_tlas` gave up on it — and packing then would rebuild the TLAS that is already bound
+    // as this frame's, leaving the previous-frame entry a frame staler than it should be.
+    if bindings.tlas[bindings.frame_parity].is_none() {
+        return;
+    }
 
     let (Some(bind_group), Some(compute_pipeline), Some(instances), Some(scratch)) = (
         bindings.instance_pack_bind_group.as_ref(),
@@ -2128,11 +2149,6 @@ pub fn pack_raytracing_tlas_instances(
         });
         pass.set_pipeline(compute_pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        // Only the Metal layout takes this; elsewhere a dead slot's reference is a constant in
-        // the shader and the pipeline declares no immediate data at all.
-        if bindings.instance_layout.immediate_size() > 0 {
-            pass.set_immediates(0, &blas_manager.dead_blas_address().to_le_bytes());
-        }
         pass.dispatch_workgroups(slot_count.div_ceil(TLAS_INSTANCE_PACK_WORKGROUP_SIZE), 1, 1);
     }
     time_span.end(command_encoder);
@@ -2230,6 +2246,26 @@ pub fn build_raytracing_tlas(
              access."
         ));
     }
+}
+
+/// Releases acceleration structures that no TLAS points at any more.
+///
+/// Has to run after this frame's submission, so that the work handed to
+/// [`Queue::on_submitted_work_done`] covers every submission that could still be tracing a TLAS
+/// which references them. The callback fires when that work completes, which is the exact moment
+/// they stop being reachable by the GPU.
+///
+/// [`Queue::on_submitted_work_done`]: bevy_render::renderer::RenderQueue::on_submitted_work_done
+pub fn retire_raytracing_resources(
+    mut bindings: ResMut<RaytracingSceneBindings>,
+    render_queue: Res<RenderQueue>,
+) {
+    if bindings.pending_retire.is_empty() {
+        return;
+    }
+
+    let retired = core::mem::take(&mut bindings.pending_retire);
+    render_queue.on_submitted_work_done(move || drop(retired));
 }
 
 /// Finalizes the sparse buffer uploads and selects this frame's bind group.

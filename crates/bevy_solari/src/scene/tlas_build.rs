@@ -11,10 +11,18 @@
 //!
 //! # Backends
 //!
-//! Vulkan's `VkAccelerationStructureInstanceKHR` and DXR's `D3D12_RAYTRACING_INSTANCE_DESC` are
-//! byte-identical. Metal's `MTLIndirectAccelerationStructureInstanceDescriptor` is 72 bytes with a
-//! column-major matrix and unpacked mask/user id, so it gets a second layout in the shader; see
-//! [`InstanceLayout`].
+//! Vulkan and DX12 only. Their instance descriptors — `VkAccelerationStructureInstanceKHR` and
+//! `D3D12_RAYTRACING_INSTANCE_DESC` — are byte-identical, so one shader and one code path serve
+//! both.
+//!
+//! Metal cannot work this way. `wgpu-core` makes the acceleration structures a TLAS points at
+//! resident by collecting its dependency list into an `MTLResidencySet` and attaching that to the
+//! submission (`wgpu_hal::metal`'s `set_acceleration_structure_dependencies`), and it skips that
+//! entirely when the list is empty. `CommandEncoder::mark_acceleration_structures_built` records an
+//! empty list and clears whatever the TLAS had, so the BLASes are never made resident and traversal
+//! reads memory Metal is free to have evicted. The same hal method is a no-op on Vulkan and DX12,
+//! which is why they are unaffected, and there is no way to supply the list from outside `wgpu` —
+//! it would need `mark_acceleration_structures_built` to grow a dependencies argument.
 //!
 //! Rather than matching on [`Backend`](bevy_render::settings::Backend), every operation tries each
 //! compiled-in backend and relies on `as_hal` returning `None` for a resource that doesn't belong
@@ -27,79 +35,46 @@
 //! are transitioned with `CommandEncoder::transition_resources` from the *other* system — the one
 //! that runs the pack pass through the regular API. That keeps the tracker's view accurate, which
 //! matters on DX12 where a resource transition carries an explicit before-state, and has the side
-//! benefit of holding the buffers alive for the submission. Only the acceleration structure
-//! barrier, which has no such public spelling, is placed by hand here.
+//! benefit of holding the buffers alive for the submission.
+//!
+//! What is left is the acceleration structures' own barriers, which have no such public spelling
+//! and so are placed by hand in [`build_tlas`]. Note that there are two of them: the read-after-
+//! write one that makes a build visible to the traces that follow it is the obvious one, but the
+//! write-after-read one that keeps a build off a TLAS an earlier submission may still be tracing
+//! matters just as much, and `wgpu-core` places both around its own build.
 
 #![expect(
     unsafe_code,
     reason = "Building the TLAS without wgpu-core's per-instance cost requires wgpu_hal."
 )]
 
-use alloc::{vec, vec::Vec};
 use bevy_render::{
     render_resource::{Blas, Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Tlas},
     renderer::RenderDevice,
 };
-use bevy_shader::ShaderDefVal;
-use core::mem::size_of;
 use wgpu::{hal, BufferUses};
 
-/// Memory layout of a TLAS instance descriptor, which differs by backend.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum InstanceLayout {
-    /// `VkAccelerationStructureInstanceKHR`, and identically `D3D12_RAYTRACING_INSTANCE_DESC`:
-    /// 64 bytes, row-major 3x4 matrix, custom data and mask bit-packed into one word.
-    Packed64,
-    /// `MTLIndirectAccelerationStructureInstanceDescriptor`: 72 bytes, column-major 4x3 matrix of
-    /// packed float3s, and separate words for options, mask, table offset and user id.
-    #[cfg_attr(
-        not(target_vendor = "apple"),
-        expect(
-            dead_code,
-            reason = "only constructed by the Metal arm of `instance_layout`"
-        )
-    )]
-    Metal72,
-}
-
-impl InstanceLayout {
-    /// Size of one descriptor in bytes.
-    pub fn size(self) -> u64 {
-        match self {
-            Self::Packed64 => 64,
-            Self::Metal72 => 72,
-        }
-    }
-
-    /// Shader def selecting this layout in `tlas_instances.wgsl`.
-    pub fn shader_defs(self) -> Vec<ShaderDefVal> {
-        match self {
-            Self::Packed64 => vec![],
-            Self::Metal72 => vec!["TLAS_INSTANCE_LAYOUT_METAL".into()],
-        }
-    }
-
-    /// Bytes of immediate data `tlas_instances.wgsl` takes, which is only what a dead slot points
-    /// at — and only where that isn't the constant zero. See [`needs_dummy_blas`].
-    pub fn immediate_size(self) -> u32 {
-        if needs_dummy_blas(self) {
-            size_of::<u64>() as u32
-        } else {
-            0
-        }
-    }
-}
+/// Size of one TLAS instance descriptor, on both Vulkan and DXR.
+pub const INSTANCE_DESCRIPTOR_SIZE: u64 = 64;
 
 /// Runs `$body` against each backend with a raw build path until one produces `Some`.
 ///
-/// The backend cfgs mirror `wgpu-hal`'s own (`vulkan` is every non-wasm target, `dx12` is Windows,
-/// `metal` is Apple), since those aliases aren't visible outside that crate. `bevy_render` enables
-/// all three features unconditionally, so no feature check is needed here.
+/// The cfgs mirror when `wgpu` actually exposes each `hal::api` type, which is *not* the same as
+/// `wgpu-hal`'s own aliases. `wgpu-hal`'s `vulkan` alias is every non-wasm target, but the feature
+/// behind it only reaches `wgpu-hal` by way of `wgpu-core-deps-windows-linux-android`, which is
+/// only a dependency on those targets; on Apple it would take `vulkan-portability`, and there is no
+/// reason to reach for `MoltenVK` when Metal is right there. `bevy_render` enables the `vulkan`,
+/// `dx12` and `metal` features unconditionally, so the features themselves need no check here.
 macro_rules! first_supported_backend {
     (|$api:ident| $body:block) => {{
         let mut result = None;
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(
+            windows,
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd"
+        ))]
         if result.is_none() {
             type $api = hal::api::Vulkan;
             result = $body;
@@ -111,106 +86,58 @@ macro_rules! first_supported_backend {
             result = $body;
         }
 
-        #[cfg(target_vendor = "apple")]
-        if result.is_none() {
-            type $api = hal::api::Metal;
-            result = $body;
-        }
-
         result
     }};
 }
 
-/// The descriptor layout this device's backend expects, or `None` if it has no raw build path.
-pub fn instance_layout(render_device: &RenderDevice) -> Option<InstanceLayout> {
-    // Deliberately not written with `first_supported_backend!`: the answer depends on which arm
-    // matched, not just that one did.
+/// Whether this device's backend has a raw TLAS build path.
+///
+/// `RaytracingScenePlugin` declines to load when this is false; there is no portable fallback.
+pub fn supported(render_device: &RenderDevice) -> bool {
     let device = render_device.wgpu_device();
 
-    #[cfg(not(target_arch = "wasm32"))]
-    // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
-    if unsafe { device.as_hal::<hal::api::Vulkan>() }.is_some() {
-        return Some(InstanceLayout::Packed64);
-    }
-
-    #[cfg(target_os = "windows")]
-    // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
-    if unsafe { device.as_hal::<hal::api::Dx12>() }.is_some() {
-        return Some(InstanceLayout::Packed64);
-    }
-
-    #[cfg(target_vendor = "apple")]
-    // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
-    if unsafe { device.as_hal::<hal::api::Metal>() }.is_some() {
-        return Some(InstanceLayout::Metal72);
-    }
-
-    let _ = device;
-    None
+    first_supported_backend!(|A| {
+        // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
+        unsafe { device.as_hal::<A>() }.map(|_| ())
+    })
+    .is_some()
 }
 
-/// Whether dead instance slots need to point at a real, masked-off acceleration structure.
-///
-/// Vulkan and DXR both define a zero acceleration structure reference as an inactive instance that
-/// the build discards, so a hole costs nothing there. Metal references its structures by
-/// [`MTLResourceID`], an opaque handle rather than an address, and documents nothing about a zero
-/// one — so holes get a degenerate dummy with a zero mask instead of a value the driver may
-/// dereference.
-///
-/// [`MTLResourceID`]: https://developer.apple.com/documentation/metal/mtlresourceid
-pub fn needs_dummy_blas(layout: InstanceLayout) -> bool {
-    match layout {
-        InstanceLayout::Packed64 => false,
-        InstanceLayout::Metal72 => true,
-    }
-}
-
-/// The device address a TLAS instance descriptor refers to a BLAS by.
-///
-/// `None` on a backend with no raw build path, which `RaytracingScenePlugin` declines to load on.
-pub fn blas_device_address(render_device: &RenderDevice, blas: &mut Blas) -> Option<u64> {
-    first_supported_backend!(|A| { blas_device_address_impl::<A>(render_device, blas) })
-}
-
-fn blas_device_address_impl<A: hal::Api>(
+/// Scratch space a TLAS build over `instance_count` instances of `instances` needs.
+pub fn tlas_scratch_size(
     render_device: &RenderDevice,
-    blas: &mut Blas,
+    instances: &Buffer,
+    instance_count: u32,
 ) -> Option<u64> {
-    use hal::Device as _;
-
-    // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
-    let hal_blas = unsafe { blas.as_hal::<A>() }?;
-    // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
-    let hal_device = unsafe { render_device.wgpu_device().as_hal::<A>() }?;
-
-    // SAFETY: `hal_blas` came from `hal_device`, which `as_hal` just confirmed is backend `A`.
-    Some(unsafe { hal_device.get_acceleration_structure_device_address(&hal_blas) })
-}
-
-/// Scratch space a TLAS build over `instance_count` instances needs.
-pub fn tlas_scratch_size(render_device: &RenderDevice, instance_count: u32) -> Option<u64> {
-    first_supported_backend!(|A| { tlas_scratch_size_impl::<A>(render_device, instance_count) })
+    first_supported_backend!(|A| {
+        tlas_scratch_size_impl::<A>(render_device, instances, instance_count)
+    })
 }
 
 fn tlas_scratch_size_impl<A: hal::Api>(
     render_device: &RenderDevice,
+    instances: &Buffer,
     instance_count: u32,
 ) -> Option<u64> {
     use hal::Device as _;
 
     // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
     let hal_device = unsafe { render_device.wgpu_device().as_hal::<A>() }?;
+    // SAFETY: the handle is only read from, never destroyed, and is dropped with the guard.
+    let hal_instances = unsafe { instances.as_hal::<A>() }?;
 
-    // Buffers and addresses are documented as ignored for sizing, so the instance buffer doesn't
-    // have to exist yet — only the count matters.
+    // Vulkan and DXR both document buffers and addresses as ignored for sizing, and pass a null
+    // one. `wgpu_hal`'s Metal path unwraps the buffer unconditionally, though, so a real one has to
+    // be handed over — which is why this can't be asked before the descriptor buffer exists.
     let entries =
         hal::AccelerationStructureEntries::Instances(hal::AccelerationStructureInstances {
-            buffer: None,
+            buffer: Some(&*hal_instances),
             offset: 0,
             count: instance_count,
         });
 
-    // SAFETY: `entries` describes instances with no buffer, which is what the sizing query wants.
+    // SAFETY: `entries` describes instances of a buffer belonging to backend `A`, which `as_hal`
+    // just confirmed, and the sizing query records nothing and reads no memory through it.
     let sizes = unsafe {
         hal_device.get_acceleration_structure_build_sizes(
             &hal::GetAccelerationStructureBuildSizesDescriptor {
@@ -372,7 +299,8 @@ fn build_tlas_impl<A: hal::Api>(
     };
 
     // Both buffers were already transitioned by the caller, through `wgpu-core`, so the only
-    // barrier left is the acceleration structure's own — which has no public spelling.
+    // barriers left are the acceleration structure's own — which have no public spelling. Both
+    // mirror what `wgpu-core` places around its own TLAS build.
     //
     // SAFETY: every resource in `descriptor` belongs to backend `A` and to this device, the
     // scratch buffer is sized by `tlas_scratch_size` and used by no other build in this
@@ -381,8 +309,21 @@ fn build_tlas_impl<A: hal::Api>(
         encoder.as_hal_mut::<A, _, _>(|encoder| {
             let encoder = encoder?;
 
+            // Write-after-read against earlier frames' traces. This parity's TLAS stays bound as
+            // the previous frame's for a second frame after it stops being current, so a
+            // submission that is still tracing it can overlap this build — having two parities
+            // widens that window rather than closing it. A barrier's first scope covers everything
+            // already submitted to the queue, which is what makes this enough.
+            encoder.place_acceleration_structure_barrier(hal::AccelerationStructureBarrier {
+                usage: hal::StateTransition {
+                    from: hal::AccelerationStructureUses::SHADER_INPUT,
+                    to: hal::AccelerationStructureUses::BUILD_OUTPUT,
+                },
+            });
+
             encoder.build_acceleration_structures(1, [descriptor]);
 
+            // And read-after-write, for the passes later this frame that trace the result.
             encoder.place_acceleration_structure_barrier(hal::AccelerationStructureBarrier {
                 usage: hal::StateTransition {
                     from: hal::AccelerationStructureUses::BUILD_OUTPUT,

@@ -168,9 +168,12 @@ fn resolve_material(material: Material, uv: vec2<f32>) -> ResolvedMaterial {
 
 fn resolve_ray_hit_full(ray_hit: RayIntersection) -> ResolvedRayHitFull {
     let barycentrics = vec3(1.0 - ray_hit.barycentrics.x - ray_hit.barycentrics.y, ray_hit.barycentrics);
-    // `instance_custom_data` holds the instance's slot index. The hardware instance index can't
-    // be used: the CPU-side instance array is sparse, and wgpu compacts the empty entries out
-    // when it builds the TLAS, so the two don't line up.
+    // `instance_custom_data` holds the instance's slot index, which is what every per-instance
+    // buffer is indexed by. The hardware instance index is deliberately not used: the descriptor
+    // array is sparse, and the two backends disagree about what a hole does to the numbering. DXR
+    // counts inactive instances for `InstanceIndex()`, so there it would happen to match the slot;
+    // Vulkan says an inactive object "should not be represented in the acceleration structure", so
+    // there it may not. Reading the slot back out of the descriptor is correct on both.
     return resolve_triangle_data_full(ray_hit.instance_custom_data, ray_hit.primitive_index, barycentrics);
 }
 

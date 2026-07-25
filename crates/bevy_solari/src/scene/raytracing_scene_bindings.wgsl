@@ -168,7 +168,10 @@ fn resolve_material(material: Material, uv: vec2<f32>) -> ResolvedMaterial {
 
 fn resolve_ray_hit_full(ray_hit: RayIntersection) -> ResolvedRayHitFull {
     let barycentrics = vec3(1.0 - ray_hit.barycentrics.x - ray_hit.barycentrics.y, ray_hit.barycentrics);
-    return resolve_triangle_data_full(ray_hit.instance_index, ray_hit.primitive_index, barycentrics);
+    // `instance_custom_data` holds the instance's slot index. The hardware instance index can't
+    // be used: the CPU-side instance array is sparse, and wgpu compacts the empty entries out
+    // when it builds the TLAS, so the two don't line up.
+    return resolve_triangle_data_full(ray_hit.instance_custom_data, ray_hit.primitive_index, barycentrics);
 }
 
 fn load_vertices(instance_geometry_ids: InstanceGeometryIds, triangle_id: u32) -> array<Vertex, 3> {

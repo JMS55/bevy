@@ -1,26 +1,43 @@
 use super::{blas::BlasManager, extract::StandardMaterialAssets, RaytracingMesh3d};
-use bevy_asset::{AssetId, Handle};
+use alloc::sync::Arc;
+use bevy_asset::AssetId;
 use bevy_color::{ColorToComponents, LinearRgba};
 use bevy_ecs::{
-    entity::{Entity, EntityHashMap},
+    entity::{Entity, EntityHashMap, EntityHashSet},
+    lifecycle::RemovedComponents,
+    query::{Changed, Or, With},
     resource::Resource,
     system::{Query, Res, ResMut},
+    world::{FromWorld, World},
 };
-use bevy_math::{ops::cos, Affine3, Affine3Ext, Mat4, Vec3, Vec4};
+use bevy_image::Image;
+use bevy_math::{ops::cos, Affine3, Affine3Ext, Vec3, Vec4};
+use bevy_mesh::Mesh;
 use bevy_pbr::{
     DfgLut, ExtractedDirectionalLight, MeshMaterial3d, PreviousGlobalTransform, StandardMaterial,
 };
-use bevy_platform::{collections::HashMap, hash::FixedHasher};
+use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
-    diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
+    diagnostic::RecordDiagnostics,
+    impl_atomic_pod,
     mesh::allocator::MeshAllocator,
-    render_asset::RenderAssets,
+    render_asset::{ExtractedAssets, RenderAssets},
     render_resource::{binding_types::*, *},
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderContext, RenderDevice, RenderQueue},
     texture::{FallbackImage, GpuImage},
 };
 use bevy_transform::components::GlobalTransform;
-use core::{f32::consts::TAU, hash::Hash, num::NonZeroU32, ops::Deref};
+use bevy_utils::once;
+use bytemuck::{Pod, Zeroable};
+use core::{
+    f32::consts::TAU,
+    hash::Hash,
+    mem::size_of,
+    num::NonZeroU32,
+    ops::Deref,
+    sync::atomic::{AtomicU64, Ordering},
+};
+use tracing::{info_span, warn};
 
 const MAX_MESH_SLAB_COUNT: NonZeroU32 = NonZeroU32::new(500).unwrap();
 const MAX_TEXTURE_COUNT: NonZeroU32 = NonZeroU32::new(5_000).unwrap();
@@ -28,292 +45,672 @@ const MAX_TEXTURE_COUNT: NonZeroU32 = NonZeroU32::new(5_000).unwrap();
 const TEXTURE_MAP_NONE: u32 = u32::MAX;
 const LIGHT_NOT_PRESENT_THIS_FRAME: u32 = u32::MAX;
 
+/// TLAS instance capacity is rounded up to a multiple of this, so that adding a few instances
+/// doesn't force a reallocation every frame.
+const TLAS_CAPACITY_GRANULARITY: u32 = 128;
+
+/// Width of a TLAS instance's custom data in both Vulkan (`instanceCustomIndex`) and DXR
+/// (`InstanceID`). Instance slots are packed into that field, so they have to fit in it.
+const TLAS_CUSTOM_DATA_BITS: u32 = 24;
+
+// ---------------------------------------------------------------------------
+// GPU types
+//
+// These are `Pod` rather than `ShaderType` so that they can be stored in an
+// `AtomicSparseBufferVec`. The layouts are written out to match std430: every
+// `Vec3` is followed by an `f32` so the pair fills one 16-byte slot.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+struct GpuInstanceGeometryIds {
+    vertex_buffer_id: u32,
+    vertex_buffer_offset: u32,
+    index_buffer_id: u32,
+    index_buffer_offset: u32,
+    triangle_count: u32,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+struct GpuMaterial {
+    normal_map_texture_id: u32,
+    base_color_texture_id: u32,
+    emissive_texture_id: u32,
+    metallic_roughness_texture_id: u32,
+
+    base_color: Vec3,
+    perceptual_roughness: f32,
+    emissive: Vec3,
+    metallic: f32,
+    _padding: Vec3,
+    reflectance: f32,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+struct GpuLightSource {
+    kind: u32,
+    id: u32,
+}
+
+impl GpuLightSource {
+    fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32) -> GpuLightSource {
+        if triangle_count > u16::MAX as u32 {
+            panic!("Too many triangles ({triangle_count}) in an emissive mesh, maximum is 65535.");
+        }
+
+        Self {
+            kind: triangle_count << 1,
+            id: instance_id,
+        }
+    }
+
+    fn new_directional_light(directional_light_id: u32) -> GpuLightSource {
+        Self {
+            kind: 1,
+            id: directional_light_id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+struct GpuDirectionalLight {
+    direction_to_light: Vec3,
+    cos_theta_max: f32,
+    luminance: Vec3,
+    inverse_pdf: f32,
+}
+
+impl GpuDirectionalLight {
+    fn new(directional_light: &ExtractedDirectionalLight) -> Self {
+        let cos_theta_max = cos(directional_light.sun_disk_angular_size / 2.0);
+        let solid_angle = TAU * (1.0 - cos_theta_max);
+        let luminance =
+            (directional_light.color.to_vec3() * directional_light.illuminance) / solid_angle;
+
+        Self {
+            direction_to_light: directional_light.transform.back().into(),
+            cos_theta_max,
+            luminance,
+            inverse_pdf: solid_angle,
+        }
+    }
+}
+
+/// A world-from-local affine transform, stored transposed as three rows.
+#[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+struct GpuTransform([Vec4; 3]);
+
+/// A bare `u32` element. Needed because `AtomicPod` can't be implemented for `u32` itself.
+#[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+#[repr(transparent)]
+struct GpuU32(u32);
+
+impl_atomic_pod!(GpuInstanceGeometryIds, GpuInstanceGeometryIdsBlob);
+impl_atomic_pod!(GpuMaterial, GpuMaterialBlob);
+impl_atomic_pod!(GpuLightSource, GpuLightSourceBlob);
+impl_atomic_pod!(GpuDirectionalLight, GpuDirectionalLightBlob);
+impl_atomic_pod!(GpuTransform, GpuTransformBlob);
+impl_atomic_pod!(GpuU32, GpuU32Blob);
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Writes `value` at `index`, growing the buffer first if the index is past the end.
+///
+/// A write that wouldn't change anything is dropped rather than dirtying the element, so data that
+/// gets recomputed every frame without actually moving doesn't get re-uploaded every frame.
+fn set_at<T: AtomicPod + PartialEq>(buffer: &mut AtomicSparseBufferVec<T>, index: u32, value: T) {
+    if buffer.len() > index {
+        if buffer.get(index) == value {
+            return;
+        }
+    } else {
+        buffer.grow(index + 1);
+    }
+    buffer.set(index, value);
+}
+
+/// Writes `value` at an index the buffer already covers, skipping writes that change nothing.
+///
+/// The `&self` counterpart to [`set_at`], for paths that run in parallel and so can't grow the
+/// buffer. Growing is the caller's job.
+fn set_existing<T: AtomicPod + PartialEq>(buffer: &AtomicSparseBufferVec<T>, index: u32, value: T) {
+    debug_assert!(
+        index < buffer.len(),
+        "buffer was not grown past index {index}"
+    );
+    if buffer.get(index) != value {
+        buffer.set(index, value);
+    }
+}
+
+fn new_storage_buffer<T: AtomicPod>(label: &'static str) -> AtomicSparseBufferVec<T> {
+    AtomicSparseBufferVec::new(BufferUsages::STORAGE, Arc::from(label))
+}
+
+/// Drops `entity` from the reverse index under `key`, discarding the entry once it's empty.
+///
+/// Without the discard these maps only ever grow: meshes and materials that no longer have any
+/// instances would leave an empty set behind forever.
+fn unlink<K: Eq + Hash>(map: &mut HashMap<K, EntityHashSet>, key: &K, entity: Entity) {
+    let now_empty = map.get_mut(key).is_some_and(|instances| {
+        instances.remove(&entity);
+        instances.is_empty()
+    });
+    if now_empty {
+        map.remove(key);
+    }
+}
+
+/// Moves `entity` in a reverse index out of `previous`'s entry and into `key`'s.
+fn relink<K: Copy + Eq + Hash>(
+    map: &mut HashMap<K, EntityHashSet>,
+    entity: Entity,
+    previous: Option<K>,
+    key: K,
+) {
+    if previous == Some(key) {
+        return;
+    }
+    if let Some(previous) = previous {
+        unlink(map, &previous, entity);
+    }
+    map.entry(key).or_default().insert(entity);
+}
+
+/// Reinterprets a transposed affine transform as the row-major 3x4 matrix a TLAS instance wants.
+///
+/// [`Affine3Ext::to_transpose`] already produces the three rows of the 3x4 matrix, which is exactly
+/// the TLAS layout, so the transform buffer and the TLAS share the one conversion.
+fn to_tlas_transform(rows: [Vec4; 3]) -> [f32; 12] {
+    bytemuck::must_cast(rows)
+}
+
+// ---------------------------------------------------------------------------
+// Dirty slot tracking
+// ---------------------------------------------------------------------------
+
+/// A set of slot indices that need rewriting, held as a bitset.
+///
+/// A moving instance dirties a slot every frame, and several phases can dirty the same slot in
+/// the same frame — refreshed and then moved, say. A bitset deduplicates for free, yields slots
+/// in ascending order without sorting, and costs a bit per slot rather than four bytes per mark.
+/// [`Self::insert`] also takes `&self`, so it can be called from a parallel pass.
+#[derive(Default)]
+struct DirtySlots {
+    words: Vec<AtomicU64>,
+}
+
+impl DirtySlots {
+    /// Makes room for every slot below `len`. A slot has to be covered before it's inserted.
+    fn reserve(&mut self, len: u32) {
+        let words = len.div_ceil(u64::BITS) as usize;
+        if self.words.len() < words {
+            self.words.resize_with(words, AtomicU64::default);
+        }
+    }
+
+    fn insert(&self, slot: u32) {
+        self.words[(slot / u64::BITS) as usize]
+            .fetch_or(1 << (slot % u64::BITS), Ordering::Relaxed);
+    }
+
+    /// Marks every slot below `len` dirty, and nothing else.
+    fn insert_all(&mut self, len: u32) {
+        self.reserve(len);
+        for (index, word) in self.words.iter_mut().enumerate() {
+            let first = index as u32 * u64::BITS;
+            *word.get_mut() = if first + u64::BITS <= len {
+                u64::MAX
+            } else if first < len {
+                (1 << (len - first)) - 1
+            } else {
+                0
+            };
+        }
+    }
+
+    /// Yields each dirty slot in ascending order, clearing the set as it goes.
+    fn drain(&mut self) -> impl Iterator<Item = u32> + '_ {
+        self.words.iter_mut().enumerate().flat_map(|(index, word)| {
+            let first = index as u32 * u64::BITS;
+            SetBits(core::mem::replace(word.get_mut(), 0)).map(move |bit| first + bit)
+        })
+    }
+}
+
+/// Yields the index of each set bit, from lowest to highest.
+struct SetBits(u64);
+
+impl Iterator for SetBits {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        let bit = self.0.trailing_zeros();
+        if bit == u64::BITS {
+            return None;
+        }
+        self.0 &= !(1 << bit);
+        Some(bit)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Index and slot allocation
+// ---------------------------------------------------------------------------
+
+/// Hands out indices that stay put for as long as they're held.
+///
+/// Indices given back by removals get handed out again to later callers, so the index space stays
+/// about as dense as the live set.
+struct IndexAllocator {
+    free: Vec<u32>,
+    len: u32,
+}
+
+impl IndexAllocator {
+    fn new() -> Self {
+        Self {
+            free: Vec::new(),
+            len: 0,
+        }
+    }
+
+    /// One past the highest index ever allocated.
+    fn len(&self) -> u32 {
+        self.len
+    }
+
+    /// How many more indices can be handed out before running past `capacity`.
+    fn vacancies(&self, capacity: u32) -> u32 {
+        capacity.saturating_sub(self.len) + self.free.len() as u32
+    }
+
+    fn allocate(&mut self) -> u32 {
+        self.free.pop().unwrap_or_else(|| {
+            let index = self.len;
+            self.len += 1;
+            index
+        })
+    }
+
+    fn release(&mut self, index: u32) {
+        self.free.push(index);
+    }
+}
+
+/// Assigns each key an index that stays put for as long as the key is live.
+struct SlotAllocator<K> {
+    slots: HashMap<K, u32>,
+    indices: IndexAllocator,
+}
+
+impl<K: Eq + Hash> SlotAllocator<K> {
+    fn new() -> Self {
+        Self {
+            slots: HashMap::default(),
+            indices: IndexAllocator::new(),
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<u32> {
+        self.slots.get(key).copied()
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        self.slots.contains_key(key)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.slots.keys()
+    }
+
+    /// How many more distinct keys can be taken on before running past `capacity`.
+    fn vacancies(&self, capacity: u32) -> u32 {
+        self.indices.vacancies(capacity)
+    }
+
+    fn get_or_allocate(&mut self, key: K) -> u32 {
+        if let Some(&slot) = self.slots.get(&key) {
+            return slot;
+        }
+
+        let slot = self.indices.allocate();
+        self.slots.insert(key, slot);
+        slot
+    }
+
+    fn remove(&mut self, key: &K) -> Option<u32> {
+        let slot = self.slots.remove(key)?;
+        self.indices.release(slot);
+        Some(slot)
+    }
+}
+
+/// One occupied slot of a [`RetainedBindingArray`].
+struct BindingSlot<T> {
+    item: T,
+    /// Live references to this slot. The slot is freed when the last one goes away, so an occupied
+    /// slot always has at least one — which is what makes this a `NonZeroU32`.
+    references: NonZeroU32,
+}
+
+/// A binding array whose indices are stable across frames.
+///
+/// Slots are reference counted by whatever points at them — materials for textures, instances for
+/// mesh slab buffers — and are reused once the last reference goes away. `dirty` records whether
+/// the contents changed, which is what forces the bind group to be rebuilt.
+struct RetainedBindingArray<K, T> {
+    allocator: SlotAllocator<K>,
+    slots: Vec<Option<BindingSlot<T>>>,
+    dirty: bool,
+}
+
+impl<K: Eq + Hash, T> RetainedBindingArray<K, T> {
+    fn new() -> Self {
+        Self {
+            allocator: SlotAllocator::new(),
+            slots: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        self.allocator.contains(key)
+    }
+
+    /// How many more distinct keys can be held before running past `capacity`.
+    fn vacancies(&self, capacity: u32) -> u32 {
+        self.allocator.vacancies(capacity)
+    }
+
+    /// Whether [`Self::acquire`] would be able to hand out a reference to `key`.
+    ///
+    /// Callers that need more than one slot at once check this for all of them before acquiring
+    /// any, so that they never have to hand a slot straight back — see [`Self::acquire`].
+    fn has_room(&self, key: &K, capacity: u32) -> bool {
+        self.contains(key) || self.vacancies(capacity) > 0
+    }
+
+    /// The array's contents in slot order, with `None` for slots that are currently free.
+    fn iter(&self) -> impl Iterator<Item = Option<&T>> {
+        self.slots
+            .iter()
+            .map(|slot| slot.as_ref().map(|slot| &slot.item))
+    }
+
+    /// Takes a reference to `key`'s slot, allocating and filling it if this is the first one.
+    ///
+    /// Returns `None` if `key` would need a new slot and every slot below `capacity` is taken.
+    /// The bind group layout declares these arrays with a fixed length, so running past it makes
+    /// `create_bind_group` fail outright — callers have to drop whatever wanted the slot instead.
+    fn acquire(&mut self, key: K, capacity: u32, item: impl FnOnce() -> T) -> Option<u32> {
+        if !self.has_room(&key, capacity) {
+            return None;
+        }
+
+        let slot = self.allocator.get_or_allocate(key);
+        let index = slot as usize;
+
+        if self.slots.len() <= index {
+            self.slots.resize_with(index + 1, || None);
+        }
+
+        if let Some(occupied) = self.slots[index].as_mut() {
+            occupied.references = occupied.references.saturating_add(1);
+        } else {
+            self.slots[index] = Some(BindingSlot {
+                item: item(),
+                references: NonZeroU32::MIN,
+            });
+            self.dirty = true;
+        }
+
+        Some(slot)
+    }
+
+    /// Drops a reference to `key`'s slot, freeing it if that was the last one.
+    fn release(&mut self, key: &K) {
+        let Some(slot) = self.allocator.get(key) else {
+            return;
+        };
+        let index = slot as usize;
+        let Some(occupied) = self.slots[index].as_mut() else {
+            return;
+        };
+
+        if let Some(remaining) = NonZeroU32::new(occupied.references.get() - 1) {
+            occupied.references = remaining;
+            return;
+        }
+
+        self.slots[index] = None;
+        self.allocator.remove(key);
+        self.dirty = true;
+    }
+
+    /// Repoints an already-allocated slot at a new value, leaving its index and refcount alone.
+    fn replace(&mut self, key: &K, item: T) {
+        if let Some(slot) = self.allocator.get(key)
+            && let Some(occupied) = self.slots[slot as usize].as_mut()
+        {
+            occupied.item = item;
+            self.dirty = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sparse buffers
+// ---------------------------------------------------------------------------
+
+/// The number of [`AtomicSparseBufferVec`]s the scene bindings own.
+const SPARSE_BUFFER_COUNT: usize = 8;
+
+/// Lets the scene's sparse buffers, which all have different element types, be driven as a group.
+///
+/// Every one of them is grown, written, uploaded and identity-checked the same way, so they're only
+/// ever enumerated once, in [`RaytracingSceneBindings::sparse_buffers`].
+trait SceneBuffer {
+    /// Grows the buffer to at least `len` elements.
+    fn grow_to(&mut self, len: u32);
+
+    /// The id of the backing GPU buffer, if one has been allocated.
+    fn buffer_id(&self) -> Option<BufferId>;
+
+    /// Uploads whatever changed, reallocating the GPU buffer first if the data outgrew it.
+    fn write(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue);
+
+    /// Finalizes a scheduled sparse upload.
+    fn prepare_upload(
+        &mut self,
+        render_device: &RenderDevice,
+        pipeline_cache: &PipelineCache,
+        jobs: &mut SparseBufferUpdateJobs,
+        bind_groups: &mut SparseBufferUpdateBindGroups,
+        pipelines: &SparseBufferUpdatePipelines,
+    );
+}
+
+impl<T: AtomicPod> SceneBuffer for AtomicSparseBufferVec<T> {
+    fn grow_to(&mut self, len: u32) {
+        self.grow(len);
+    }
+
+    fn buffer_id(&self) -> Option<BufferId> {
+        Some(self.buffer()?.id())
+    }
+
+    fn write(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        self.write_buffers(render_device, render_queue);
+    }
+
+    fn prepare_upload(
+        &mut self,
+        render_device: &RenderDevice,
+        pipeline_cache: &PipelineCache,
+        jobs: &mut SparseBufferUpdateJobs,
+        bind_groups: &mut SparseBufferUpdateBindGroups,
+        pipelines: &SparseBufferUpdatePipelines,
+    ) {
+        self.prepare_to_populate_buffers(
+            render_device,
+            pipeline_cache,
+            jobs,
+            bind_groups,
+            pipelines,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The scene bindings
+// ---------------------------------------------------------------------------
+
+/// The four textures a [`StandardMaterial`] can reference, in the order they appear in
+/// [`GpuMaterial`]. `None` means the material doesn't use that texture.
+type MaterialTextures = [Option<AssetId<Image>>; 4];
+
+/// Everything the scene tracks per raytracing instance.
+///
+/// One record rather than a map per field, so that a refresh is a single lookup and there's no way
+/// to update some of an instance's bookkeeping and forget the rest.
+#[derive(Clone, Copy)]
+struct Instance {
+    /// Index into every per-instance buffer, and the TLAS custom data the shaders resolve hits
+    /// with. Stable for as long as the instance exists.
+    slot: u32,
+    mesh: AssetId<Mesh>,
+    material: AssetId<StandardMaterial>,
+    /// Mesh slab buffers this instance is holding binding array references to.
+    buffers: Option<(BufferId, BufferId)>,
+}
+
+/// The data one live TLAS entry is built from.
+///
+/// A slot has one of these exactly while it's drawable, so this doubles as the record of which
+/// instances made it into the TLAS.
+struct LiveInstance {
+    /// The mesh's acceleration structure, rather than an id to look one up with.
+    ///
+    /// `Blas` is a handle, so this is a refcount rather than a copy of anything. Resolving the
+    /// instance already had to find it, and `update_tlas` would otherwise repeat that lookup for
+    /// every dirty slot, every frame.
+    ///
+    /// Holding a reference also can't go stale: anything that replaces a mesh's `Blas` — a
+    /// rebuild, or compaction swapping in a compacted one — reports the mesh through
+    /// [`BlasManager::changed`], which re-resolves every instance using it.
+    blas: Blas,
+}
+
 #[derive(Resource)]
 pub struct RaytracingSceneBindings {
     pub bind_group: Option<BindGroup>,
     pub bind_group_layout: BindGroupLayoutDescriptor,
-    previous_frame_tlas: Option<Tlas>,
-    previous_frame_light_entities: Vec<Entity>,
+
+    // Retained binding arrays.
+    vertex_buffers: RetainedBindingArray<BufferId, Buffer>,
+    index_buffers: RetainedBindingArray<BufferId, Buffer>,
+    textures: RetainedBindingArray<AssetId<Image>, (TextureView, Sampler)>,
+
+    // Retained GPU buffers, updated in place. Enumerated in `sparse_buffers`.
+    materials: AtomicSparseBufferVec<GpuMaterial>,
+    transforms: AtomicSparseBufferVec<GpuTransform>,
+    previous_frame_transforms: AtomicSparseBufferVec<GpuTransform>,
+    geometry_ids: AtomicSparseBufferVec<GpuInstanceGeometryIds>,
+    material_ids: AtomicSparseBufferVec<GpuU32>,
+    light_sources: AtomicSparseBufferVec<GpuLightSource>,
+    directional_lights: AtomicSparseBufferVec<GpuDirectionalLight>,
+    previous_frame_light_id_translations: AtomicSparseBufferVec<GpuU32>,
+
+    // Material bookkeeping. A material only gets a slot once all of its textures have been
+    // uploaded; until then it stays unresolved and its instances stay out of the scene.
+    material_slots: SlotAllocator<AssetId<StandardMaterial>>,
+    material_textures: HashMap<AssetId<StandardMaterial>, MaterialTextures>,
+    emissive_materials: HashSet<AssetId<StandardMaterial>>,
+    /// Materials to retry next frame, because a texture they need hadn't been uploaded yet.
+    ///
+    /// This is polled rather than woken by image asset events: `prepare_assets` can defer an
+    /// upload to a later frame when the bytes-per-frame budget runs out, and on the frame the
+    /// image finally lands it is no longer reported as added or modified. An event-driven wakeup
+    /// would miss it and strand the material — and every instance using it — permanently.
+    unresolved_materials: HashSet<AssetId<StandardMaterial>>,
+    /// Images that were reported as changed but whose new GPU data hadn't landed yet.
+    ///
+    /// Polled for the same reason as [`Self::unresolved_materials`], and needed for the same
+    /// reason: `prepare_assets` drops the old [`GpuImage`] before it uploads the replacement, so
+    /// during a deferral there is nothing to swap in, and by the time there is, the image is no
+    /// longer reported as changed. Without the retry, the binding array would keep serving the old
+    /// texture view forever. Bounded by the textures actually bound, since ids we hold no slot for
+    /// are dropped rather than retried.
+    pending_texture_updates: HashSet<AssetId<Image>>,
+
+    // Instance bookkeeping.
+    instance_slots: IndexAllocator,
+    instances: EntityHashMap<Instance>,
+    /// Per-slot data for drawable instances, and so also the record of which slots are in the
+    /// TLAS. `None` means the slot is free, or its instance isn't currently drawable.
+    live_instances: Vec<Option<LiveInstance>>,
+    live_instance_count: u32,
+    /// Instances to re-resolve next frame, because something they depend on wasn't ready.
+    ///
+    /// An instance whose mesh or material never arrives stays in here and is retried every frame.
+    /// That's a handful of hash lookups each, bounded by the number of instances waiting on an
+    /// asset, so it isn't worth waking on an event instead — especially as the events that would
+    /// do the waking (`BlasManager::changed`, material changes, slab growth) already queue their
+    /// own refreshes, which would leave this as a redundant second path.
+    pending_refresh: EntityHashSet,
+    mesh_instances: HashMap<AssetId<Mesh>, EntityHashSet>,
+    material_instances: HashMap<AssetId<StandardMaterial>, EntityHashSet>,
+
+    // Light bookkeeping. The shaders sample `light_sources` using `arrayLength`, so it has to
+    // stay dense; removals swap the last light down into the hole.
+    light_index: EntityHashMap<u32>,
+    light_entities: Vec<Entity>,
+    previous_light_index: EntityHashMap<u32>,
+    light_index_changed: EntityHashSet,
+    /// Translation entries written last frame, so they can be reset to identity.
+    nonidentity_translations: Vec<u32>,
+    directional_light_slots: SlotAllocator<Entity>,
+
+    // Two TLASes, so one can be bound as the previous frame's while the other is rebuilt.
+    // `tlas_dirty` replays each change into whichever one hasn't seen it yet.
+    tlas: [Option<Tlas>; 2],
+    tlas_dirty: [DirtySlots; 2],
+    tlas_capacity: [u32; 2],
+    frame_parity: usize,
+
+    // One cached bind group per TLAS parity, since only the two acceleration structure entries
+    // differ between them.
+    cached_bind_groups: [Option<BindGroup>; 2],
+    bind_group_invalid: bool,
+    last_buffer_ids: [Option<BufferId>; SPARSE_BUFFER_COUNT],
+    last_light_count: u32,
+    /// The DFG LUT falls back to a placeholder until it finishes uploading, so the bind group has
+    /// to be rebuilt once the real one shows up.
+    last_dfg_ids: Option<(TextureViewId, SamplerId)>,
+    /// Bound into binding array slots that are currently free.
+    dummy_buffer: Buffer,
 }
 
-pub fn prepare_raytracing_scene_bindings(
-    instances_query: Query<(
-        Entity,
-        &RaytracingMesh3d,
-        &MeshMaterial3d<StandardMaterial>,
-        &GlobalTransform,
-        Option<&PreviousGlobalTransform>,
-    )>,
-    directional_lights_query: Query<(Entity, &ExtractedDirectionalLight)>,
-    mesh_allocator: Res<MeshAllocator>,
-    blas_manager: Res<BlasManager>,
-    material_assets: Res<StandardMaterialAssets>,
-    texture_assets: Res<RenderAssets<GpuImage>>,
-    fallback_texture: Res<FallbackImage>,
-    dfg_lut: Res<DfgLut>,
-    render_device: Res<RenderDevice>,
-    pipeline_cache: Res<PipelineCache>,
-    render_queue: Res<RenderQueue>,
-    mut diagnostics: Option<ResMut<DiagnosticsRecorder>>,
-    mut raytracing_scene_bindings: ResMut<RaytracingSceneBindings>,
-) {
-    raytracing_scene_bindings.bind_group = None;
+impl FromWorld for RaytracingSceneBindings {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
 
-    let previous_frame_tlas = raytracing_scene_bindings.previous_frame_tlas.take();
-
-    let mut this_frame_entity_to_light_id = EntityHashMap::<u32>::default();
-    let previous_frame_light_entities: Vec<_> = raytracing_scene_bindings
-        .previous_frame_light_entities
-        .drain(..)
-        .collect();
-
-    if instances_query.iter().len() == 0 {
-        return;
-    }
-
-    let mut vertex_buffers = CachedBindingArray::new();
-    let mut index_buffers = CachedBindingArray::new();
-    let mut textures = CachedBindingArray::new();
-    let mut samplers = Vec::new();
-    let mut materials = StorageBufferList::<GpuMaterial>::default();
-    let mut tlas = render_device
-        .wgpu_device()
-        .create_tlas(&CreateTlasDescriptor {
-            label: Some("tlas"),
-            flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
-            update_mode: AccelerationStructureUpdateMode::Build,
-            max_instances: instances_query.iter().len() as u32,
-        });
-    let mut transforms = StorageBufferList::<[Vec4; 3]>::default();
-    let mut previous_frame_transforms = StorageBufferList::<[Vec4; 3]>::default();
-    let mut geometry_ids = StorageBufferList::<GpuInstanceGeometryIds>::default();
-    let mut material_ids = StorageBufferList::<u32>::default();
-    let mut light_sources = StorageBufferList::<GpuLightSource>::default();
-    let mut directional_lights = StorageBufferList::<GpuDirectionalLight>::default();
-    let mut previous_frame_light_id_translations = StorageBufferList::<u32>::default();
-
-    let mut material_id_map: HashMap<AssetId<StandardMaterial>, u32, FixedHasher> =
-        HashMap::default();
-    let mut material_id = 0;
-    let mut process_texture = |texture_handle: &Option<Handle<_>>| -> Option<u32> {
-        match texture_handle {
-            Some(texture_handle) => match texture_assets.get(texture_handle.id()) {
-                Some(texture) => {
-                    let (texture_id, is_new) =
-                        textures.push_if_absent(texture.texture_view.deref(), texture_handle.id());
-                    if is_new {
-                        samplers.push(texture.sampler.deref());
-                    }
-                    Some(texture_id)
-                }
-                None => None,
-            },
-            None => Some(TEXTURE_MAP_NONE),
-        }
-    };
-    for (asset_id, material) in material_assets.iter() {
-        let Some(base_color_texture_id) = process_texture(&material.base_color_texture) else {
-            continue;
-        };
-        let Some(normal_map_texture_id) = process_texture(&material.normal_map_texture) else {
-            continue;
-        };
-        let Some(emissive_texture_id) = process_texture(&material.emissive_texture) else {
-            continue;
-        };
-        let Some(metallic_roughness_texture_id) =
-            process_texture(&material.metallic_roughness_texture)
-        else {
-            continue;
-        };
-
-        materials.get_mut().push(GpuMaterial {
-            normal_map_texture_id,
-            base_color_texture_id,
-            emissive_texture_id,
-            metallic_roughness_texture_id,
-
-            base_color: LinearRgba::from(material.base_color).to_vec3(),
-            perceptual_roughness: material.perceptual_roughness,
-            emissive: material.emissive.to_vec3(),
-            metallic: material.metallic,
-            reflectance: material.reflectance,
-            _padding: Default::default(),
+        // Binding arrays are dense slices, so freed slots still need something valid bound into
+        // them. A few elements' worth of zeroes covers the shader's runtime-sized arrays.
+        let dummy_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_dummy_binding_array_buffer"),
+            size: 256,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
         });
 
-        material_id_map.insert(*asset_id, material_id);
-        material_id += 1;
-    }
-
-    if material_id == 0 {
-        return;
-    }
-
-    if textures.is_empty() {
-        textures.vec.push(fallback_texture.d2.texture_view.deref());
-        samplers.push(fallback_texture.d2.sampler.deref());
-    }
-
-    let mut instance_id = 0;
-    for (entity, mesh, material, transform, previous_frame_transform) in &instances_query {
-        let Some(blas) = blas_manager.get(&mesh.id()) else {
-            continue;
-        };
-        let Some(vertex_slice) = mesh_allocator.mesh_vertex_slice(&mesh.id()) else {
-            continue;
-        };
-        let Some(index_slice) = mesh_allocator.mesh_index_slice(&mesh.id()) else {
-            continue;
-        };
-        let Some(material_id) = material_id_map.get(&material.id()).copied() else {
-            continue;
-        };
-        let Some(material) = materials.get().get(material_id as usize) else {
-            continue;
-        };
-
-        *tlas.get_mut_single(instance_id).unwrap() = Some(TlasInstance::new(
-            blas,
-            tlas_transform(&transform.to_matrix()),
-            Default::default(),
-            0xFF,
-        ));
-
-        let transform = Affine3::from(transform.affine()).to_transpose();
-        transforms.get_mut().push(transform);
-        previous_frame_transforms.get_mut().push(
-            previous_frame_transform
-                .map(|t| Affine3::from(t.0).to_transpose())
-                .unwrap_or(transform),
-        );
-
-        let (vertex_buffer_id, _) = vertex_buffers.push_if_absent(
-            vertex_slice.buffer.as_entire_buffer_binding(),
-            vertex_slice.buffer.id(),
-        );
-        let (index_buffer_id, _) = index_buffers.push_if_absent(
-            index_slice.buffer.as_entire_buffer_binding(),
-            index_slice.buffer.id(),
-        );
-
-        geometry_ids.get_mut().push(GpuInstanceGeometryIds {
-            vertex_buffer_id,
-            vertex_buffer_offset: vertex_slice.range.start,
-            index_buffer_id,
-            index_buffer_offset: index_slice.range.start,
-            triangle_count: (index_slice.range.len() / 3) as u32,
-        });
-
-        material_ids.get_mut().push(material_id);
-
-        if material.emissive != Vec3::ZERO {
-            light_sources
-                .get_mut()
-                .push(GpuLightSource::new_emissive_mesh_light(
-                    instance_id as u32,
-                    (index_slice.range.len() / 3) as u32,
-                ));
-
-            this_frame_entity_to_light_id.insert(entity, light_sources.get().len() as u32 - 1);
-            raytracing_scene_bindings
-                .previous_frame_light_entities
-                .push(entity);
-        }
-
-        instance_id += 1;
-    }
-
-    if instance_id == 0 {
-        return;
-    }
-
-    for (entity, directional_light) in &directional_lights_query {
-        let directional_lights = directional_lights.get_mut();
-        let directional_light_id = directional_lights.len() as u32;
-
-        directional_lights.push(GpuDirectionalLight::new(directional_light));
-
-        light_sources
-            .get_mut()
-            .push(GpuLightSource::new_directional_light(directional_light_id));
-
-        this_frame_entity_to_light_id.insert(entity, light_sources.get().len() as u32 - 1);
-        raytracing_scene_bindings
-            .previous_frame_light_entities
-            .push(entity);
-    }
-
-    for previous_frame_light_entity in previous_frame_light_entities {
-        let current_frame_index = this_frame_entity_to_light_id
-            .get(&previous_frame_light_entity)
-            .copied()
-            .unwrap_or(LIGHT_NOT_PRESENT_THIS_FRAME);
-        previous_frame_light_id_translations
-            .get_mut()
-            .push(current_frame_index);
-    }
-
-    if light_sources.get().len() > u16::MAX as usize {
-        panic!("Too many light sources in the scene, maximum is 65535.");
-    }
-
-    materials.write_buffer(&render_device, &render_queue);
-    transforms.write_buffer(&render_device, &render_queue);
-    previous_frame_transforms.write_buffer(&render_device, &render_queue);
-    geometry_ids.write_buffer(&render_device, &render_queue);
-    material_ids.write_buffer(&render_device, &render_queue);
-    light_sources.write_buffer(&render_device, &render_queue);
-    directional_lights.write_buffer(&render_device, &render_queue);
-    previous_frame_light_id_translations.write_buffer(&render_device, &render_queue);
-
-    let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("tlas_build_command_encoder"),
-    });
-    let time_span = diagnostics
-        .as_mut()
-        .map(|diagnostics| diagnostics.time_span(&mut command_encoder, "tlas_build"));
-    command_encoder.build_acceleration_structures(&[], [&tlas]);
-    if let Some(time_span) = time_span {
-        time_span.end(&mut command_encoder);
-    }
-    render_queue.submit([command_encoder.finish()]);
-
-    let (dfg_view, dfg_sampler) = texture_assets
-        .get(&dfg_lut.texture)
-        .map(|img| (&img.texture_view, &img.sampler))
-        .unwrap_or((
-            &fallback_texture.d2.texture_view,
-            &fallback_texture.d2.sampler,
-        ));
-
-    raytracing_scene_bindings.bind_group = Some(render_device.create_bind_group(
-        "raytracing_scene_bind_group",
-        &pipeline_cache.get_bind_group_layout(&raytracing_scene_bindings.bind_group_layout),
-        &BindGroupEntries::sequential((
-            vertex_buffers.as_slice(),
-            index_buffers.as_slice(),
-            textures.as_slice(),
-            samplers.as_slice(),
-            materials.binding().unwrap(),
-            tlas.as_binding(),
-            previous_frame_tlas.as_ref().unwrap_or(&tlas).as_binding(),
-            transforms.binding().unwrap(),
-            previous_frame_transforms.binding().unwrap(),
-            geometry_ids.binding().unwrap(),
-            material_ids.binding().unwrap(),
-            light_sources.binding().unwrap(),
-            directional_lights.binding().unwrap(),
-            previous_frame_light_id_translations.binding().unwrap(),
-            dfg_view,
-            dfg_sampler,
-        )),
-    ));
-
-    raytracing_scene_bindings.previous_frame_tlas = Some(tlas);
-}
-
-impl RaytracingSceneBindings {
-    pub fn new() -> Self {
         Self {
             bind_group: None,
             bind_group_layout: BindGroupLayoutDescriptor::new(
@@ -341,129 +738,1284 @@ impl RaytracingSceneBindings {
                     ),
                 ),
             ),
-            previous_frame_tlas: None,
-            previous_frame_light_entities: Vec::new(),
+
+            vertex_buffers: RetainedBindingArray::new(),
+            index_buffers: RetainedBindingArray::new(),
+            textures: RetainedBindingArray::new(),
+
+            materials: new_storage_buffer("solari_materials"),
+            transforms: new_storage_buffer("solari_transforms"),
+            previous_frame_transforms: new_storage_buffer("solari_previous_frame_transforms"),
+            geometry_ids: new_storage_buffer("solari_geometry_ids"),
+            material_ids: new_storage_buffer("solari_material_ids"),
+            light_sources: new_storage_buffer("solari_light_sources"),
+            directional_lights: new_storage_buffer("solari_directional_lights"),
+            previous_frame_light_id_translations: new_storage_buffer(
+                "solari_previous_frame_light_id_translations",
+            ),
+
+            material_slots: SlotAllocator::new(),
+            material_textures: HashMap::default(),
+            emissive_materials: HashSet::default(),
+            unresolved_materials: HashSet::default(),
+            pending_texture_updates: HashSet::default(),
+
+            instance_slots: IndexAllocator::new(),
+            instances: EntityHashMap::default(),
+            live_instances: Vec::new(),
+            live_instance_count: 0,
+            pending_refresh: EntityHashSet::default(),
+            mesh_instances: HashMap::default(),
+            material_instances: HashMap::default(),
+
+            light_index: EntityHashMap::default(),
+            light_entities: Vec::new(),
+            previous_light_index: EntityHashMap::default(),
+            light_index_changed: EntityHashSet::default(),
+            nonidentity_translations: Vec::new(),
+            directional_light_slots: SlotAllocator::new(),
+
+            tlas: [None, None],
+            tlas_dirty: [DirtySlots::default(), DirtySlots::default()],
+            tlas_capacity: [0, 0],
+            frame_parity: 0,
+
+            cached_bind_groups: [None, None],
+            bind_group_invalid: true,
+            last_buffer_ids: [None; SPARSE_BUFFER_COUNT],
+            last_light_count: 0,
+            last_dfg_ids: None,
+            dummy_buffer,
         }
     }
 }
 
-impl Default for RaytracingSceneBindings {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-struct CachedBindingArray<T, I: Eq + Hash> {
-    map: HashMap<I, u32>,
-    vec: Vec<T>,
-}
-
-impl<T, I: Eq + Hash> CachedBindingArray<T, I> {
-    fn new() -> Self {
-        Self {
-            map: HashMap::default(),
-            vec: Vec::default(),
-        }
+impl RaytracingSceneBindings {
+    fn sparse_buffers(&self) -> [&dyn SceneBuffer; SPARSE_BUFFER_COUNT] {
+        [
+            &self.materials,
+            &self.transforms,
+            &self.previous_frame_transforms,
+            &self.geometry_ids,
+            &self.material_ids,
+            &self.light_sources,
+            &self.directional_lights,
+            &self.previous_frame_light_id_translations,
+        ]
     }
 
-    fn push_if_absent(&mut self, item: T, item_id: I) -> (u32, bool) {
-        let mut is_new = false;
-        let i = *self.map.entry(item_id).or_insert_with(|| {
-            is_new = true;
-            let i = self.vec.len() as u32;
-            self.vec.push(item);
-            i
-        });
-        (i, is_new)
+    fn sparse_buffers_mut(&mut self) -> [&mut dyn SceneBuffer; SPARSE_BUFFER_COUNT] {
+        [
+            &mut self.materials,
+            &mut self.transforms,
+            &mut self.previous_frame_transforms,
+            &mut self.geometry_ids,
+            &mut self.material_ids,
+            &mut self.light_sources,
+            &mut self.directional_lights,
+            &mut self.previous_frame_light_id_translations,
+        ]
     }
 
-    fn is_empty(&self) -> bool {
-        self.vec.is_empty()
-    }
+    fn write_sparse_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        let _span = info_span!("write_buffers").entered();
 
-    fn as_slice(&self) -> &[T] {
-        self.vec.as_slice()
-    }
-}
-
-type StorageBufferList<T> = StorageBuffer<Vec<T>>;
-
-#[derive(ShaderType)]
-struct GpuInstanceGeometryIds {
-    vertex_buffer_id: u32,
-    vertex_buffer_offset: u32,
-    index_buffer_id: u32,
-    index_buffer_offset: u32,
-    triangle_count: u32,
-}
-
-#[derive(ShaderType)]
-struct GpuMaterial {
-    normal_map_texture_id: u32,
-    base_color_texture_id: u32,
-    emissive_texture_id: u32,
-    metallic_roughness_texture_id: u32,
-
-    base_color: Vec3,
-    perceptual_roughness: f32,
-    emissive: Vec3,
-    metallic: f32,
-    _padding: Vec3,
-    reflectance: f32,
-}
-
-#[derive(ShaderType)]
-struct GpuLightSource {
-    kind: u32,
-    id: u32,
-}
-
-impl GpuLightSource {
-    fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32) -> GpuLightSource {
-        if triangle_count > u16::MAX as u32 {
-            panic!("Too many triangles ({triangle_count}) in an emissive mesh, maximum is 65535.");
-        }
-
-        Self {
-            kind: triangle_count << 1,
-            id: instance_id,
-        }
-    }
-
-    fn new_directional_light(directional_light_id: u32) -> GpuLightSource {
-        Self {
-            kind: 1,
-            id: directional_light_id,
+        for buffer in self.sparse_buffers_mut() {
+            // Every buffer needs at least one element to be bindable, even if the scene doesn't
+            // use it.
+            buffer.grow_to(1);
+            buffer.write(render_device, render_queue);
         }
     }
 }
 
-#[derive(ShaderType, Default)]
-struct GpuDirectionalLight {
-    direction_to_light: Vec3,
-    cos_theta_max: f32,
-    luminance: Vec3,
-    inverse_pdf: f32,
-}
+// ---------------------------------------------------------------------------
+// Material updates
+// ---------------------------------------------------------------------------
 
-impl GpuDirectionalLight {
-    fn new(directional_light: &ExtractedDirectionalLight) -> Self {
-        let cos_theta_max = cos(directional_light.sun_disk_angular_size / 2.0);
-        let solid_angle = TAU * (1.0 - cos_theta_max);
-        let luminance =
-            (directional_light.color.to_vec3() * directional_light.illuminance) / solid_angle;
+impl RaytracingSceneBindings {
+    fn update_materials(
+        &mut self,
+        material_assets: &StandardMaterialAssets,
+        texture_assets: &RenderAssets<GpuImage>,
+    ) {
+        let _span = info_span!("update_materials").entered();
 
-        Self {
-            direction_to_light: directional_light.transform.back().into(),
-            cos_theta_max,
-            luminance,
-            inverse_pdf: solid_angle,
+        for material_id in &material_assets.removed {
+            self.remove_material(*material_id);
+        }
+        // Deliberately unordered with respect to the removals above: `update_material` re-checks
+        // whether the material is still in `material_assets`, so it corrects itself whichever
+        // order the two events arrived in.
+        for material_id in &material_assets.changed {
+            self.update_material(*material_id, material_assets, texture_assets);
+        }
+    }
+
+    /// Resolves a material's textures and writes it into its slot.
+    ///
+    /// If any of its textures haven't been uploaded yet the material stays unresolved: it holds no
+    /// slot, and instances using it stay out of the scene until the texture arrives.
+    fn update_material(
+        &mut self,
+        material_id: AssetId<StandardMaterial>,
+        material_assets: &StandardMaterialAssets,
+        texture_assets: &RenderAssets<GpuImage>,
+    ) {
+        let Some(material) = material_assets.get(&material_id) else {
+            self.remove_material(material_id);
+            return;
+        };
+
+        let was_resolved = self.material_slots.contains(&material_id);
+
+        let handles = [
+            &material.normal_map_texture,
+            &material.base_color_texture,
+            &material.emissive_texture,
+            &material.metallic_roughness_texture,
+        ];
+
+        // Resolve everything up front, so that a missing texture leaves our state untouched.
+        let mut textures: MaterialTextures = [None; 4];
+        for (slot, handle) in textures.iter_mut().zip(handles) {
+            let Some(handle) = handle else { continue };
+            let image_id = handle.id();
+
+            if texture_assets.get(image_id).is_none() {
+                self.defer_material(material_id);
+                return;
+            }
+
+            *slot = Some(image_id);
+        }
+
+        // Check for room before taking any slots. Acquiring some and then handing them straight
+        // back would dirty the binding array — and so rebuild the whole bind group — on every
+        // frame for as long as the scene stayed over the limit.
+        if self.new_texture_count(&textures) > self.textures.vacancies(MAX_TEXTURE_COUNT.get()) {
+            // There isn't room while this material is still holding the slots it took last time.
+            // Some of those are about to be given up anyway, so drop them and look again —
+            // otherwise a material could never swap one texture for another once the array filled
+            // up, and would stay deferred forever. This gives up the slots shared with the new set
+            // too, so it costs a bind group rebuild, but it only happens at the limit.
+            self.release_material_textures(material_id);
+            self.material_textures.remove(&material_id);
+
+            if self.new_texture_count(&textures) > self.textures.vacancies(MAX_TEXTURE_COUNT.get())
+            {
+                once!(warn!(
+                    "Solari scene needs more than {} textures. Materials past that limit will not \
+                     be rendered.",
+                    MAX_TEXTURE_COUNT.get()
+                ));
+                self.defer_material(material_id);
+                return;
+            }
+        }
+
+        // Acquire before releasing, so that textures shared between the old and new state aren't
+        // freed and immediately reallocated. The over-limit path above is the one exception: it has
+        // to release first to have any hope of fitting, and has already done so.
+        let mut texture_ids = [TEXTURE_MAP_NONE; 4];
+        for (texture_id, image_id) in texture_ids.iter_mut().zip(textures) {
+            let Some(image_id) = image_id else { continue };
+            let image = texture_assets.get(image_id).unwrap();
+            // Can't fail: the check above accounted for every slot this material still needs. If
+            // it somehow did, the material draws without that texture rather than not at all.
+            if let Some(slot) = self
+                .textures
+                .acquire(image_id, MAX_TEXTURE_COUNT.get(), || {
+                    (image.texture_view.clone(), image.sampler.clone())
+                })
+            {
+                *texture_id = slot;
+            }
+        }
+
+        self.release_material_textures(material_id);
+        self.material_textures.insert(material_id, textures);
+        self.unresolved_materials.remove(&material_id);
+
+        let slot = self.material_slots.get_or_allocate(material_id);
+        let emissive = material.emissive.to_vec3();
+        let is_emissive = emissive != Vec3::ZERO;
+
+        set_at(
+            &mut self.materials,
+            slot,
+            GpuMaterial {
+                normal_map_texture_id: texture_ids[0],
+                base_color_texture_id: texture_ids[1],
+                emissive_texture_id: texture_ids[2],
+                metallic_roughness_texture_id: texture_ids[3],
+
+                base_color: LinearRgba::from(material.base_color).to_vec3(),
+                perceptual_roughness: material.perceptual_roughness,
+                emissive,
+                metallic: material.metallic,
+                reflectance: material.reflectance,
+                _padding: Vec3::ZERO,
+            },
+        );
+
+        // A material's slot never moves, and its instances don't carry any of its data, so the
+        // only material edits that reach instances are the ones that change whether the material
+        // resolves at all or whether it emits light.
+        let was_emissive = if is_emissive {
+            !self.emissive_materials.insert(material_id)
+        } else {
+            self.emissive_materials.remove(&material_id)
+        };
+        if !was_resolved || was_emissive != is_emissive {
+            self.invalidate_material_instances(material_id);
+        }
+    }
+
+    /// How many slots the texture binding array would have to hand out to cover `textures`.
+    ///
+    /// Duplicates within `textures` and images already in the array cost nothing, since they share
+    /// a slot with what's already there.
+    fn new_texture_count(&self, textures: &MaterialTextures) -> u32 {
+        let mut count = 0;
+        for (index, image_id) in textures.iter().enumerate() {
+            let Some(image_id) = image_id else { continue };
+            let counted_already = textures[..index].contains(&Some(*image_id));
+            if !counted_already && !self.textures.contains(image_id) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Drops the material's GPU state and queues it to be retried on a later frame.
+    fn defer_material(&mut self, material_id: AssetId<StandardMaterial>) {
+        // `remove_material` clears the retry entry, so insert after it rather than before.
+        self.remove_material(material_id);
+        self.unresolved_materials.insert(material_id);
+    }
+
+    fn remove_material(&mut self, material_id: AssetId<StandardMaterial>) {
+        // Unconditional: a material can be waiting on a texture without ever having held a slot,
+        // and it still has to stop being retried once it's gone.
+        self.unresolved_materials.remove(&material_id);
+
+        if self.material_slots.remove(&material_id).is_none() {
+            return;
+        }
+
+        self.release_material_textures(material_id);
+        self.material_textures.remove(&material_id);
+        self.emissive_materials.remove(&material_id);
+
+        self.invalidate_material_instances(material_id);
+    }
+
+    fn release_material_textures(&mut self, material_id: AssetId<StandardMaterial>) {
+        let Some(textures) = self.material_textures.get(&material_id).copied() else {
+            return;
+        };
+        for image_id in textures.into_iter().flatten() {
+            self.textures.release(&image_id);
+        }
+    }
+
+    /// Queues every instance using `material_id` to be re-resolved.
+    fn invalidate_material_instances(&mut self, material_id: AssetId<StandardMaterial>) {
+        let Self {
+            material_instances,
+            pending_refresh,
+            ..
+        } = self;
+
+        if let Some(instances) = material_instances.get(&material_id) {
+            pending_refresh.extend(instances.iter().copied());
+        }
+    }
+
+    /// Swaps in the GPU data of images that finished uploading, and retries whatever was waiting on
+    /// one.
+    fn update_textures(
+        &mut self,
+        extracted_images: &ExtractedAssets<GpuImage>,
+        texture_assets: &RenderAssets<GpuImage>,
+        material_assets: &StandardMaterialAssets,
+    ) {
+        let _span = info_span!("update_textures").entered();
+
+        // `extract_render_asset` records every id it extracts in `added`, modifications included,
+        // so that set alone covers everything whose GPU data could have changed.
+        let mut pending = core::mem::take(&mut self.pending_texture_updates);
+        pending.extend(extracted_images.added.iter().copied());
+
+        for image_id in pending {
+            // Nothing bound for this image, so there's nothing to swap. A material that needs it
+            // acquires it fresh once it lands, and skipping it here is also what keeps this set
+            // from growing without bound when an image is dropped mid-retry.
+            if !self.textures.contains(&image_id) {
+                continue;
+            }
+
+            match texture_assets.get(image_id) {
+                Some(image) => self.textures.replace(
+                    &image_id,
+                    (image.texture_view.clone(), image.sampler.clone()),
+                ),
+                None => {
+                    self.pending_texture_updates.insert(image_id);
+                }
+            }
+        }
+
+        // Retry materials that were waiting on a texture. Normally empty; during load it drains as
+        // images arrive.
+        for material_id in core::mem::take(&mut self.unresolved_materials) {
+            self.update_material(material_id, material_assets, texture_assets);
         }
     }
 }
 
-fn tlas_transform(transform: &Mat4) -> [f32; 12] {
-    transform.transpose().to_cols_array()[..12]
-        .try_into()
-        .unwrap()
+// ---------------------------------------------------------------------------
+// Light source bookkeeping
+// ---------------------------------------------------------------------------
+
+impl RaytracingSceneBindings {
+    fn update_lights(&mut self, directional_lights: &Query<(Entity, &ExtractedDirectionalLight)>) {
+        // There are few enough directional lights to just walk them every frame.
+        let _span = info_span!("update_lights").entered();
+
+        let mut live_directional_lights = EntityHashSet::default();
+        for (entity, directional_light) in directional_lights {
+            live_directional_lights.insert(entity);
+
+            let slot = self.directional_light_slots.get_or_allocate(entity);
+            set_at(
+                &mut self.directional_lights,
+                slot,
+                GpuDirectionalLight::new(directional_light),
+            );
+            self.add_light(entity, GpuLightSource::new_directional_light(slot));
+        }
+
+        let stale: Vec<Entity> = self
+            .directional_light_slots
+            .keys()
+            .copied()
+            .filter(|entity| !live_directional_lights.contains(entity))
+            .collect();
+        for entity in stale {
+            self.directional_light_slots.remove(&entity);
+            self.remove_light(entity);
+        }
+
+        self.write_light_id_translations();
+
+        if self.light_entities.len() > u16::MAX as usize {
+            panic!("Too many light sources in the scene, maximum is 65535.");
+        }
+    }
+
+    fn add_light(&mut self, entity: Entity, source: GpuLightSource) {
+        let index = match self.light_index.get(&entity) {
+            Some(&index) => index,
+            None => {
+                let index = self.light_entities.len() as u32;
+                self.light_entities.push(entity);
+                self.light_index.insert(entity, index);
+                self.light_index_changed.insert(entity);
+                index
+            }
+        };
+        set_at(&mut self.light_sources, index, source);
+    }
+
+    /// Removes a light, moving the last one down into the hole to keep the array dense.
+    fn remove_light(&mut self, entity: Entity) {
+        let Some(index) = self.light_index.remove(&entity) else {
+            return;
+        };
+        self.light_index_changed.insert(entity);
+
+        let last = self.light_entities.len() as u32 - 1;
+        self.light_entities.swap_remove(index as usize);
+
+        if index != last {
+            let moved = self.light_entities[index as usize];
+            self.light_index.insert(moved, index);
+            self.light_index_changed.insert(moved);
+
+            let source = self.light_sources.get(last);
+            set_at(&mut self.light_sources, index, source);
+        }
+    }
+
+    /// Restores the translation entries written last frame back to identity.
+    fn reset_light_id_translations(&mut self) {
+        for index in core::mem::take(&mut self.nonidentity_translations) {
+            set_at(
+                &mut self.previous_frame_light_id_translations,
+                index,
+                GpuU32(index),
+            );
+        }
+    }
+
+    /// Records where each light that moved or disappeared this frame ended up, so that reservoirs
+    /// still carrying last frame's light ids can be remapped.
+    fn write_light_id_translations(&mut self) {
+        let changed: Vec<Entity> = self.light_index_changed.drain().collect();
+
+        for entity in &changed {
+            // Lights that first appeared this frame have no previous id to translate from.
+            let Some(&previous) = self.previous_light_index.get(entity) else {
+                continue;
+            };
+            let current = self
+                .light_index
+                .get(entity)
+                .copied()
+                .unwrap_or(LIGHT_NOT_PRESENT_THIS_FRAME);
+
+            if current != previous {
+                set_at(
+                    &mut self.previous_frame_light_id_translations,
+                    previous,
+                    GpuU32(current),
+                );
+                self.nonidentity_translations.push(previous);
+            }
+        }
+
+        for entity in changed {
+            match self.light_index.get(&entity) {
+                Some(&index) => self.previous_light_index.insert(entity, index),
+                None => self.previous_light_index.remove(&entity),
+            };
+        }
+
+        // Every index the shader might read has to be backed by a real element.
+        let light_count = self.light_entities.len() as u32;
+        let translations = &mut self.previous_frame_light_id_translations;
+        if translations.len() < light_count {
+            let start = translations.len();
+            translations.grow(light_count);
+            for index in start..light_count {
+                translations.set(index, GpuU32(index));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Instance updates
+// ---------------------------------------------------------------------------
+
+type InstanceQueryData<'w> = (
+    &'w RaytracingMesh3d,
+    &'w MeshMaterial3d<StandardMaterial>,
+    &'w GlobalTransform,
+    &'w PreviousGlobalTransform,
+);
+
+/// Instances whose mesh or material was swapped out.
+type ChangedInstanceFilter = (
+    With<RaytracingMesh3d>,
+    Or<(
+        Changed<RaytracingMesh3d>,
+        Changed<MeshMaterial3d<StandardMaterial>>,
+    )>,
+);
+
+impl RaytracingSceneBindings {
+    /// Grows everything indexed by instance slot to cover `slot`.
+    ///
+    /// Called for every slot as it's handed out, so that afterwards the per-instance paths only
+    /// ever write into elements that already exist. That's what lets them take `&self` and run in
+    /// parallel — growing a buffer needs `&mut`, and a slot can first be touched from the parallel
+    /// pass, so the growth can't wait until then.
+    fn reserve_slot(&mut self, slot: u32) {
+        let len = slot + 1;
+
+        for dirty in &mut self.tlas_dirty {
+            dirty.reserve(len);
+        }
+        self.transforms.grow(len);
+        self.previous_frame_transforms.grow(len);
+        if self.live_instances.len() < len as usize {
+            self.live_instances.resize_with(len as usize, || None);
+        }
+    }
+
+    fn remove_instances(&mut self, removed: impl IntoIterator<Item = Entity>) {
+        let _span = info_span!("remove_instances").entered();
+
+        for entity in removed {
+            self.remove_instance(entity);
+        }
+    }
+
+    fn refresh_instances(
+        &mut self,
+        instances: &Query<InstanceQueryData>,
+        changed_instances: &Query<Entity, ChangedInstanceFilter>,
+        blas_manager: &BlasManager,
+        mesh_allocator: &MeshAllocator,
+    ) {
+        let _span = info_span!("refresh_instances").entered();
+
+        let mut refresh = core::mem::take(&mut self.pending_refresh);
+        refresh.extend(changed_instances.iter());
+
+        // A mesh invalidates every instance using it in two cases: its BLAS was rebuilt, and its
+        // data moved to a different slab buffer. The second is reported separately because growing
+        // a slab replaces the buffer for every mesh resident in it, so a mesh can be invalidated
+        // without changing in any way of its own — nothing else names those meshes. (`Res` change
+        // detection is no use for either: `allocate_and_free_meshes` takes `ResMut<MeshAllocator>`
+        // unconditionally, so it would report a change every single frame.)
+        let moved_meshes = mesh_allocator.meshes_with_changed_buffers();
+        for mesh_id in blas_manager.changed().iter().copied().chain(moved_meshes) {
+            if let Some(mesh_instances) = self.mesh_instances.get(&mesh_id) {
+                refresh.extend(mesh_instances.iter().copied());
+            }
+        }
+
+        for entity in refresh {
+            let Ok((mesh, material, transform, previous_frame_transform)) = instances.get(entity)
+            else {
+                // The entity is gone, or is no longer a complete instance. Either way it can't go
+                // on holding a slot, a TLAS entry and binding array references.
+                self.remove_instance(entity);
+                continue;
+            };
+            self.refresh_instance(
+                entity,
+                mesh,
+                material,
+                transform,
+                previous_frame_transform,
+                blas_manager,
+                mesh_allocator,
+            );
+        }
+    }
+
+    /// Re-resolves an instance and rewrites all of its per-instance data.
+    ///
+    /// If its mesh, BLAS or material isn't ready, the instance is dropped from the TLAS and queued
+    /// for another attempt next frame.
+    fn refresh_instance(
+        &mut self,
+        entity: Entity,
+        mesh: &RaytracingMesh3d,
+        material: &MeshMaterial3d<StandardMaterial>,
+        transform: &GlobalTransform,
+        previous_frame_transform: &PreviousGlobalTransform,
+        blas_manager: &BlasManager,
+        mesh_allocator: &MeshAllocator,
+    ) {
+        let mesh_id = mesh.id();
+        let material_id = material.id();
+
+        let previous = self.instances.get(&entity).copied();
+
+        // Keep the reverse indices current, so mesh and material changes can find their instances
+        // without scanning the whole scene.
+        relink(
+            &mut self.mesh_instances,
+            entity,
+            previous.map(|instance| instance.mesh),
+            mesh_id,
+        );
+        relink(
+            &mut self.material_instances,
+            entity,
+            previous.map(|instance| instance.material),
+            material_id,
+        );
+
+        let slot = match previous {
+            Some(previous) => previous.slot,
+            None => self.instance_slots.allocate(),
+        };
+        // Unconditional, rather than only for freshly allocated slots: an instance that fails to
+        // resolve still owns its slot, and the parallel move pass can reach it.
+        self.reserve_slot(slot);
+
+        let mut instance = Instance {
+            slot,
+            mesh: mesh_id,
+            material: material_id,
+            buffers: previous.and_then(|instance| instance.buffers),
+        };
+
+        let resolved = self.resolve_instance(
+            entity,
+            &mut instance,
+            transform,
+            previous_frame_transform,
+            previous.is_none(),
+            blas_manager,
+            mesh_allocator,
+        );
+
+        // Written back on both paths, so that a failed attempt keeps its slot and its reverse
+        // index links and can simply be retried.
+        self.instances.insert(entity, instance);
+        if !resolved {
+            self.pending_refresh.insert(entity);
+        }
+    }
+
+    /// Resolves everything an instance's slot needs and writes it out, reporting whether the
+    /// instance ended up drawable.
+    fn resolve_instance(
+        &mut self,
+        entity: Entity,
+        instance: &mut Instance,
+        transform: &GlobalTransform,
+        previous_frame_transform: &PreviousGlobalTransform,
+        seed_transforms: bool,
+        blas_manager: &BlasManager,
+        mesh_allocator: &MeshAllocator,
+    ) -> bool {
+        let slot = instance.slot;
+
+        let (Some(vertex_slice), Some(index_slice), Some(material_slot), Some(blas)) = (
+            mesh_allocator.mesh_vertex_slice(&instance.mesh),
+            mesh_allocator.mesh_index_slice(&instance.mesh),
+            self.material_slots.get(&instance.material),
+            blas_manager.get(&instance.mesh),
+        ) else {
+            self.deactivate_instance(entity, instance);
+            return false;
+        };
+
+        let vertex_buffer_key = vertex_slice.buffer.id();
+        let index_buffer_key = index_slice.buffer.id();
+        let capacity = MAX_MESH_SLAB_COUNT.get();
+
+        // Check both arrays for room before taking either slot. Acquiring one and then handing it
+        // straight back would dirty the binding array — and so rebuild the whole bind group — every
+        // frame, since an instance that fails here is queued for another attempt next frame.
+        if !self.vertex_buffers.has_room(&vertex_buffer_key, capacity)
+            || !self.index_buffers.has_room(&index_buffer_key, capacity)
+        {
+            once!(warn!(
+                "Solari scene needs more than {} mesh slabs. Instances past that limit will \
+                 not be rendered.",
+                MAX_MESH_SLAB_COUNT.get()
+            ));
+            self.deactivate_instance(entity, instance);
+            return false;
+        }
+
+        // Take the new slab references before dropping the old ones, so that a mesh which didn't
+        // change slabs doesn't have its slot freed and immediately reallocated — that would dirty
+        // the binding array and rebuild the whole bind group for nothing.
+        //
+        // Neither acquire can fail: the check above confirmed both arrays have room.
+        let previous_buffers = instance.buffers.take();
+        let vertex_buffer_id = self
+            .vertex_buffers
+            .acquire(vertex_buffer_key, capacity, || vertex_slice.buffer.clone())
+            .expect("vertex slab binding array had room but handed out no slot");
+        let index_buffer_id = self
+            .index_buffers
+            .acquire(index_buffer_key, capacity, || index_slice.buffer.clone())
+            .expect("index slab binding array had room but handed out no slot");
+        instance.buffers = Some((vertex_buffer_key, index_buffer_key));
+        self.release_buffers(previous_buffers);
+
+        let triangle_count = (index_slice.range.len() / 3) as u32;
+
+        set_at(
+            &mut self.geometry_ids,
+            slot,
+            GpuInstanceGeometryIds {
+                vertex_buffer_id,
+                vertex_buffer_offset: vertex_slice.range.start,
+                index_buffer_id,
+                index_buffer_offset: index_slice.range.start,
+                triangle_count,
+            },
+        );
+        set_at(&mut self.material_ids, slot, GpuU32(material_slot));
+
+        // Only seed the transforms for a slot that has just been handed out. After that the
+        // extract schedule owns them, and the render world components this reads are a snapshot
+        // from when the instance was spawned — writing them back here would undo every move the
+        // instance has made since, on any later refresh (a mesh finally loading, say).
+        if seed_transforms {
+            self.write_transforms(slot, transform, previous_frame_transform);
+        }
+        self.set_live(slot, LiveInstance { blas: blas.clone() });
+
+        if self.emissive_materials.contains(&instance.material) {
+            self.add_light(
+                entity,
+                GpuLightSource::new_emissive_mesh_light(slot, triangle_count),
+            );
+        } else {
+            self.remove_light(entity);
+        }
+
+        true
+    }
+
+    /// Records that an instance moved, writing its transforms into the per-slot buffers.
+    ///
+    /// Driven straight from the extract schedule rather than by way of render world components:
+    /// a moving instance costs nothing else per frame, so copying its transform into the render
+    /// world first only to read it back out in the same frame is pure overhead.
+    ///
+    /// Every write lands in an element that already exists, on a slot no other instance shares,
+    /// so this takes `&self` and the caller can run it in parallel.
+    pub fn move_instance(
+        &self,
+        entity: Entity,
+        transform: &GlobalTransform,
+        previous_frame_transform: &PreviousGlobalTransform,
+    ) {
+        let Some(slot) = self.instances.get(&entity).map(|instance| instance.slot) else {
+            // Spawned this frame and not given a slot yet. `refresh_instance` seeds the buffers
+            // when it allocates one, later this same frame.
+            return;
+        };
+
+        self.write_transforms(slot, transform, previous_frame_transform);
+        // The TLAS entry carries a copy of the transform, so a move dirties it too.
+        self.move_live(slot);
+    }
+
+    /// Writes an instance's transforms into the per-slot buffers, returning the current one in the
+    /// form a TLAS entry wants.
+    /// Writes an instance's transforms into the per-slot buffers.
+    ///
+    /// Takes `&self` so it can be called from a parallel pass. `reserve_slot` has to
+    /// have grown the buffers past `slot` first.
+    fn write_transforms(
+        &self,
+        slot: u32,
+        transform: &GlobalTransform,
+        previous_frame_transform: &PreviousGlobalTransform,
+    ) {
+        set_existing(
+            &self.transforms,
+            slot,
+            GpuTransform(Affine3::from(transform.affine()).to_transpose()),
+        );
+        set_existing(
+            &self.previous_frame_transforms,
+            slot,
+            GpuTransform(Affine3::from(previous_frame_transform.0).to_transpose()),
+        );
+    }
+
+    /// Marks a slot as drawable, giving it the data its TLAS entry is built from.
+    ///
+    /// Always dirties the entry, even when the data here looks unchanged: compaction can swap out
+    /// the mesh's `Blas` without anything in [`LiveInstance`] moving, and the entry holds a
+    /// reference to that `Blas`.
+    fn set_live(&mut self, slot: u32, live: LiveInstance) {
+        let index = slot as usize;
+        if self.live_instances.len() <= index {
+            self.live_instances.resize_with(index + 1, || None);
+        }
+        if self.live_instances[index].replace(live).is_none() {
+            self.live_instance_count += 1;
+        }
+        self.mark_tlas_dirty(slot);
+    }
+
+    /// Notes that a live slot's transform changed, so its TLAS entry has to be rewritten.
+    ///
+    /// Does nothing if the slot isn't drawable.
+    ///
+    /// The transform itself doesn't need recording: `update_tlas` reads it back out of the
+    /// transforms buffer, which holds exactly the bytes a TLAS entry wants.
+    fn move_live(&self, slot: u32) {
+        if matches!(self.live_instances.get(slot as usize), Some(Some(_))) {
+            self.mark_tlas_dirty(slot);
+        }
+    }
+
+    /// Drops a slot out of the TLAS, if it was in it.
+    fn clear_live(&mut self, slot: u32) {
+        let was_live = self
+            .live_instances
+            .get_mut(slot as usize)
+            .and_then(Option::take)
+            .is_some();
+        if was_live {
+            self.live_instance_count -= 1;
+            self.mark_tlas_dirty(slot);
+        }
+    }
+
+    /// Drops an instance out of the TLAS without giving up its slot.
+    fn deactivate_instance(&mut self, entity: Entity, instance: &mut Instance) {
+        self.clear_live(instance.slot);
+        self.remove_light(entity);
+        // An instance that isn't drawing shouldn't pin a binding array slot for a slab it may no
+        // longer even be allocated in. A later successful refresh takes fresh references.
+        self.release_buffers(instance.buffers.take());
+    }
+
+    fn release_buffers(&mut self, buffers: Option<(BufferId, BufferId)>) {
+        if let Some((vertex_key, index_key)) = buffers {
+            self.vertex_buffers.release(&vertex_key);
+            self.index_buffers.release(&index_key);
+        }
+    }
+
+    fn remove_instance(&mut self, entity: Entity) {
+        let Some(instance) = self.instances.remove(&entity) else {
+            return;
+        };
+
+        // Drop out of the TLAS before giving the slot back, so the slot can't be handed to another
+        // instance while this one still has a live entry.
+        self.clear_live(instance.slot);
+        self.instance_slots.release(instance.slot);
+        self.pending_refresh.remove(&entity);
+        self.remove_light(entity);
+        self.release_buffers(instance.buffers);
+
+        unlink(&mut self.mesh_instances, &instance.mesh, entity);
+        unlink(&mut self.material_instances, &instance.material, entity);
+    }
+
+    /// Records that a slot's TLAS entry needs rewriting, in both TLASes.
+    ///
+    /// Takes `&self` so it can be called from a parallel pass. `reserve_slot` has to have covered
+    /// `slot` first.
+    fn mark_tlas_dirty(&self, slot: u32) {
+        for dirty in &self.tlas_dirty {
+            dirty.insert(slot);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TLAS
+// ---------------------------------------------------------------------------
+
+impl RaytracingSceneBindings {
+    /// Moves to the next TLAS parity and brings it up to date with this frame's changes.
+    ///
+    /// The two acceleration structures alternate: this frame's is rebuilt, and last frame's stays
+    /// intact so the shaders can trace against it.
+    fn advance_tlas(&mut self, render_device: &RenderDevice) {
+        let _span = info_span!("update_tlas").entered();
+
+        self.frame_parity ^= 1;
+        let parity = self.frame_parity;
+
+        self.reserve_tlas(parity, render_device);
+        self.update_tlas(parity);
+    }
+
+    /// Makes sure `tlas[parity]` can hold every instance slot, reallocating just that one if not.
+    ///
+    /// The other TLAS is deliberately left alone. It only has to keep holding last frame's
+    /// contents, which by definition fit in whatever size it already is, so growing the pair in
+    /// lockstep would discard usable previous-frame data and pay for a second full build.
+    fn reserve_tlas(&mut self, parity: usize, render_device: &RenderDevice) {
+        let needed = self.instance_slots.len();
+        if self.tlas[parity].is_some() && needed <= self.tlas_capacity[parity] {
+            return;
+        }
+
+        let capacity = needed
+            .next_multiple_of(TLAS_CAPACITY_GRANULARITY)
+            .max(TLAS_CAPACITY_GRANULARITY);
+
+        self.tlas[parity] = Some(
+            render_device
+                .wgpu_device()
+                .create_tlas(&CreateTlasDescriptor {
+                    label: Some("tlas"),
+                    flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
+                    update_mode: AccelerationStructureUpdateMode::Build,
+                    max_instances: capacity,
+                }),
+        );
+        self.tlas_capacity[parity] = capacity;
+
+        // A fresh acceleration structure holds nothing, so every live instance has to be
+        // rewritten into it. This supersedes whatever was already queued.
+        self.tlas_dirty[parity].insert_all(needed);
+        self.bind_group_invalid = true;
+    }
+
+    /// Applies this parity's pending instance changes.
+    fn update_tlas(&mut self, parity: usize) {
+        let Self {
+            tlas,
+            tlas_dirty,
+            live_instances,
+            transforms,
+            ..
+        } = self;
+
+        let Some(tlas) = tlas[parity].as_mut() else {
+            return;
+        };
+
+        for slot in tlas_dirty[parity].drain() {
+            let instance = live_instances
+                .get(slot as usize)
+                .and_then(Option::as_ref)
+                .map(|live| {
+                    // The custom data carries the stable slot index. `wgpu` compacts empty
+                    // entries out of the instance buffer when it builds, so the hardware
+                    // instance index doesn't match our slot; the shaders read this instead.
+                    debug_assert!(
+                        slot < 1 << TLAS_CUSTOM_DATA_BITS,
+                        "instance slot {slot} does not fit in a TLAS instance's custom data"
+                    );
+                    TlasInstance::new(
+                        &live.blas,
+                        to_tlas_transform(transforms.get(slot).0),
+                        slot,
+                        0xFF,
+                    )
+                });
+
+            // `reserve_tlas` ran first and sized this TLAS to hold every slot that has ever been
+            // allocated, and only such slots are ever queued, so this is always in bounds. Should
+            // that ever stop being true, dropping the write is still safe — reallocating the TLAS
+            // requeues every slot — so don't panic over it.
+            debug_assert!(
+                (slot as usize) < tlas.get().len(),
+                "TLAS was not sized for instance slot {slot}"
+            );
+            if let Some(entry) = tlas.get_mut_single(slot as usize) {
+                *entry = instance;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bind group
+// ---------------------------------------------------------------------------
+
+/// Collects a binding array of slab buffers, standing `dummy` in for the free slots.
+fn buffer_bindings<'a>(
+    buffers: &'a RetainedBindingArray<BufferId, Buffer>,
+    dummy: &'a Buffer,
+) -> Vec<BufferBinding<'a>> {
+    buffers
+        .iter()
+        .map(|buffer| buffer.unwrap_or(dummy).as_entire_buffer_binding())
+        .collect()
+}
+
+impl RaytracingSceneBindings {
+    /// The ids of the buffers behind the sparse vectors, in `sparse_buffers` order.
+    fn buffer_ids(&self) -> [Option<BufferId>; SPARSE_BUFFER_COUNT] {
+        let buffers = self.sparse_buffers();
+        core::array::from_fn(|index| buffers[index].buffer_id())
+    }
+
+    /// Returns true if anything the bind group captures has changed since it was last built.
+    fn take_bind_group_invalidation(
+        &mut self,
+        dfg_view: &TextureView,
+        dfg_sampler: &Sampler,
+    ) -> bool {
+        let mut invalid = self.bind_group_invalid;
+        self.bind_group_invalid = false;
+
+        for dirty in [
+            &mut self.vertex_buffers.dirty,
+            &mut self.index_buffers.dirty,
+            &mut self.textures.dirty,
+        ] {
+            invalid |= core::mem::replace(dirty, false);
+        }
+
+        // Any of the sparse buffers may have reallocated as it grew.
+        let buffer_ids = self.buffer_ids();
+        if self.last_buffer_ids != buffer_ids {
+            self.last_buffer_ids = buffer_ids;
+            invalid = true;
+        }
+
+        // `light_sources` is bound with an explicit size, because the shaders derive the light
+        // count from `arrayLength` and the buffer is allocated with slack.
+        let light_count = self.light_entities.len() as u32;
+        if self.last_light_count != light_count {
+            self.last_light_count = light_count;
+            invalid = true;
+        }
+
+        // The DFG LUT stands in with the fallback image until it has been uploaded. Nothing else
+        // here would notice the swap, so a bind group built during that window would keep the
+        // placeholder bound for the rest of the run.
+        let dfg_ids = Some((dfg_view.id(), dfg_sampler.id()));
+        if self.last_dfg_ids != dfg_ids {
+            self.last_dfg_ids = dfg_ids;
+            invalid = true;
+        }
+
+        invalid
+    }
+
+    /// Builds the bind group for one TLAS parity.
+    ///
+    /// Only the requested parity is built, because the other one may not be bindable yet: on the
+    /// very first frame the previous-frame TLAS hasn't been allocated at all.
+    fn create_bind_group(
+        &self,
+        parity: usize,
+        render_device: &RenderDevice,
+        layout: &BindGroupLayout,
+        fallback_texture: &FallbackImage,
+        dfg_view: &TextureView,
+        dfg_sampler: &Sampler,
+    ) -> BindGroup {
+        let _span = info_span!("create_bind_group").entered();
+
+        let vertex_buffers = buffer_bindings(&self.vertex_buffers, &self.dummy_buffer);
+        let index_buffers = buffer_bindings(&self.index_buffers, &self.dummy_buffer);
+
+        let (mut textures, mut samplers): (Vec<_>, Vec<_>) = self
+            .textures
+            .iter()
+            .map(|texture| match texture {
+                Some((view, sampler)) => (view.deref(), sampler.deref()),
+                None => (
+                    fallback_texture.d2.texture_view.deref(),
+                    fallback_texture.d2.sampler.deref(),
+                ),
+            })
+            .unzip();
+        if textures.is_empty() {
+            textures.push(fallback_texture.d2.texture_view.deref());
+            samplers.push(fallback_texture.d2.sampler.deref());
+        }
+
+        let light_sources = BufferBinding {
+            buffer: self.light_sources.buffer().unwrap(),
+            offset: 0,
+            size: BufferSize::new(
+                self.light_entities.len() as u64 * size_of::<GpuLightSource>() as u64,
+            ),
+        };
+
+        let materials = self.materials.buffer().unwrap().as_entire_buffer_binding();
+        let transforms = self.transforms.buffer().unwrap().as_entire_buffer_binding();
+        let previous_frame_transforms = self
+            .previous_frame_transforms
+            .buffer()
+            .unwrap()
+            .as_entire_buffer_binding();
+        let geometry_ids = self
+            .geometry_ids
+            .buffer()
+            .unwrap()
+            .as_entire_buffer_binding();
+        let material_ids = self
+            .material_ids
+            .buffer()
+            .unwrap()
+            .as_entire_buffer_binding();
+        let directional_lights = self
+            .directional_lights
+            .buffer()
+            .unwrap()
+            .as_entire_buffer_binding();
+        let translations = self
+            .previous_frame_light_id_translations
+            .buffer()
+            .unwrap()
+            .as_entire_buffer_binding();
+
+        // This parity's TLAS is always there: `reserve_tlas` allocated it earlier in the frame.
+        let current = self.tlas[parity].as_ref().unwrap();
+        // The other one is only rebuilt on the frames it's current, so it still holds last frame's
+        // contents — except on the very first frame, when it hasn't been allocated at all. There's
+        // no previous frame to trace against then, so bind the current TLAS in its place. See
+        // `cache_bind_group` for why that isn't cached.
+        let previous = self.tlas[parity ^ 1].as_ref().unwrap_or(current);
+
+        render_device.create_bind_group(
+            "raytracing_scene_bind_group",
+            layout,
+            &BindGroupEntries::sequential((
+                vertex_buffers.as_slice(),
+                index_buffers.as_slice(),
+                textures.as_slice(),
+                samplers.as_slice(),
+                materials,
+                current.as_binding(),
+                previous.as_binding(),
+                transforms,
+                previous_frame_transforms,
+                geometry_ids,
+                material_ids,
+                light_sources,
+                directional_lights,
+                translations,
+                dfg_view,
+                dfg_sampler,
+            )),
+        )
+    }
+
+    /// Returns this parity's bind group, building it if the cache is cold.
+    ///
+    /// The result is only cached once a real previous-frame TLAS exists. On the first frame the
+    /// previous-frame entry aliases the current TLAS, and caching that would leave the alias in
+    /// place every time this parity came around again.
+    fn cache_bind_group(
+        &mut self,
+        parity: usize,
+        render_device: &RenderDevice,
+        layout: &BindGroupLayout,
+        fallback_texture: &FallbackImage,
+        dfg_view: &TextureView,
+        dfg_sampler: &Sampler,
+    ) -> BindGroup {
+        if let Some(bind_group) = &self.cached_bind_groups[parity] {
+            return bind_group.clone();
+        }
+
+        let bind_group = self.create_bind_group(
+            parity,
+            render_device,
+            layout,
+            fallback_texture,
+            dfg_view,
+            dfg_sampler,
+        );
+
+        if self.tlas[parity ^ 1].is_some() {
+            self.cached_bind_groups[parity] = Some(bind_group.clone());
+        }
+
+        bind_group
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Systems
+// ---------------------------------------------------------------------------
+
+/// Applies this frame's scene changes to the retained buffers, binding arrays and TLAS.
+pub fn prepare_raytracing_scene_resources(
+    instances: Query<InstanceQueryData>,
+    changed_instances: Query<Entity, ChangedInstanceFilter>,
+    mut removed_instances: RemovedComponents<RaytracingMesh3d>,
+    directional_lights: Query<(Entity, &ExtractedDirectionalLight)>,
+    mesh_allocator: Res<MeshAllocator>,
+    blas_manager: Res<BlasManager>,
+    material_assets: Res<StandardMaterialAssets>,
+    texture_assets: Res<RenderAssets<GpuImage>>,
+    extracted_images: Res<ExtractedAssets<GpuImage>>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut bindings: ResMut<RaytracingSceneBindings>,
+) {
+    let bindings = &mut *bindings;
+
+    bindings.reset_light_id_translations();
+
+    bindings.update_materials(&material_assets, &texture_assets);
+    bindings.update_textures(&extracted_images, &texture_assets, &material_assets);
+
+    bindings.remove_instances(removed_instances.read());
+    bindings.refresh_instances(
+        &instances,
+        &changed_instances,
+        &blas_manager,
+        &mesh_allocator,
+    );
+
+    bindings.update_lights(&directional_lights);
+
+    bindings.write_sparse_buffers(&render_device, &render_queue);
+    bindings.advance_tlas(&render_device);
+}
+
+/// Records this frame's TLAS build into the render graph's command encoder.
+///
+/// This runs as part of the graph rather than submitting its own command buffer, so the build
+/// rides along with everything else the frame submits.
+pub fn build_raytracing_tlas(
+    bindings: Res<RaytracingSceneBindings>,
+    mut render_context: RenderContext,
+) {
+    let Some(tlas) = bindings.tlas[bindings.frame_parity].as_ref() else {
+        return;
+    };
+
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let command_encoder = render_context.command_encoder();
+
+    let time_span = diagnostics.time_span(command_encoder, "tlas_build");
+    command_encoder.build_acceleration_structures(&[], [tlas]);
+    time_span.end(command_encoder);
+}
+
+/// Finalizes the sparse buffer uploads and selects this frame's bind group.
+pub fn prepare_raytracing_scene_bind_group(
+    texture_assets: Res<RenderAssets<GpuImage>>,
+    fallback_texture: Res<FallbackImage>,
+    dfg_lut: Res<DfgLut>,
+    render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+    sparse_buffer_update_pipelines: Res<SparseBufferUpdatePipelines>,
+    mut sparse_buffer_update_jobs: ResMut<SparseBufferUpdateJobs>,
+    mut sparse_buffer_update_bind_groups: ResMut<SparseBufferUpdateBindGroups>,
+    mut bindings: ResMut<RaytracingSceneBindings>,
+) {
+    let bindings = &mut *bindings;
+
+    {
+        let _span = info_span!("prepare_sparse_uploads").entered();
+
+        for buffer in bindings.sparse_buffers_mut() {
+            buffer.prepare_upload(
+                &render_device,
+                &pipeline_cache,
+                &mut sparse_buffer_update_jobs,
+                &mut sparse_buffer_update_bind_groups,
+                &sparse_buffer_update_pipelines,
+            );
+        }
+    }
+
+    bindings.bind_group = None;
+
+    // Solari has nothing to trace against without both geometry and a light to sample.
+    if bindings.live_instance_count == 0 || bindings.light_entities.is_empty() {
+        return;
+    }
+
+    let (dfg_view, dfg_sampler) = texture_assets
+        .get(&dfg_lut.texture)
+        .map(|image| (&image.texture_view, &image.sampler))
+        .unwrap_or((
+            &fallback_texture.d2.texture_view,
+            &fallback_texture.d2.sampler,
+        ));
+
+    if bindings.take_bind_group_invalidation(dfg_view, dfg_sampler) {
+        bindings.cached_bind_groups = [None, None];
+    }
+
+    let parity = bindings.frame_parity;
+    let layout = pipeline_cache.get_bind_group_layout(&bindings.bind_group_layout);
+    bindings.bind_group = Some(bindings.cache_bind_group(
+        parity,
+        &render_device,
+        &layout,
+        &fallback_texture,
+        dfg_view,
+        dfg_sampler,
+    ));
 }

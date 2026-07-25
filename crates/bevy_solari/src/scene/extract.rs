@@ -1,6 +1,5 @@
-use super::RaytracingMesh3d;
+use super::{RaytracingMesh3d, RaytracingSceneBindings};
 use bevy_asset::{AssetEvent, AssetId, Assets};
-use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     lifecycle::RemovedComponents,
     message::MessageReader,
@@ -50,7 +49,12 @@ pub fn extract_raytracing_scene_structural(
     }
 }
 
-/// Updates the transforms of existing raytracing instances in the render world.
+/// Writes the transforms of moved raytracing instances straight into their GPU buffers.
+///
+/// This deliberately skips the render world: a moving instance needs nothing else updated per
+/// frame, so copying its transform into a render world component only to read it back out during
+/// the same frame's prepare would double the work. The render world copies inserted when an
+/// instance is spawned are a one-off seed for the slot it gets given, nothing more.
 pub fn extract_raytracing_scene_transforms(
     main_instances: Extract<
         Query<
@@ -65,24 +69,18 @@ pub fn extract_raytracing_scene_transforms(
             ),
         >,
     >,
-    mut render_instances: Query<
-        (&mut GlobalTransform, Option<&mut PreviousGlobalTransform>),
-        With<RaytracingMesh3d>,
-    >,
+    bindings: Res<RaytracingSceneBindings>,
 ) {
-    for (render_entity, new_transform, new_previous_frame_transform) in &main_instances {
-        if let Ok((mut transform, mut previous_frame_transform)) =
-            render_instances.get_mut(render_entity)
-        {
-            *transform = *new_transform;
+    // Each instance writes only to its own slot, so this splits across threads.
+    main_instances
+        .par_iter()
+        .for_each(|(render_entity, transform, previous_frame_transform)| {
+            let previous_frame_transform = previous_frame_transform
+                .cloned()
+                .unwrap_or(PreviousGlobalTransform(transform.affine()));
 
-            if let Some(previous_frame_transform) = previous_frame_transform.as_deref_mut() {
-                *previous_frame_transform = new_previous_frame_transform
-                    .cloned()
-                    .unwrap_or(PreviousGlobalTransform(new_transform.affine()));
-            }
-        }
-    }
+            bindings.move_instance(render_entity, transform, &previous_frame_transform);
+        });
 }
 
 /// Updates the mesh and material of existing raytracing instances in the render world.
@@ -110,8 +108,24 @@ pub fn extract_raytracing_scene_meshes_and_materials(
     }
 }
 
-#[derive(Resource, Deref, DerefMut, Default)]
-pub struct StandardMaterialAssets(HashMap<AssetId<StandardMaterial>, StandardMaterial>);
+/// The set of [`StandardMaterial`]s used by raytracing, mirrored into the render world.
+///
+/// Alongside the materials themselves this records which materials changed this frame, so that
+/// consumers can update their GPU-side state incrementally instead of walking every material.
+#[derive(Resource, Default)]
+pub struct StandardMaterialAssets {
+    materials: HashMap<AssetId<StandardMaterial>, StandardMaterial>,
+    /// Materials added or modified this frame.
+    pub changed: Vec<AssetId<StandardMaterial>>,
+    /// Materials removed this frame.
+    pub removed: Vec<AssetId<StandardMaterial>>,
+}
+
+impl StandardMaterialAssets {
+    pub fn get(&self, id: &AssetId<StandardMaterial>) -> Option<&StandardMaterial> {
+        self.materials.get(id)
+    }
+}
 
 /// Keeps [`StandardMaterialAssets`] up to date in the render world.
 pub fn extract_raytracing_material_assets(
@@ -119,15 +133,22 @@ pub fn extract_raytracing_material_assets(
     mut render_materials: ResMut<StandardMaterialAssets>,
     mut events: Extract<MessageReader<AssetEvent<StandardMaterial>>>,
 ) {
+    let render_materials = &mut *render_materials;
+
+    render_materials.changed.clear();
+    render_materials.removed.clear();
+
     for event in events.read() {
         match event {
             AssetEvent::Added { id } | AssetEvent::Modified { id } => {
                 if let Some(material) = main_materials.get(*id) {
-                    render_materials.insert(*id, material.clone());
+                    render_materials.materials.insert(*id, material.clone());
+                    render_materials.changed.push(*id);
                 }
             }
             AssetEvent::Removed { id } => {
-                render_materials.remove(id);
+                render_materials.materials.remove(id);
+                render_materials.removed.push(*id);
             }
             AssetEvent::Unused { .. } | AssetEvent::LoadedWithDependencies { .. } => {}
         }

@@ -254,6 +254,10 @@ pub fn allocate_and_free_meshes(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
 ) {
+    // Start a fresh round of buffer invalidations. Consumers of
+    // `MeshAllocator::meshes_with_changed_buffers` read it later in the same frame.
+    mesh_allocator.clear_changed_keys();
+
     // Process removed or modified meshes.
     mesh_allocator.free_meshes(&extracted_meshes);
 
@@ -277,6 +281,27 @@ impl MeshAllocator {
             &MeshAllocationKey::new(*mesh_id, ElementClass::Metadata),
             *self.mesh_id_to_metadata_slab(mesh_id)?,
         )
+    }
+
+    /// Meshes whose vertex or index data has moved to a different [`Buffer`] this frame, so that
+    /// anything caching those buffers' identities can rebuild just the affected entries.
+    ///
+    /// A mesh can show up here without having changed in any way of its own: growing a slab
+    /// replaces the buffer for every mesh resident in it. See [`SlabAllocator::changed_keys`] for
+    /// what does and doesn't get reported, and for the once-per-frame contract this inherits.
+    ///
+    /// Metadata and morph target allocations are filtered out. They live in their own slabs, so
+    /// moving them says nothing about a mesh's vertex or index buffers.
+    ///
+    /// A mesh is yielded twice if both its vertex and its index slab grew, since those are separate
+    /// allocations, so deduplicate if repeating the work per mesh would be expensive.
+    ///
+    /// [`Buffer`]: crate::render_resource::Buffer
+    pub fn meshes_with_changed_buffers(&self) -> impl Iterator<Item = AssetId<Mesh>> {
+        self.changed_keys()
+            .iter()
+            .filter(|key| matches!(key.class, ElementClass::Vertex | ElementClass::Index))
+            .map(|key| key.mesh_id)
     }
 
     /// Returns the buffer and range within that buffer of the vertex data for

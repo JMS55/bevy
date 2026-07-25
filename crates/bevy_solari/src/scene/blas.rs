@@ -25,11 +25,24 @@ const MAX_COMPACTION_VERTICES_PER_FRAME: u32 = 400_000;
 pub struct BlasManager {
     blas: HashMap<AssetId<Mesh>, Blas>,
     compaction_queue: VecDeque<(AssetId<Mesh>, u32, bool)>,
+    changed: Vec<AssetId<Mesh>>,
 }
 
 impl BlasManager {
     pub fn get(&self, mesh: &AssetId<Mesh>) -> Option<&Blas> {
         self.blas.get(mesh)
+    }
+
+    /// Meshes whose [`Blas`] was created, replaced, or removed this frame.
+    ///
+    /// Compaction swaps out the [`Blas`] object entirely, so anything holding a reference to one
+    /// (such as a TLAS instance) has to be rebuilt when its mesh appears here.
+    ///
+    /// A mesh that was modified appears twice, once for the removal and once for the rebuild.
+    /// Consumers are expected to be idempotent rather than pay for deduplication: this is empty
+    /// on the overwhelming majority of frames, and short whenever it isn't.
+    pub fn changed(&self) -> &[AssetId<Mesh>] {
+        &self.changed
     }
 }
 
@@ -41,6 +54,8 @@ pub fn prepare_raytracing_blas(
     render_queue: Res<RenderQueue>,
     mut diagnostics: Option<ResMut<DiagnosticsRecorder>>,
 ) {
+    blas_manager.changed.clear();
+
     // Delete BLAS for deleted or modified meshes
     for asset_id in extracted_meshes
         .removed
@@ -48,6 +63,7 @@ pub fn prepare_raytracing_blas(
         .chain(extracted_meshes.modified.iter())
     {
         blas_manager.blas.remove(asset_id);
+        blas_manager.changed.push(*asset_id);
     }
 
     if extracted_meshes.extracted.is_empty() {
@@ -67,6 +83,7 @@ pub fn prepare_raytracing_blas(
                 allocate_blas(&vertex_slice, &index_slice, asset_id, &render_device);
 
             blas_manager.blas.insert(*asset_id, blas);
+            blas_manager.changed.push(*asset_id);
             blas_manager
                 .compaction_queue
                 .push_back((*asset_id, blas_size.vertex_count, false));
@@ -137,6 +154,7 @@ pub fn compact_raytracing_blas(
         if blas.ready_for_compaction() {
             let compacted_blas = render_queue.compact_blas(blas);
             blas_manager.blas.insert(mesh, compacted_blas);
+            blas_manager.changed.push(mesh);
 
             vertices_compacted += vertex_count;
             continue;

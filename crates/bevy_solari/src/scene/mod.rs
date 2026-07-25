@@ -17,10 +17,12 @@ use bevy_render::{
     },
     render_asset::prepare_assets,
     render_resource::BufferUsages,
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderGraph, RenderGraphSystems},
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
-use binder::prepare_raytracing_scene_bindings;
+use binder::{
+    build_raytracing_tlas, prepare_raytracing_scene_bind_group, prepare_raytracing_scene_resources,
+};
 use blas::{compact_raytracing_blas, prepare_raytracing_blas, BlasManager};
 use extract::{
     extract_raytracing_material_assets, extract_raytracing_scene_meshes_and_materials,
@@ -61,7 +63,7 @@ impl Plugin for RaytracingScenePlugin {
         render_app
             .init_gpu_resource::<BlasManager>()
             .init_gpu_resource::<StandardMaterialAssets>()
-            .insert_resource(RaytracingSceneBindings::new())
+            .init_gpu_resource::<RaytracingSceneBindings>()
             .add_systems(
                 ExtractSchedule,
                 (
@@ -81,8 +83,14 @@ impl Plugin for RaytracingScenePlugin {
                     compact_raytracing_blas
                         .in_set(RenderSystems::PrepareAssets)
                         .after(prepare_raytracing_blas),
-                    prepare_raytracing_scene_bindings.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_raytracing_scene_resources.in_set(RenderSystems::PrepareResources),
+                    prepare_raytracing_scene_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
+            )
+            .add_systems(
+                RenderGraph,
+                // The TLAS has to be built before any pass traces against it.
+                build_raytracing_tlas.in_set(RenderGraphSystems::Begin),
             );
     }
 }

@@ -74,6 +74,12 @@ where
 
     /// Additional buffer usages to add to any vertex or index buffers created.
     pub extra_buffer_usages: BufferUsages,
+
+    /// Keys whose data has moved to a different [`Buffer`] since
+    /// [`Self::clear_changed_keys`] was last called.
+    ///
+    /// See [`Self::changed_keys`].
+    changed_keys: Vec<I::Key>,
 }
 
 /// Describes the type of the data that a [`SlabAllocator`] will store.
@@ -578,6 +584,7 @@ where
             key_to_slab: HashMap::default(),
             slab_layouts: HashMap::default(),
             extra_buffer_usages: BufferUsages::empty(),
+            changed_keys: Vec::new(),
         }
     }
 }
@@ -589,6 +596,36 @@ where
     /// Creates a new empty slab allocator.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The keys whose allocations now live in a different [`Buffer`] than they did before, so that
+    /// consumers caching buffer identities (bind groups, binding array slots) can rebuild just the
+    /// affected entries.
+    ///
+    /// Offsets within a slab are stable for as long as an allocation is live, so the only way the
+    /// [`Buffer`] behind a live allocation can change out from under you is that slab growing — and
+    /// growing a slab replaces the buffer for *every* key resident in it, not just the one whose
+    /// allocation triggered the growth. Those keys are what this reports, which is why it can't be
+    /// derived from whatever the caller already knows changed.
+    ///
+    /// This deliberately does *not* report keys that were merely added or freed: those only affect
+    /// the allocation being added or freed, which the caller already knows about from whatever drove
+    /// the change. That covers the two other paths that put a [`Buffer`] in or out of a slab, so
+    /// neither needs reporting either: a large object's slab has its buffer created lazily by the
+    /// first [`Self::copy_element_data`] and never replaced after that, and a slab is only torn down
+    /// once it holds nothing at all. In both cases there is no live allocation whose buffer moved.
+    ///
+    /// Note the contract: this accumulates until [`Self::clear_changed_keys`], so it is only correct
+    /// for a consumer that runs after the allocator has been updated for the frame and before the
+    /// list is cleared. A consumer that skips a turn misses the invalidation entirely and goes on
+    /// using a dead [`Buffer`].
+    pub fn changed_keys(&self) -> &[I::Key] {
+        &self.changed_keys
+    }
+
+    /// Drops the accumulated [`Self::changed_keys`], starting a new round of invalidations.
+    pub fn clear_changed_keys(&mut self) {
+        self.changed_keys.clear();
     }
 
     /// Creates an [`AllocationStage`], enabling batched allocation of objects
@@ -815,6 +852,17 @@ where
         };
 
         let old_buffer = slab.buffer.take();
+
+        // If the slab already had a buffer, every key resident in it is about to be
+        // pointing at a different one, so anything caching buffer identities has to
+        // rebuild those entries. Pending allocations are deliberately left out: they
+        // aren't visible through `slab_allocation_slice` yet, so nothing can have
+        // cached an identity for them. This method also gets called to give a brand
+        // new slab its first buffer, which has neither problem.
+        if old_buffer.is_some() {
+            self.changed_keys
+                .extend(slab.resident_allocations.keys().cloned());
+        }
 
         let buffer_usages = BufferUsages::COPY_SRC
             | BufferUsages::COPY_DST

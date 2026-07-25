@@ -25,7 +25,6 @@ use bevy_shader::load_shader_library;
 use extract::extract_solari_lighting;
 use node::{init_solari_lighting_pipelines, solari_lighting};
 use prepare::prepare_solari_lighting_resources;
-use tracing::warn;
 
 /// Raytraced direct and indirect lighting.
 ///
@@ -51,14 +50,10 @@ impl Plugin for SolariLightingPlugin {
 
     fn finish(&self, app: &mut App) {
         let render_app = app.sub_app_mut(RenderApp);
-
-        let render_device = render_app.world().resource::<RenderDevice>();
-        let features = render_device.features();
-        if !features.contains(SolariPlugins::required_wgpu_features()) {
-            warn!(
-                "SolariLightingPlugin not loaded. GPU lacks support for required features: {:?}.",
-                SolariPlugins::required_wgpu_features().difference(features)
-            );
+        if !SolariPlugins::supported(
+            render_app.world().resource::<RenderDevice>(),
+            "SolariLightingPlugin",
+        ) {
             return;
         }
 

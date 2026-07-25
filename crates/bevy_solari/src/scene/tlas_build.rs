@@ -338,12 +338,20 @@ fn build_tlas_impl<A: hal::Api>(
             // Write-after-read against earlier frames' traces. This parity's TLAS stays bound as
             // the previous frame's for a second frame after it stops being current, so a
             // submission that is still tracing it can overlap this build — having two parities
-            // widens that window rather than closing it. A barrier's first scope covers everything
-            // already submitted to the queue, which is what makes this enough.
+            // widens that window rather than closing it.
+            //
+            // This also makes a BLAS compaction copy visible to this build. `Queue::compact_blas`
+            // records that copy into wgpu's pending writes, which are submitted before these
+            // command buffers, but wgpu can't know that the raw build consumes the COPY_DST as a
+            // BUILD_INPUT and therefore can't insert this dependency itself. A barrier's first
+            // scope covers everything already submitted to the queue, which is what makes the
+            // combined transition enough for both hazards.
             encoder.place_acceleration_structure_barrier(hal::AccelerationStructureBarrier {
                 usage: hal::StateTransition {
-                    from: hal::AccelerationStructureUses::SHADER_INPUT,
-                    to: hal::AccelerationStructureUses::BUILD_OUTPUT,
+                    from: hal::AccelerationStructureUses::SHADER_INPUT
+                        | hal::AccelerationStructureUses::COPY_DST,
+                    to: hal::AccelerationStructureUses::BUILD_OUTPUT
+                        | hal::AccelerationStructureUses::BUILD_INPUT,
                 },
             });
 

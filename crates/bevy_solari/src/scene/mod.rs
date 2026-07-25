@@ -1,7 +1,7 @@
 mod binder;
 mod blas;
 mod extract;
-mod tlas_build;
+pub(crate) mod tlas_build;
 mod types;
 
 use bevy_asset::embedded_asset;
@@ -32,7 +32,6 @@ use extract::{
     extract_raytracing_scene_structural, extract_raytracing_scene_transforms,
     StandardMaterialAssets,
 };
-use tracing::warn;
 
 /// Creates acceleration structures and binding arrays of resources for raytracing.
 pub struct RaytracingScenePlugin;
@@ -47,28 +46,12 @@ impl Plugin for RaytracingScenePlugin {
 
     fn finish(&self, app: &mut App) {
         let render_app = app.sub_app_mut(RenderApp);
-        let render_device = render_app.world().resource::<RenderDevice>();
-        let features = render_device.features();
-        if !features.contains(SolariPlugins::required_wgpu_features()) {
-            warn!(
-                "RaytracingScenePlugin not loaded. GPU lacks support for required features: {:?}.",
-                SolariPlugins::required_wgpu_features().difference(features)
-            );
+        if !SolariPlugins::supported(
+            render_app.world().resource::<RenderDevice>(),
+            "RaytracingScenePlugin",
+        ) {
             return;
         }
-
-        // The TLAS is built through `wgpu_hal`, which means knowing the backend's instance
-        // descriptor layout. There is no portable fallback: `wgpu-core`'s own build costs more CPU
-        // per frame than everything else Solari does put together at scene scale.
-        if !tlas_build::supported(render_device) {
-            warn!(
-                "RaytracingScenePlugin not loaded. No TLAS build path for this backend; Solari \
-                 supports Vulkan and DX12."
-            );
-            return;
-        }
-
-        let render_app = app.sub_app_mut(RenderApp);
 
         render_app
             .world_mut()

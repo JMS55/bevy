@@ -106,6 +106,68 @@ struct GpuLightSource {
     id: u32,
 }
 
+/// Stable identity for one source in the dense light array.
+///
+/// An entity can contribute both kinds at once, so the entity alone is not enough to identify a
+/// source.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum LightSourceId {
+    EmissiveMesh(Entity),
+    Directional(Entity),
+}
+
+#[derive(Default)]
+struct DenseLightIndex {
+    indices: HashMap<LightSourceId, u32>,
+    ids: Vec<LightSourceId>,
+    changed: HashSet<LightSourceId>,
+}
+
+impl DenseLightIndex {
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    fn get(&self, id: &LightSourceId) -> Option<u32> {
+        self.indices.get(id).copied()
+    }
+
+    fn insert(&mut self, id: LightSourceId) -> u32 {
+        if let Some(&index) = self.indices.get(&id) {
+            return index;
+        }
+
+        let index = self.ids.len() as u32;
+        self.ids.push(id);
+        self.indices.insert(id, index);
+        self.changed.insert(id);
+        index
+    }
+
+    /// Removes `id` and reports both its old index and the old final index.
+    ///
+    /// When these differ, the caller must move the final GPU light source into the hole.
+    fn remove(&mut self, id: LightSourceId) -> Option<(u32, u32)> {
+        let index = self.indices.remove(&id)?;
+        self.changed.insert(id);
+
+        let last = self.ids.len() as u32 - 1;
+        self.ids.swap_remove(index as usize);
+
+        if index != last {
+            let moved = self.ids[index as usize];
+            self.indices.insert(moved, index);
+            self.changed.insert(moved);
+        }
+
+        Some((index, last))
+    }
+}
+
 impl GpuLightSource {
     fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32) -> GpuLightSource {
         if triangle_count > u16::MAX as u32 {
@@ -670,10 +732,8 @@ pub struct RaytracingSceneBindings {
 
     // Light bookkeeping. The shaders sample `light_sources` using `arrayLength`, so it has to
     // stay dense; removals swap the last light down into the hole.
-    light_index: EntityHashMap<u32>,
-    light_entities: Vec<Entity>,
-    previous_light_index: EntityHashMap<u32>,
-    light_index_changed: EntityHashSet,
+    light_index: DenseLightIndex,
+    previous_light_index: HashMap<LightSourceId, u32>,
     /// Translation entries written last frame, so they can be reset to identity.
     nonidentity_translations: Vec<u32>,
     directional_light_slots: SlotAllocator<Entity>,
@@ -818,10 +878,8 @@ impl FromWorld for RaytracingSceneBindings {
             mesh_instances: HashMap::default(),
             material_instances: HashMap::default(),
 
-            light_index: EntityHashMap::default(),
-            light_entities: Vec::new(),
-            previous_light_index: EntityHashMap::default(),
-            light_index_changed: EntityHashSet::default(),
+            light_index: DenseLightIndex::default(),
+            previous_light_index: HashMap::default(),
             nonidentity_translations: Vec::new(),
             directional_light_slots: SlotAllocator::new(),
 
@@ -1158,7 +1216,10 @@ impl RaytracingSceneBindings {
                 slot,
                 GpuDirectionalLight::new(directional_light),
             );
-            self.add_light(entity, GpuLightSource::new_directional_light(slot));
+            self.add_light(
+                LightSourceId::Directional(entity),
+                GpuLightSource::new_directional_light(slot),
+            );
         }
 
         let stale: Vec<Entity> = self
@@ -1169,45 +1230,28 @@ impl RaytracingSceneBindings {
             .collect();
         for entity in stale {
             self.directional_light_slots.remove(&entity);
-            self.remove_light(entity);
+            self.remove_light(LightSourceId::Directional(entity));
         }
 
         self.write_light_id_translations();
 
-        if self.light_entities.len() > u16::MAX as usize {
+        if self.light_index.len() > u16::MAX as usize {
             panic!("Too many light sources in the scene, maximum is 65535.");
         }
     }
 
-    fn add_light(&mut self, entity: Entity, source: GpuLightSource) {
-        let index = match self.light_index.get(&entity) {
-            Some(&index) => index,
-            None => {
-                let index = self.light_entities.len() as u32;
-                self.light_entities.push(entity);
-                self.light_index.insert(entity, index);
-                self.light_index_changed.insert(entity);
-                index
-            }
-        };
+    fn add_light(&mut self, id: LightSourceId, source: GpuLightSource) {
+        let index = self.light_index.insert(id);
         set_at(&mut self.light_sources, index, source);
     }
 
     /// Removes a light, moving the last one down into the hole to keep the array dense.
-    fn remove_light(&mut self, entity: Entity) {
-        let Some(index) = self.light_index.remove(&entity) else {
+    fn remove_light(&mut self, id: LightSourceId) {
+        let Some((index, last)) = self.light_index.remove(id) else {
             return;
         };
-        self.light_index_changed.insert(entity);
-
-        let last = self.light_entities.len() as u32 - 1;
-        self.light_entities.swap_remove(index as usize);
 
         if index != last {
-            let moved = self.light_entities[index as usize];
-            self.light_index.insert(moved, index);
-            self.light_index_changed.insert(moved);
-
             let source = self.light_sources.get(last);
             set_at(&mut self.light_sources, index, source);
         }
@@ -1227,17 +1271,16 @@ impl RaytracingSceneBindings {
     /// Records where each light that moved or disappeared this frame ended up, so that reservoirs
     /// still carrying last frame's light ids can be remapped.
     fn write_light_id_translations(&mut self) {
-        let changed: Vec<Entity> = self.light_index_changed.drain().collect();
+        let changed: Vec<LightSourceId> = self.light_index.changed.drain().collect();
 
-        for entity in &changed {
+        for id in &changed {
             // Lights that first appeared this frame have no previous id to translate from.
-            let Some(&previous) = self.previous_light_index.get(entity) else {
+            let Some(&previous) = self.previous_light_index.get(id) else {
                 continue;
             };
             let current = self
                 .light_index
-                .get(entity)
-                .copied()
+                .get(id)
                 .unwrap_or(LIGHT_NOT_PRESENT_THIS_FRAME);
 
             if current != previous {
@@ -1250,15 +1293,15 @@ impl RaytracingSceneBindings {
             }
         }
 
-        for entity in changed {
-            match self.light_index.get(&entity) {
-                Some(&index) => self.previous_light_index.insert(entity, index),
-                None => self.previous_light_index.remove(&entity),
+        for id in changed {
+            match self.light_index.get(&id) {
+                Some(index) => self.previous_light_index.insert(id, index),
+                None => self.previous_light_index.remove(&id),
             };
         }
 
         // Every index the shader might read has to be backed by a real element.
-        let light_count = self.light_entities.len() as u32;
+        let light_count = self.light_index.len() as u32;
         let translations = &mut self.previous_frame_light_id_translations;
         if translations.len() < light_count {
             let start = translations.len();
@@ -1512,11 +1555,11 @@ impl RaytracingSceneBindings {
 
         if self.emissive_materials.contains(&instance.material) {
             self.add_light(
-                entity,
+                LightSourceId::EmissiveMesh(entity),
                 GpuLightSource::new_emissive_mesh_light(slot, triangle_count),
             );
         } else {
-            self.remove_light(entity);
+            self.remove_light(LightSourceId::EmissiveMesh(entity));
         }
 
         true
@@ -1604,7 +1647,7 @@ impl RaytracingSceneBindings {
     /// Drops an instance out of the TLAS without giving up its slot.
     fn deactivate_instance(&mut self, entity: Entity, instance: &mut Instance) {
         self.clear_live(instance.slot);
-        self.remove_light(entity);
+        self.remove_light(LightSourceId::EmissiveMesh(entity));
         // An instance that isn't drawing shouldn't pin a binding array slot for a slab it may no
         // longer even be allocated in. A later successful refresh takes fresh references.
         self.release_buffers(instance.buffers.take());
@@ -1627,7 +1670,7 @@ impl RaytracingSceneBindings {
         self.clear_live(instance.slot);
         self.instance_slots.release(instance.slot);
         self.pending_refresh.remove(&entity);
-        self.remove_light(entity);
+        self.remove_light(LightSourceId::EmissiveMesh(entity));
         self.release_buffers(instance.buffers);
 
         unlink(&mut self.mesh_instances, &instance.mesh, entity);
@@ -1884,7 +1927,7 @@ impl RaytracingSceneBindings {
 
         // `light_sources` is bound with an explicit size, because the shaders derive the light
         // count from `arrayLength` and the buffer is allocated with slack.
-        let light_count = self.light_entities.len() as u32;
+        let light_count = self.light_index.len() as u32;
         if self.last_light_count != light_count {
             self.last_light_count = light_count;
             invalid = true;
@@ -1940,7 +1983,7 @@ impl RaytracingSceneBindings {
             buffer: self.light_sources.buffer().unwrap(),
             offset: 0,
             size: BufferSize::new(
-                self.light_entities.len() as u64 * size_of::<GpuLightSource>() as u64,
+                self.light_index.len() as u64 * size_of::<GpuLightSource>() as u64,
             ),
         };
 
@@ -2307,7 +2350,7 @@ pub fn prepare_raytracing_scene_bind_group(
     bindings.bind_group = None;
 
     // Solari has nothing to trace against without both geometry and a light to sample.
-    if bindings.live_instance_count == 0 || bindings.light_entities.is_empty() {
+    if bindings.live_instance_count == 0 || bindings.light_index.is_empty() {
         return;
     }
 
@@ -2340,4 +2383,31 @@ pub fn prepare_raytracing_scene_bind_group(
         dfg_view,
         dfg_sampler,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DenseLightIndex, LightSourceId};
+    use bevy_ecs::entity::Entity;
+
+    #[test]
+    fn light_index_keeps_sources_on_the_same_entity_independent() {
+        let entity = Entity::PLACEHOLDER;
+        let emissive = LightSourceId::EmissiveMesh(entity);
+        let directional = LightSourceId::Directional(entity);
+        let mut lights = DenseLightIndex::default();
+
+        assert_eq!(lights.insert(emissive), 0);
+        assert_eq!(lights.insert(directional), 1);
+        assert_eq!(lights.insert(emissive), 0);
+        assert_eq!(lights.len(), 2);
+
+        assert_eq!(lights.remove(emissive), Some((0, 1)));
+        assert_eq!(lights.get(&emissive), None);
+        assert_eq!(lights.get(&directional), Some(0));
+        assert_eq!(lights.len(), 1);
+
+        assert_eq!(lights.remove(directional), Some((0, 0)));
+        assert!(lights.is_empty());
+    }
 }

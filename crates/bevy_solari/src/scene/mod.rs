@@ -1,7 +1,6 @@
 mod binder;
 mod blas;
 mod extract;
-pub(crate) mod tlas_build;
 mod types;
 
 use bevy_asset::embedded_asset;
@@ -41,7 +40,7 @@ impl Plugin for RaytracingScenePlugin {
         load_shader_library!(app, "brdf.wgsl");
         load_shader_library!(app, "raytracing_scene_bindings.wgsl");
         load_shader_library!(app, "sampling.wgsl");
-        embedded_asset!(app, "tlas_instances.wgsl");
+        embedded_asset!(app, "binder/tlas_instances.wgsl");
     }
 
     fn finish(&self, app: &mut App) {

@@ -1,4 +1,4 @@
-//! Building the TLAS through `wgpu_hal` directly, bypassing `wgpu-core`.
+//! Building the binder's TLAS through `wgpu_hal` directly, bypassing `wgpu-core`.
 //!
 //! `wgpu-core` re-derives an entire TLAS build from its `Vec<Option<TlasInstance>>` on every call:
 //! per instance it resolves and clones an `Arc<Blas>` three times, heap-allocates a `Vec<u8>` for

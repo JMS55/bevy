@@ -101,10 +101,10 @@ impl BlasManager {
 
     /// Every acceleration structure currently held, so a caller can retain them.
     ///
-    /// A TLAS built through [`crate::scene::tlas_build`] is invisible to `wgpu-core`, which therefore
-    /// stops tracking which BLASes it points into. Since a built TLAS holds pointers to that
-    /// memory, whoever builds one has to keep these alive for as long as it might still be traced
-    /// against.
+    /// A TLAS built through the binder's raw build path is invisible to `wgpu-core`, which
+    /// therefore stops tracking which BLASes it points into. Since a built TLAS holds pointers to
+    /// that memory, whoever builds one has to keep these alive for as long as it might still be
+    /// traced against.
     pub fn handles(&self) -> impl Iterator<Item = &Blas> {
         self.blas.values()
     }

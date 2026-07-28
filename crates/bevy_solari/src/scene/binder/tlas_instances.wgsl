@@ -3,7 +3,7 @@
 //
 // The layout is `VkAccelerationStructureInstanceKHR`, which is byte-identical to DXR's
 // `D3D12_RAYTRACING_INSTANCE_DESC`. Those are the only backends Solari builds a TLAS on; see
-// `scene::tlas_build`.
+// `scene::binder::tlas_build`.
 //
 // `transforms` holds each instance as three `vec4<f32>` rows of a row-major 3x4 matrix, which is
 // exactly what both APIs want.

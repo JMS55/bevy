@@ -19,6 +19,7 @@ use bevy_render::{
 use extract::extract_pathtracer;
 use node::{init_pathtracer_pipelines, pathtracer};
 use prepare::prepare_pathtracer_accumulation_texture;
+use tracing::warn;
 
 /// Non-realtime pathtracing.
 ///
@@ -33,10 +34,14 @@ impl Plugin for PathtracingPlugin {
 
     fn finish(&self, app: &mut App) {
         let render_app = app.sub_app_mut(RenderApp);
-        if !SolariPlugins::supported(
-            render_app.world().resource::<RenderDevice>(),
-            "PathtracingPlugin",
-        ) {
+
+        let render_device = render_app.world().resource::<RenderDevice>();
+        let features = render_device.features();
+        if !features.contains(SolariPlugins::required_wgpu_features()) {
+            warn!(
+                "PathtracingPlugin not loaded. GPU lacks support for required features: {:?}.",
+                SolariPlugins::required_wgpu_features().difference(features)
+            );
             return;
         }
 

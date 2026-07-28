@@ -43,6 +43,15 @@ pub struct GpuInstanceGeometryIds {
 #[repr(C)]
 pub struct GpuTransform([Vec4; 3]);
 
+impl GpuTransform {
+    /// The three rows as the flat row-major 3x4 a [`TlasInstance`] wants.
+    ///
+    /// [`TlasInstance`]: bevy_render::render_resource::TlasInstance
+    fn rows(self) -> [f32; 12] {
+        bytemuck::cast(self)
+    }
+}
+
 /// The device address of a slot's acceleration structure. Zero marks an inactive slot.
 #[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable)]
 #[repr(transparent)]
@@ -106,6 +115,19 @@ impl InstanceState {
             mesh_instances: HashMap::default(),
             material_instances: HashMap::default(),
         }
+    }
+
+    /// Every drawable instance's slot, mesh and world-from-local transform.
+    ///
+    /// Only the `wgpu-core` TLAS build path needs this, to fill in instance descriptors the raw
+    /// path would have packed on the GPU. A slot whose instance isn't currently drawable has a
+    /// null acceleration structure reference and is left out.
+    pub fn drawable(&self) -> impl Iterator<Item = (u32, AssetId<Mesh>, [f32; 12])> + '_ {
+        self.records.values().filter_map(|instance| {
+            let slot = instance.slot;
+            (self.blas_refs.get(slot) != GpuBlasRef::NONE)
+                .then(|| (slot, instance.mesh, self.transforms.get(slot).rows()))
+        })
     }
 
     /// Queues every instance using `material_id` to be re-resolved.

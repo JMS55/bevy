@@ -101,7 +101,7 @@ impl FromWorld for RaytracingSceneBindings {
                 buffers::new_storage_buffer("solari_directional_lights"),
                 buffers::new_storage_buffer("solari_previous_frame_light_id_translations"),
             ),
-            tlas: TlasState::new(),
+            tlas: TlasState::new(render_device),
 
             bind_groups: BindGroupCacheState::new(dummy_buffer),
         }
@@ -218,10 +218,12 @@ pub fn prepare_raytracing_scene_resources(
     bindings.write_scene_buffers(&render_device, &render_queue);
 
     // The raw path can't build until the pack shader exists to fill the descriptors, and the
-    // pipeline cache takes a few frames to get there from a cold start.
-    let build_ready = instance_pack_pipeline
-        .id
-        .and_then(|id| pipeline_cache.get_compute_pipeline(id))
-        .is_some();
+    // pipeline cache takes a few frames to get there from a cold start. The `wgpu-core` path fills
+    // them on the CPU and is ready from the first frame.
+    let build_ready = !bindings.tlas.uses_raw_build()
+        || instance_pack_pipeline
+            .id
+            .and_then(|id| pipeline_cache.get_compute_pipeline(id))
+            .is_some();
     bindings.prepare_tlas_update(&render_device, &blas_manager, build_ready);
 }

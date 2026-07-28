@@ -16,7 +16,7 @@ use bevy_render::{
         BindGroupLayoutDescriptor, BindGroupLayoutEntries, Blas, Buffer, BufferDescriptor,
         BufferId, BufferUsages, CachedComputePipelineId, CommandEncoderDescriptor,
         ComputePassDescriptor, ComputePipelineDescriptor, CreateTlasDescriptor, PipelineCache,
-        ShaderStages, Tlas,
+        ShaderStages, Tlas, TlasInstance,
     },
     renderer::{RenderContext, RenderDevice, RenderQueue},
 };
@@ -96,6 +96,8 @@ fn tlas_capacity_for(instance_count: u32) -> u32 {
 /// These fields form one invariant: a parity is only bindable after it has been built, and every
 /// BLAS it points at stays retained until submitted work using that parity has completed.
 pub struct TlasState {
+    /// Whether builds go through [`tlas_build`]'s raw path rather than `wgpu-core`.
+    raw_build: bool,
     /// Alternating current/previous acceleration structures.
     pub structures: [Option<Tlas>; 2],
     capacity: [u32; 2],
@@ -118,8 +120,9 @@ pub struct TlasState {
 }
 
 impl TlasState {
-    pub fn new() -> Self {
+    pub fn new(render_device: &RenderDevice) -> Self {
         Self {
+            raw_build: tlas_build::supported(render_device),
             structures: [None, None],
             capacity: [0, 0],
             built: [false, false],
@@ -136,6 +139,11 @@ impl TlasState {
             instance_pack_bind_group: None,
             instance_pack_buffer_ids: None,
         }
+    }
+
+    /// Whether builds go through [`tlas_build`]'s raw path rather than `wgpu-core`.
+    pub fn uses_raw_build(&self) -> bool {
+        self.raw_build
     }
 
     /// Moves to the next TLAS parity and brings it up to date with this frame's changes.
@@ -167,22 +175,26 @@ impl TlasState {
             instances.slots.len()
         );
 
-        // Secure every build input before committing the parity flip.
+        // Secure every build input before committing the parity flip. Neither buffer exists on the
+        // `wgpu-core` path, which builds from instances written into the TLAS itself.
         let instance_count = instances.slots.len();
-        self.reserve_instance_descriptors(instance_count, render_device);
-        self.reserve_tlas_scratch(render_device);
-        if self.instance_descriptors.is_none() || self.scratch.is_none() {
-            return;
+        if self.raw_build {
+            self.reserve_instance_descriptors(instance_count, render_device);
+            self.reserve_tlas_scratch(render_device);
+            if self.instance_descriptors.is_none() || self.scratch.is_none() {
+                return;
+            }
         }
 
         self.frame_parity ^= 1;
         let parity = self.frame_parity;
         self.reserve_tlas(parity, instance_count, render_device, bind_groups);
 
+        // `wgpu-core` collects a built TLAS's dependencies itself, so this is the raw path's to do.
         // Refresh only when the BLAS set changes; cloning every handle every frame would add one
         // atomic refcount pair per distinct mesh.
         let generation = blas_manager.generation();
-        if self.blas_generation[parity] != generation {
+        if self.raw_build && self.blas_generation[parity] != generation {
             let stale = core::mem::take(&mut self.blas_handles[parity]);
             self.pending_retire.extend(stale);
             self.blas_handles[parity].extend(blas_manager.handles().cloned());
@@ -304,6 +316,9 @@ pub fn pack_raytracing_tlas_instances(
     let bindings = &mut *bindings;
     bindings.tlas.instances_packed = false;
 
+    if !bindings.tlas.raw_build {
+        return;
+    }
     if bindings.tlas.structures[bindings.tlas.frame_parity].is_none() {
         return;
     }
@@ -360,12 +375,31 @@ pub fn pack_raytracing_tlas_instances(
 /// Records this frame's TLAS build into the render graph's command encoder.
 pub fn build_raytracing_tlas(
     mut bindings: ResMut<RaytracingSceneBindings>,
+    blas_manager: Res<BlasManager>,
     mut render_context: RenderContext,
 ) {
     let bindings = &mut *bindings;
     let parity = bindings.tlas.frame_parity;
+
+    let built = if bindings.tlas.raw_build {
+        build_tlas_raw(bindings, &mut render_context)
+    } else {
+        build_tlas_through_wgpu_core(bindings, &blas_manager, &mut render_context)
+    };
+
+    if built {
+        bindings.tlas.built[parity] = true;
+    }
+}
+
+/// Builds from the descriptors the pack pass wrote, straight through `wgpu_hal`.
+fn build_tlas_raw(
+    bindings: &mut RaytracingSceneBindings,
+    render_context: &mut RenderContext,
+) -> bool {
+    let parity = bindings.tlas.frame_parity;
     let Some(tlas) = bindings.tlas.structures[parity].as_mut() else {
-        return;
+        return false;
     };
 
     let (true, Some(instances), Some(scratch)) = (
@@ -379,7 +413,7 @@ pub fn build_raytracing_tlas(
             bindings.tlas.instance_descriptors.is_some(),
             bindings.tlas.scratch.is_some(),
         ));
-        return;
+        return false;
     };
 
     let render_device = render_context.render_device().clone();
@@ -400,14 +434,61 @@ pub fn build_raytracing_tlas(
     render_context.add_command_buffer(command_encoder.finish());
 
     time_span.end(render_context.command_encoder());
-    if built {
-        bindings.tlas.built[parity] = true;
-    } else {
+    if !built {
         once!(warn!(
             "TLAS build recorded nothing; the backend probe and the build disagree about hal \
              access."
         ));
     }
+    built
+}
+
+/// Builds from instance descriptors filled in on the CPU, through `wgpu-core`.
+///
+/// The portable path, and the only one Metal can use. It costs a slot's worth of work per frame
+/// for every instance rather than only the ones that moved, and `wgpu-core` then re-derives the
+/// whole build from what it is handed here, which is what [`tlas_build`] exists to avoid.
+fn build_tlas_through_wgpu_core(
+    bindings: &mut RaytracingSceneBindings,
+    blas_manager: &BlasManager,
+    render_context: &mut RenderContext,
+) -> bool {
+    // An empty scene leaves the parity unflipped, so whatever is here belongs to an earlier frame
+    // and is still being traced as the previous one.
+    if bindings.instances.slots.len() == 0 {
+        return false;
+    }
+    let parity = bindings.tlas.frame_parity;
+    let Some(tlas) = bindings.tlas.structures[parity].as_mut() else {
+        return false;
+    };
+
+    {
+        let _span = info_span!("fill_tlas_instances").entered();
+
+        // The TLAS outlives the frame, so a slot freed or deactivated since its last build still
+        // holds that build's instance and has to be cleared before this frame's are written.
+        let capacity = tlas.get().len();
+        tlas[0..capacity].iter_mut().for_each(|entry| *entry = None);
+
+        for (slot, mesh, transform) in bindings.instances.drawable() {
+            // A mesh can lose its acceleration structure after the instance resolved against it,
+            // which leaves the slot with nothing to point at for a frame.
+            let Some(blas) = blas_manager.get(&mesh) else {
+                continue;
+            };
+            tlas[slot as usize] = Some(TlasInstance::new(blas, transform, slot, 0xFF));
+        }
+    }
+
+    let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let command_encoder = render_context.command_encoder();
+    let time_span = diagnostics.time_span(command_encoder, "tlas_build");
+    command_encoder.build_acceleration_structures(&[], [&*tlas]);
+    time_span.end(command_encoder);
+
+    true
 }
 
 /// Releases acceleration structures once all submitted work that could reach them is complete.

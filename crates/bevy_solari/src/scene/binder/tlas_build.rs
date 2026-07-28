@@ -13,7 +13,8 @@
 //!
 //! Vulkan and DX12 only. Their instance descriptors — `VkAccelerationStructureInstanceKHR` and
 //! `D3D12_RAYTRACING_INSTANCE_DESC` — are byte-identical, so one shader and one code path serve
-//! both.
+//! both. Everything else falls back to `wgpu-core`'s build, which is slower but portable; see
+//! [`tlas::build_raytracing_tlas`](super::tlas::build_raytracing_tlas).
 //!
 //! Metal cannot work this way. `wgpu-core` makes the acceleration structures a TLAS points at
 //! resident by collecting its dependency list into an `MTLResidencySet` and attaching that to the
@@ -116,7 +117,7 @@ macro_rules! first_supported_backend {
 
 /// Whether this device's backend has a raw TLAS build path.
 ///
-/// `RaytracingScenePlugin` declines to load when this is false; there is no portable fallback.
+/// [`TlasState`](super::tlas::TlasState) builds through `wgpu-core` instead when this is false.
 pub fn supported(render_device: &RenderDevice) -> bool {
     let device = render_device.wgpu_device();
 
@@ -236,7 +237,7 @@ const TLAS_BUILD_FLAGS: wgpu::AccelerationStructureFlags =
 /// Records a TLAS build reading instance descriptors straight out of `instances`.
 ///
 /// Returns `false` on a backend without a raw path, having recorded nothing. That shouldn't
-/// happen: `RaytracingScenePlugin` declines to load on such a backend.
+/// happen: such a backend goes through `wgpu-core` instead and never reaches this.
 ///
 /// # Preconditions
 ///

@@ -21,6 +21,7 @@ use bevy_render::{
     renderer::{RenderDevice, RenderGraph, RenderGraphSystems},
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
+use tracing::warn;
 use binder::{
     build_raytracing_tlas, pack_raytracing_tlas_instances, prepare_raytracing_scene_bind_group,
     prepare_raytracing_scene_resources, retire_raytracing_resources, TlasInstancePackPipeline,
@@ -45,10 +46,14 @@ impl Plugin for RaytracingScenePlugin {
 
     fn finish(&self, app: &mut App) {
         let render_app = app.sub_app_mut(RenderApp);
-        if !SolariPlugins::supported(
-            render_app.world().resource::<RenderDevice>(),
-            "RaytracingScenePlugin",
-        ) {
+
+        let render_device = render_app.world().resource::<RenderDevice>();
+        let features = render_device.features();
+        if !features.contains(SolariPlugins::required_wgpu_features()) {
+            warn!(
+                "RaytracingScenePlugin not loaded. GPU lacks support for required features: {:?}.",
+                SolariPlugins::required_wgpu_features().difference(features)
+            );
             return;
         }
 

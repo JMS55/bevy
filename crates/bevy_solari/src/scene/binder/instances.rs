@@ -189,7 +189,7 @@ impl InstanceState {
         let mut refresh = core::mem::take(&mut self.pending_refresh);
         refresh.extend(changed_instances.iter());
 
-        let moved_meshes = mesh_allocator.meshes_with_changed_buffers();
+        let moved_meshes = mesh_allocator.meshes_displaced_by_slab_growth();
         for mesh_id in blas_manager.changed().iter().copied().chain(moved_meshes) {
             if let Some(mesh_instances) = self.mesh_instances.get(&mesh_id) {
                 refresh.extend(mesh_instances.iter().copied());

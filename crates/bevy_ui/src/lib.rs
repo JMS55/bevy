@@ -154,7 +154,7 @@ impl Plugin for UiPlugin {
                     UiSystems::Layout,
                     UiSystems::PostLayout,
                 )
-                    .chain(),
+                    .chain_weak(),
             )
             .configure_sets(
                 PostUpdate,
@@ -239,7 +239,6 @@ fn build_text_interop(app: &mut App) {
         PostUpdate,
         (
             widget::measure_text_system
-                .chain()
                 .after(detect_text_needs_rerender)
                 .after(bevy_text::load_font_assets_into_font_collection)
                 .in_set(UiSystems::Content)

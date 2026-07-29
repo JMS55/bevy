@@ -48,7 +48,6 @@ impl Plugin for PathtracingPlugin {
         render_app
             .add_systems(
                 RenderStartup,
-                // Reads `RaytracingSceneBindings`, which is created at render startup too.
                 init_pathtracer_pipelines.after(init_gpu_resource::<RaytracingSceneBindings>),
             )
             .add_systems(ExtractSchedule, extract_pathtracer)

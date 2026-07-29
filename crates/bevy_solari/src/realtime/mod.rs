@@ -65,7 +65,6 @@ impl Plugin for SolariLightingPlugin {
         render_app
             .add_systems(
                 RenderStartup,
-                // Reads `RaytracingSceneBindings`, which is created at render startup too.
                 init_solari_lighting_pipelines.after(init_gpu_resource::<RaytracingSceneBindings>),
             )
             .add_systems(ExtractSchedule, extract_solari_lighting)

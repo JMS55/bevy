@@ -21,7 +21,6 @@ use bevy_render::{
     renderer::{RenderDevice, RenderGraph, RenderGraphSystems},
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
-use tracing::warn;
 use binder::{
     build_raytracing_tlas, pack_raytracing_tlas_instances, prepare_raytracing_scene_bind_group,
     prepare_raytracing_scene_resources, retire_raytracing_resources, TlasInstancePackPipeline,
@@ -32,6 +31,7 @@ use extract::{
     extract_raytracing_scene_structural, extract_raytracing_scene_transforms,
     StandardMaterialAssets,
 };
+use tracing::warn;
 
 /// Creates acceleration structures and binding arrays of resources for raytracing.
 pub struct RaytracingScenePlugin;
@@ -92,15 +92,11 @@ impl Plugin for RaytracingScenePlugin {
             )
             .add_systems(
                 RenderGraph,
-                // The TLAS has to be built before any pass traces against it, and its instance
-                // descriptors packed before that — which in turn needs this frame's transforms and
-                // acceleration structure addresses to have reached the GPU.
                 (
                     (pack_raytracing_tlas_instances, build_raytracing_tlas)
                         .chain()
                         .after(update_sparse_buffers)
                         .in_set(RenderGraphSystems::Begin),
-                    // After `Submit`, so the work it waits on includes this frame's.
                     retire_raytracing_resources.in_set(RenderGraphSystems::Finish),
                 ),
             );

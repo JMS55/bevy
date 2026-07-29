@@ -22,14 +22,26 @@ use bevy_render::{
 /// Lower this number to distribute the work across more frames.
 const MAX_COMPACTION_VERTICES_PER_FRAME: u32 = 400_000;
 
+/// TLAS builds a retired [`Blas`] waits out before it can be dropped.
+///
+/// Solari keeps two TLASes and traces the frame-old one as the previous frame, so a retired
+/// structure stays pointed at until both have been rebuilt without it. A build only happens on a
+/// frame where the binder flipped parity — an empty scene or an unready pack pipeline stops the
+/// build as well as the flip — so builds strictly alternate parities and two of them is exactly
+/// "both TLASes have been rebuilt", however many frames that takes.
+const TLAS_BUILDS_BEFORE_DELETION: usize = 2;
+
 #[derive(Resource)]
 pub struct BlasManager {
     blas: HashMap<AssetId<Mesh>, Blas>,
     compaction_queue: VecDeque<(AssetId<Mesh>, u32, bool)>,
     changed: Vec<AssetId<Mesh>>,
-    /// Bumped every time the set of acceleration structures held here changes. See
-    /// [`Self::generation`].
-    generation: u64,
+    /// Retired since the last TLAS build.
+    dying: Vec<Blas>,
+    /// One batch of retirements per TLAS build still to be waited out, oldest at the front.
+    deletion_queue: VecDeque<Vec<Blas>>,
+    /// Retirements that have waited out their builds and now only await the GPU.
+    deletable: Vec<Blas>,
 }
 
 impl FromWorld for BlasManager {
@@ -38,9 +50,9 @@ impl FromWorld for BlasManager {
             blas: HashMap::default(),
             compaction_queue: VecDeque::new(),
             changed: Vec::new(),
-            // Starts at one so that zero can mean "never seen a generation" to a consumer
-            // comparing against this.
-            generation: 1,
+            dying: Vec::new(),
+            deletion_queue: VecDeque::new(),
+            deletable: Vec::new(),
         }
     }
 }
@@ -50,44 +62,48 @@ impl BlasManager {
         self.blas.get(mesh)
     }
 
-    /// A counter bumped every time the set of acceleration structures held here changes — a
-    /// creation, a replacement or a removal.
-    ///
-    /// Anything mirroring the whole set rather than tracking individual meshes compares this
-    /// against the value its mirror was built from, so that it does nothing at all on the frames
-    /// nothing moved — which is nearly all of them. [`Self::handles`] is the mirror that matters:
-    /// rebuilding it costs an atomic refcount bump per distinct mesh, and another when the old copy
-    /// is dropped, to arrive at the list it already had.
-    ///
-    /// Never zero, so zero is usable as "no mirror built yet".
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     /// Records a mesh's newly built or newly compacted acceleration structure.
     ///
-    /// Goes through here rather than touching the map directly so that [`Self::changed`] and
-    /// [`Self::generation`] can't be left behind.
+    /// Goes through here rather than touching the map directly so that [`Self::changed`] and the
+    /// deletion queue can't be left behind. Compaction hands over a replacement for a mesh that
+    /// already had one, and the structure it displaces is exactly as live as a removed one.
     fn insert(&mut self, mesh: AssetId<Mesh>, blas: Blas) {
-        self.blas.insert(mesh, blas);
+        if let Some(displaced) = self.blas.insert(mesh, blas) {
+            self.dying.push(displaced);
+        }
         self.changed.push(mesh);
-        self.generation += 1;
     }
 
-    /// Drops a mesh's acceleration structure, if it had one. See [`Self::insert`].
+    /// Retires a mesh's acceleration structure, if it had one. See [`Self::insert`].
     ///
     /// Called for every mesh removed or modified this frame, most of which never had one — a mesh
-    /// that isn't raytracing compatible, or that no raytraced instance uses. The generation bump
-    /// is gated on something actually having been dropped, since bumping it for those would make
-    /// [`Self::generation`] report churn on frames where no acceleration structure moved, which is
-    /// exactly what it exists to rule out.
+    /// that isn't raytracing compatible, or that no raytraced instance uses.
     ///
-    /// [`Self::changed`] is still reported either way. It is a push onto a short list, and its
-    /// consumers are idempotent by contract.
+    /// [`Self::changed`] is reported either way. It is a push onto a short list, and its consumers
+    /// are idempotent by contract.
     fn remove(&mut self, mesh: AssetId<Mesh>) {
         self.changed.push(mesh);
-        if self.blas.remove(&mesh).is_some() {
-            self.generation += 1;
+        if let Some(dying) = self.blas.remove(&mesh) {
+            self.dying.push(dying);
+        }
+    }
+
+    /// Advances the deletion queue by one TLAS build, which the binder calls when it records one.
+    ///
+    /// A retired structure cannot be dropped when it leaves the map: a TLAS built earlier still
+    /// holds pointers into its memory, and stays that way until it is built again. So retirements
+    /// wait here for [`TLAS_BUILDS_BEFORE_DELETION`] builds rather than for a number of frames —
+    /// a scene that stops drawing and later resumes traces its previous-frame TLAS from before the
+    /// pause, and a frame count would already have dropped what that TLAS points at.
+    ///
+    /// Costs a push of an empty `Vec` on a frame where nothing was retired, and is otherwise
+    /// proportional to the number of meshes that actually changed — never to the size of the scene.
+    pub fn note_tlas_build(&mut self) {
+        self.deletion_queue
+            .push_back(core::mem::take(&mut self.dying));
+        if self.deletion_queue.len() > TLAS_BUILDS_BEFORE_DELETION {
+            let expired = self.deletion_queue.pop_front().unwrap_or_default();
+            self.deletable.extend(expired);
         }
     }
 
@@ -97,16 +113,6 @@ impl BlasManager {
     /// to load on anyway.
     pub fn address(&self, mesh: &AssetId<Mesh>) -> Option<u64> {
         self.blas.get(mesh)?.handle()
-    }
-
-    /// Every acceleration structure currently held, so a caller can retain them.
-    ///
-    /// A TLAS built through the binder's raw build path is invisible to `wgpu-core`, which
-    /// therefore stops tracking which BLASes it points into. Since a built TLAS holds pointers to
-    /// that memory, whoever builds one has to keep these alive for as long as it might still be
-    /// traced against.
-    pub fn handles(&self) -> impl Iterator<Item = &Blas> {
-        self.blas.values()
     }
 
     /// Meshes whose [`Blas`] was created, replaced, or removed this frame.
@@ -251,6 +257,23 @@ pub fn compact_raytracing_blas(
             .compaction_queue
             .push_back((mesh, vertex_count, true));
     }
+}
+
+/// Frees the acceleration structures that have waited out their TLAS builds.
+///
+/// Runs at the end of the render graph so that the fence it registers covers this frame's tracing
+/// as well: waiting out the builds establishes that nothing will point at these again, and the
+/// fence establishes that nothing still in flight is reading them.
+pub fn delete_raytracing_blas(
+    mut blas_manager: ResMut<BlasManager>,
+    render_queue: Res<RenderQueue>,
+) {
+    if blas_manager.deletable.is_empty() {
+        return;
+    }
+
+    let deletable = core::mem::take(&mut blas_manager.deletable);
+    render_queue.on_submitted_work_done(move || drop(deletable));
 }
 
 fn allocate_blas(

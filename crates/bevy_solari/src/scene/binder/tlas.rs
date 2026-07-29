@@ -13,12 +13,12 @@ use bevy_render::{
     render_resource::{
         binding_types::{storage_buffer_read_only_sized, storage_buffer_sized},
         AccelerationStructureFlags, AccelerationStructureUpdateMode, BindGroup, BindGroupEntries,
-        BindGroupLayoutDescriptor, BindGroupLayoutEntries, Blas, Buffer, BufferDescriptor,
-        BufferId, BufferUsages, CachedComputePipelineId, CommandEncoderDescriptor,
-        ComputePassDescriptor, ComputePipelineDescriptor, CreateTlasDescriptor, PipelineCache,
-        ShaderStages, Tlas, TlasInstance,
+        BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer, BufferDescriptor, BufferId,
+        BufferUsages, CachedComputePipelineId, CommandEncoderDescriptor, ComputePassDescriptor,
+        ComputePipelineDescriptor, CreateTlasDescriptor, PipelineCache, ShaderStages, Tlas,
+        TlasInstance,
     },
-    renderer::{RenderContext, RenderDevice, RenderQueue},
+    renderer::{RenderContext, RenderDevice},
 };
 use bevy_utils::{default, once};
 use tracing::{info_span, warn};
@@ -91,10 +91,11 @@ fn tlas_capacity_for(instance_count: u32) -> u32 {
     capacity
 }
 
-/// TLAS parity, capacity and GPU lifetime state.
+/// TLAS parity and capacity state.
 ///
-/// These fields form one invariant: a parity is only bindable after it has been built, and every
-/// BLAS it points at stays retained until submitted work using that parity has completed.
+/// A parity is only bindable after it has been built. Keeping the BLASes a built parity points at
+/// alive is [`BlasManager`]'s job, which is why nothing here owns one: it defers every retirement
+/// until [`BlasManager::note_tlas_build`] has seen both parities rebuilt.
 pub struct TlasState {
     /// Whether builds go through [`tlas_build`]'s raw path rather than `wgpu-core`.
     raw_build: bool,
@@ -103,9 +104,6 @@ pub struct TlasState {
     capacity: [u32; 2],
     /// Whether each structure has had a build recorded since its latest allocation.
     pub built: [bool; 2],
-    /// BLAS ownership retained independently for each TLAS parity.
-    blas_handles: [Vec<Blas>; 2],
-    blas_generation: [u64; 2],
     pub frame_parity: usize,
     pub instance_descriptors: Option<Buffer>,
     instance_descriptor_capacity: u32,
@@ -113,8 +111,6 @@ pub struct TlasState {
     scratch_capacity: u64,
     scratch_sized_for: u32,
     pub instances_packed: bool,
-    /// BLASes no longer referenced by either parity, held until submitted GPU work completes.
-    pub pending_retire: Vec<Blas>,
     pub instance_pack_bind_group: Option<BindGroup>,
     instance_pack_buffer_ids: Option<[BufferId; 3]>,
 }
@@ -126,8 +122,6 @@ impl TlasState {
             structures: [None, None],
             capacity: [0, 0],
             built: [false, false],
-            blas_handles: [Vec::new(), Vec::new()],
-            blas_generation: [0, 0],
             frame_parity: 0,
             instance_descriptors: None,
             instance_descriptor_capacity: 0,
@@ -135,7 +129,6 @@ impl TlasState {
             scratch_capacity: 0,
             scratch_sized_for: 0,
             instances_packed: false,
-            pending_retire: Vec::new(),
             instance_pack_bind_group: None,
             instance_pack_buffer_ids: None,
         }
@@ -158,7 +151,6 @@ impl TlasState {
         instances: &InstanceState,
         bind_groups: &mut BindGroupCacheState,
         render_device: &RenderDevice,
-        blas_manager: &BlasManager,
         build_ready: bool,
     ) {
         let _span = info_span!("advance_tlas").entered();
@@ -189,17 +181,6 @@ impl TlasState {
         self.frame_parity ^= 1;
         let parity = self.frame_parity;
         self.reserve_tlas(parity, instance_count, render_device, bind_groups);
-
-        // `wgpu-core` collects a built TLAS's dependencies itself, so this is the raw path's to do.
-        // Refresh only when the BLAS set changes; cloning every handle every frame would add one
-        // atomic refcount pair per distinct mesh.
-        let generation = blas_manager.generation();
-        if self.raw_build && self.blas_generation[parity] != generation {
-            let stale = core::mem::take(&mut self.blas_handles[parity]);
-            self.pending_retire.extend(stale);
-            self.blas_handles[parity].extend(blas_manager.handles().cloned());
-            self.blas_generation[parity] = generation;
-        }
     }
 
     /// Makes sure the instance descriptor buffer covers every stable slot.
@@ -375,7 +356,7 @@ pub fn pack_raytracing_tlas_instances(
 /// Records this frame's TLAS build into the render graph's command encoder.
 pub fn build_raytracing_tlas(
     mut bindings: ResMut<RaytracingSceneBindings>,
-    blas_manager: Res<BlasManager>,
+    mut blas_manager: ResMut<BlasManager>,
     mut render_context: RenderContext,
 ) {
     let bindings = &mut *bindings;
@@ -389,6 +370,9 @@ pub fn build_raytracing_tlas(
 
     if built {
         bindings.tlas.built[parity] = true;
+        // This parity no longer points at whatever was retired before it, which is what lets the
+        // oldest batch of retirements go.
+        blas_manager.note_tlas_build();
     }
 }
 
@@ -489,19 +473,6 @@ fn build_tlas_through_wgpu_core(
     time_span.end(command_encoder);
 
     true
-}
-
-/// Releases acceleration structures once all submitted work that could reach them is complete.
-pub fn retire_raytracing_resources(
-    mut bindings: ResMut<RaytracingSceneBindings>,
-    render_queue: Res<RenderQueue>,
-) {
-    if bindings.tlas.pending_retire.is_empty() {
-        return;
-    }
-
-    let retired = core::mem::take(&mut bindings.tlas.pending_retire);
-    render_queue.on_submitted_work_done(move || drop(retired));
 }
 
 #[cfg(test)]

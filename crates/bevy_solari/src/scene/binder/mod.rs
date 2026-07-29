@@ -16,8 +16,7 @@ use self::instances::{
 use self::lights::LightState;
 use self::tlas::TlasState;
 pub use self::tlas::{
-    build_raytracing_tlas, pack_raytracing_tlas_instances, retire_raytracing_resources,
-    TlasInstancePackPipeline,
+    build_raytracing_tlas, pack_raytracing_tlas_instances, TlasInstancePackPipeline,
 };
 use super::{blas::BlasManager, extract::StandardMaterialAssets, RaytracingMesh3d};
 use bevy_ecs::{
@@ -164,17 +163,11 @@ impl RaytracingSceneBindings {
     }
 
     /// Phase 5: advance parity only when the later pack/build systems can finish the new TLAS.
-    fn prepare_tlas_update(
-        &mut self,
-        render_device: &RenderDevice,
-        blas_manager: &BlasManager,
-        build_ready: bool,
-    ) {
+    fn prepare_tlas_update(&mut self, render_device: &RenderDevice, build_ready: bool) {
         self.tlas.advance(
             &self.instances,
             &mut self.bind_groups,
             render_device,
-            blas_manager,
             build_ready,
         );
     }
@@ -225,5 +218,5 @@ pub fn prepare_raytracing_scene_resources(
             .id
             .and_then(|id| pipeline_cache.get_compute_pipeline(id))
             .is_some();
-    bindings.prepare_tlas_update(&render_device, &blas_manager, build_ready);
+    bindings.prepare_tlas_update(&render_device, build_ready);
 }

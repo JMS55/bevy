@@ -23,9 +23,9 @@ use bevy_render::{
 };
 use binder::{
     build_raytracing_tlas, pack_raytracing_tlas_instances, prepare_raytracing_scene_bind_group,
-    prepare_raytracing_scene_resources, retire_raytracing_resources, TlasInstancePackPipeline,
+    prepare_raytracing_scene_resources, TlasInstancePackPipeline,
 };
-use blas::{compact_raytracing_blas, prepare_raytracing_blas, BlasManager};
+use blas::{compact_raytracing_blas, delete_raytracing_blas, prepare_raytracing_blas, BlasManager};
 use extract::{
     extract_raytracing_material_assets, extract_raytracing_scene_meshes_and_materials,
     extract_raytracing_scene_structural, extract_raytracing_scene_transforms,
@@ -97,7 +97,7 @@ impl Plugin for RaytracingScenePlugin {
                         .chain()
                         .after(update_sparse_buffers)
                         .in_set(RenderGraphSystems::Begin),
-                    retire_raytracing_resources.in_set(RenderGraphSystems::Finish),
+                    delete_raytracing_blas.in_set(RenderGraphSystems::Finish),
                 ),
             );
     }

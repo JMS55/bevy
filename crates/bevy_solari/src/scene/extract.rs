@@ -49,12 +49,8 @@ pub fn extract_raytracing_scene_structural(
     }
 }
 
-/// Writes the transforms of moved raytracing instances straight into their GPU buffers.
-///
-/// This deliberately skips the render world: a moving instance needs nothing else updated per
-/// frame, so copying its transform into a render world component only to read it back out during
-/// the same frame's prepare would double the work. The render world copies inserted when an
-/// instance is spawned are a one-off seed for the slot it gets given, nothing more.
+/// Copies the transforms of moved raytracing instances from the main world
+/// straight into their GPU buffers.
 pub fn extract_raytracing_scene_transforms(
     main_instances: Extract<
         Query<
@@ -71,7 +67,6 @@ pub fn extract_raytracing_scene_transforms(
     >,
     bindings: Res<RaytracingSceneBindings>,
 ) {
-    // Each instance writes only to its own slot, so this splits across threads.
     main_instances
         .par_iter()
         .for_each(|(render_entity, transform, previous_frame_transform)| {
@@ -108,10 +103,7 @@ pub fn extract_raytracing_scene_meshes_and_materials(
     }
 }
 
-/// The set of [`StandardMaterial`]s used by raytracing, mirrored into the render world.
-///
-/// Alongside the materials themselves this records which materials changed this frame, so that
-/// consumers can update their GPU-side state incrementally instead of walking every material.
+/// The set of [`StandardMaterial`] in the scene, mirrored into the render world.
 #[derive(Resource, Default)]
 pub struct StandardMaterialAssets {
     materials: HashMap<AssetId<StandardMaterial>, StandardMaterial>,

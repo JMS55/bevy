@@ -24,9 +24,6 @@ use bevy_utils::{default, once};
 use tracing::{info_span, warn};
 use wgpu::{BufferTransition, BufferUses};
 
-/// Workgroup size of `tlas_instances.wgsl`. Has to match the shader.
-const TLAS_INSTANCE_PACK_WORKGROUP_SIZE: u32 = 64;
-
 /// Compute pipeline that packs per-slot transforms and BLAS addresses into TLAS descriptors.
 #[derive(Resource)]
 pub struct TlasInstancePackPipeline {
@@ -52,7 +49,7 @@ impl FromWorld for TlasInstancePackPipeline {
             return Self { layout, id: None };
         }
 
-        let shader = load_embedded_asset!(world, "tlas_instances.wgsl");
+        let shader = load_embedded_asset!(world, "setup_tlas_instances.wgsl");
         let id =
             world
                 .resource::<PipelineCache>()
@@ -60,7 +57,7 @@ impl FromWorld for TlasInstancePackPipeline {
                     label: Some("tlas_instance_pack_pipeline".into()),
                     layout: vec![layout.clone()],
                     shader,
-                    entry_point: Some("pack_tlas_instances".into()),
+                    entry_point: Some("setup_tlas_instances".into()),
                     ..default()
                 });
 
@@ -75,7 +72,8 @@ impl FromWorld for TlasInstancePackPipeline {
 const TLAS_MIN_CAPACITY: u32 = 128;
 
 /// Width of a TLAS instance's custom data in both Vulkan (`instanceCustomIndex`) and DXR
-/// (`InstanceID`). `tlas_instances.wgsl` packs instance slots into that field, so they have to fit.
+/// (`InstanceID`). `setup_tlas_instances.wgsl` packs instance slots into that field, so they have to
+/// fit.
 const TLAS_CUSTOM_DATA_BITS: u32 = 24;
 
 /// Instance capacity to allocate to hold `instance_count` slots.
@@ -323,15 +321,15 @@ pub fn pack_raytracing_tlas_instances(
     let diagnostics = render_context.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     let command_encoder = render_context.command_encoder();
-    let time_span = diagnostics.time_span(command_encoder, "pack_tlas_instances");
+    let time_span = diagnostics.time_span(command_encoder, "setup_tlas_instances");
     {
         let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("pack_tlas_instances"),
+            label: Some("setup_tlas_instances"),
             timestamp_writes: None,
         });
         pass.set_pipeline(compute_pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        pass.dispatch_workgroups(slot_count.div_ceil(TLAS_INSTANCE_PACK_WORKGROUP_SIZE), 1, 1);
+        pass.dispatch_workgroups(slot_count.div_ceil(64), 1, 1);
     }
     time_span.end(command_encoder);
 

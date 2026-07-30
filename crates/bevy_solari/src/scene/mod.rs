@@ -41,7 +41,7 @@ impl Plugin for RaytracingScenePlugin {
         load_shader_library!(app, "brdf.wgsl");
         load_shader_library!(app, "raytracing_scene_bindings.wgsl");
         load_shader_library!(app, "sampling.wgsl");
-        embedded_asset!(app, "binder/tlas_instances.wgsl");
+        embedded_asset!(app, "binder/setup_tlas_instances.wgsl");
     }
 
     fn finish(&self, app: &mut App) {

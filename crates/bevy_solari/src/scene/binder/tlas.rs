@@ -371,7 +371,7 @@ pub fn build_raytracing_tlas(
     if built {
         bindings.tlas.built[parity] = true;
         // This parity no longer points at whatever was retired before it, which is what lets the
-        // oldest batch of retirements go.
+        // oldest retirements go.
         blas_manager.note_tlas_build();
     }
 }

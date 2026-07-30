@@ -3,7 +3,6 @@ use bevy_asset::AssetId;
 use bevy_ecs::{
     resource::Resource,
     system::{Res, ResMut},
-    world::{FromWorld, World},
 };
 use bevy_mesh::{Indices, Mesh};
 use bevy_platform::collections::HashMap;
@@ -22,39 +21,20 @@ use bevy_render::{
 /// Lower this number to distribute the work across more frames.
 const MAX_COMPACTION_VERTICES_PER_FRAME: u32 = 400_000;
 
-/// TLAS builds a retired [`Blas`] waits out before it can be dropped.
-///
-/// Solari keeps two TLASes and traces the frame-old one as the previous frame, so a retired
-/// structure stays pointed at until both have been rebuilt without it. A build only happens on a
-/// frame where the binder flipped parity — an empty scene or an unready pack pipeline stops the
-/// build as well as the flip — so builds strictly alternate parities and two of them is exactly
-/// "both TLASes have been rebuilt", however many frames that takes.
-const TLAS_BUILDS_BEFORE_DELETION: usize = 2;
+/// Under the wgpu_hal build path, we need to manage BLAS lifetimes ourselves.
+/// Since solari keeps both current and previous frame TLAS's around, only after
+/// two TLAS builds since we marked it for deletion is it safe to delete a BLAS.
+const TLAS_BUILDS_BEFORE_DELETION_ALLOWED: usize = 2;
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct BlasManager {
     blas: HashMap<AssetId<Mesh>, Blas>,
     compaction_queue: VecDeque<(AssetId<Mesh>, u32, bool)>,
     changed: Vec<AssetId<Mesh>>,
-    /// Retired since the last TLAS build.
-    dying: Vec<Blas>,
-    /// One batch of retirements per TLAS build still to be waited out, oldest at the front.
-    deletion_queue: VecDeque<Vec<Blas>>,
-    /// Retirements that have waited out their builds and now only await the GPU.
-    deletable: Vec<Blas>,
-}
-
-impl FromWorld for BlasManager {
-    fn from_world(_world: &mut World) -> Self {
-        Self {
-            blas: HashMap::default(),
-            compaction_queue: VecDeque::new(),
-            changed: Vec::new(),
-            dying: Vec::new(),
-            deletion_queue: VecDeque::new(),
-            deletable: Vec::new(),
-        }
-    }
+    /// BLAS that are pending deletion, one batch per TLAS build. The back batch collects
+    /// retirements since the last build, and every batch ahead of it has one more build to wait
+    /// out.
+    pending_deletions: VecDeque<Vec<Blas>>,
 }
 
 impl BlasManager {
@@ -62,81 +42,44 @@ impl BlasManager {
         self.blas.get(mesh)
     }
 
-    /// Records a mesh's newly built or newly compacted acceleration structure.
-    ///
-    /// Goes through here rather than touching the map directly so that [`Self::changed`] and the
-    /// deletion queue can't be left behind. Compaction hands over a replacement for a mesh that
-    /// already had one, and the structure it displaces is exactly as live as a removed one.
-    fn insert(&mut self, mesh: AssetId<Mesh>, blas: Blas) {
-        if let Some(displaced) = self.blas.insert(mesh, blas) {
-            self.dying.push(displaced);
-        }
-        self.changed.push(mesh);
-    }
-
-    /// Retires a mesh's acceleration structure, if it had one. See [`Self::insert`].
-    ///
-    /// Called for every mesh removed or modified this frame, most of which never had one — a mesh
-    /// that isn't raytracing compatible, or that no raytraced instance uses.
-    ///
-    /// [`Self::changed`] is reported either way. It is a push onto a short list, and its consumers
-    /// are idempotent by contract.
-    fn remove(&mut self, mesh: AssetId<Mesh>) {
-        self.changed.push(mesh);
-        if let Some(dying) = self.blas.remove(&mesh) {
-            self.dying.push(dying);
-        }
-    }
-
-    /// Advances the deletion queue by one TLAS build, which the binder calls when it records one.
-    ///
-    /// A retired structure cannot be dropped when it leaves the map: a TLAS built earlier still
-    /// holds pointers into its memory, and stays that way until it is built again. So retirements
-    /// wait here for [`TLAS_BUILDS_BEFORE_DELETION`] builds rather than for a number of frames —
-    /// a scene that stops drawing and later resumes traces its previous-frame TLAS from before the
-    /// pause, and a frame count would already have dropped what that TLAS points at.
-    ///
-    /// Costs a push of an empty `Vec` on a frame where nothing was retired, and is otherwise
-    /// proportional to the number of meshes that actually changed — never to the size of the scene.
-    pub fn note_tlas_build(&mut self) {
-        self.deletion_queue
-            .push_back(core::mem::take(&mut self.dying));
-        if self.deletion_queue.len() > TLAS_BUILDS_BEFORE_DELETION {
-            let expired = self.deletion_queue.pop_front().unwrap_or_default();
-            self.deletable.extend(expired);
-        }
-    }
-
-    /// The device address to point a TLAS instance descriptor at.
-    ///
-    /// `None` on a backend where `wgpu` can't hand one out, which is every backend Solari declines
-    /// to load on anyway.
-    pub fn address(&self, mesh: &AssetId<Mesh>) -> Option<u64> {
+    pub fn device_address(&self, mesh: &AssetId<Mesh>) -> Option<u64> {
         self.blas.get(mesh)?.handle()
     }
 
-    /// Meshes whose [`Blas`] was created, replaced, or removed this frame.
-    ///
-    /// Compaction swaps out the [`Blas`] object entirely, so anything holding a reference to one
-    /// (such as a TLAS instance) has to be rebuilt when its mesh appears here.
-    ///
-    /// A mesh that was modified appears twice, once for the removal and once for the rebuild.
-    /// Consumers are expected to be idempotent rather than pay for deduplication: this is empty
-    /// on the overwhelming majority of frames, and short whenever it isn't.
-    pub fn changed(&self) -> &[AssetId<Mesh>] {
+    pub fn changed_meshes(&self) -> &[AssetId<Mesh>] {
         &self.changed
+    }
+
+    pub fn note_tlas_build(&mut self) {
+        if !self.pending_deletions.is_empty() {
+            self.pending_deletions.push_back(Vec::new());
+        }
+    }
+
+    fn insert(&mut self, mesh: AssetId<Mesh>, blas: Blas) {
+        if let Some(old) = self.blas.insert(mesh, blas) {
+            self.retire(old);
+        }
+
+        self.changed.push(mesh);
+    }
+
+    fn remove(&mut self, mesh: AssetId<Mesh>) {
+        self.changed.push(mesh);
+
+        if let Some(removed) = self.blas.remove(&mesh) {
+            self.retire(removed);
+        }
+    }
+
+    fn retire(&mut self, blas: Blas) {
+        match self.pending_deletions.back_mut() {
+            Some(batch) => batch.push(blas),
+            None => self.pending_deletions.push_back(vec![blas]),
+        }
     }
 }
 
-/// Builds an acceleration structure for every mesh that arrived or changed this frame.
-///
-/// A modified mesh has its old structure dropped first rather than reused: an acceleration
-/// structure is built from the geometry, so it says nothing about the new data. Both that and the
-/// rebuild are reported through [`BlasManager::changed`], which is what makes the instances using
-/// the mesh re-resolve and pick up the new address.
-///
-/// The builds go out as their own submission rather than riding the frame's, because the TLAS
-/// build later in the frame reads the structures this produces.
 pub fn prepare_raytracing_blas(
     mut blas_manager: ResMut<BlasManager>,
     extracted_meshes: Res<ExtractedAssets<RenderMesh>>,
@@ -241,11 +184,7 @@ pub fn compact_raytracing_blas(
         }
 
         if blas.ready_for_compaction() {
-            // Compaction moves the acceleration structure, so the old address is dead. Reporting
-            // the mesh through `changed` is what makes every instance using it pick up the new
-            // one; see `RaytracingSceneBindings::refresh_instances`.
             let compacted_blas = render_queue.compact_blas(blas);
-
             blas_manager.insert(mesh, compacted_blas);
 
             vertices_compacted += vertex_count;
@@ -259,21 +198,21 @@ pub fn compact_raytracing_blas(
     }
 }
 
-/// Frees the acceleration structures that have waited out their TLAS builds.
-///
-/// Runs at the end of the render graph so that the fence it registers covers this frame's tracing
-/// as well: waiting out the builds establishes that nothing will point at these again, and the
-/// fence establishes that nothing still in flight is reading them.
 pub fn delete_raytracing_blas(
     mut blas_manager: ResMut<BlasManager>,
     render_queue: Res<RenderQueue>,
 ) {
-    if blas_manager.deletable.is_empty() {
+    if blas_manager.pending_deletions.len() <= TLAS_BUILDS_BEFORE_DELETION_ALLOWED {
         return;
     }
 
-    let deletable = core::mem::take(&mut blas_manager.deletable);
-    render_queue.on_submitted_work_done(move || drop(deletable));
+    if let Some(deletable) = blas_manager
+        .pending_deletions
+        .pop_front()
+        .filter(|b| !b.is_empty())
+    {
+        render_queue.on_submitted_work_done(move || drop(deletable));
+    }
 }
 
 fn allocate_blas(
@@ -290,22 +229,8 @@ fn allocate_blas(
         flags: AccelerationStructureGeometryFlags::OPAQUE,
     };
 
-    // TODO: Switching to refit (`ALLOW_UPDATE` + `AccelerationStructureUpdateMode::PreferUpdate`)
-    // has two consequences that aren't local to this function:
-    //
-    // 1. A refit mutates the BLAS in place, whereas a rebuild allocates a fresh one. Solari keeps
-    //    two TLASes and traces the frame-old one as the previous frame; that one points at the
-    //    BLAS being mutated. Per the DXR spec, "if a bottom-level acceleration structure at a given
-    //    address is pointed to by top-level acceleration structures ever changes, those top-level
-    //    acceleration structures are stale and must either be rebuilt or updated before they are
-    //    valid to use again." So refitting a BLAS invalidates the previous-frame TLAS, and either
-    //    both TLASes have to be rebuilt that frame or the refit target has to be double buffered.
-    // 2. Primitives can't change activity across an update: a triangle hidden by a NaN vertex at
-    //    build time can never be un-hidden, and an active one can never be hidden. Don't introduce
-    //    NaN-hiding inside a refittable BLAS.
-    //
-    // Compaction is also mutually exclusive with updates in practice, so `compact_raytracing_blas`
-    // would need to skip refittable meshes.
+    // TODO: If we ever introduce BLAS refits, we need to be aware of the TLAS double-buffer
+    // to avoid invalidating the previous frame TLAS
     let blas = render_device.wgpu_device().create_blas(
         &CreateBlasDescriptor {
             label: Some(&asset_id.to_string()),

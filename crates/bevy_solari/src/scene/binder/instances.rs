@@ -212,7 +212,12 @@ impl InstanceState {
         refresh.extend(changed_instances.iter());
 
         let moved_meshes = mesh_allocator.meshes_displaced_by_slab_growth();
-        for mesh_id in blas_manager.changed().iter().copied().chain(moved_meshes) {
+        for mesh_id in blas_manager
+            .changed_meshes()
+            .iter()
+            .copied()
+            .chain(moved_meshes)
+        {
             if let Some(mesh_instances) = self.mesh_instances.get(&mesh_id) {
                 refresh.extend(mesh_instances.iter().copied());
             }
@@ -317,7 +322,7 @@ impl InstanceState {
             self.deactivate_instance(lights, entity, instance);
             return false;
         };
-        let Some(blas_address) = blas_manager.address(&instance.mesh) else {
+        let Some(blas_address) = blas_manager.device_address(&instance.mesh) else {
             self.deactivate_instance(lights, entity, instance);
             return false;
         };

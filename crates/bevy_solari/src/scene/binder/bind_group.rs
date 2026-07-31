@@ -61,22 +61,19 @@ fn buffer_bindings<'a>(
 impl RaytracingSceneBindings {
     /// Each sparse buffer's GPU buffer id, or `None` where it has not been created yet.
     fn buffer_ids(&self) -> [Option<BufferId>; 9] {
-        let bindings = self;
         [
-            bindings.assets.materials.buffer().map(Buffer::id),
-            bindings.instances.transforms.buffer().map(Buffer::id),
-            bindings
-                .instances
+            self.assets.materials.buffer().map(Buffer::id),
+            self.instances.transforms.buffer().map(Buffer::id),
+            self.instances
                 .previous_frame_transforms
                 .buffer()
                 .map(Buffer::id),
-            bindings.instances.geometry_ids.buffer().map(Buffer::id),
-            bindings.instances.material_ids.buffer().map(Buffer::id),
-            bindings.instances.blas_refs.buffer().map(Buffer::id),
-            bindings.lights.sources.buffer().map(Buffer::id),
-            bindings.lights.directional_lights.buffer().map(Buffer::id),
-            bindings
-                .lights
+            self.instances.geometry_ids.buffer().map(Buffer::id),
+            self.instances.material_ids.buffer().map(Buffer::id),
+            self.instances.blas_refs.buffer().map(Buffer::id),
+            self.lights.sources.buffer().map(Buffer::id),
+            self.lights.directional_lights.buffer().map(Buffer::id),
+            self.lights
                 .previous_frame_id_translations
                 .buffer()
                 .map(Buffer::id),
@@ -335,6 +332,9 @@ fn prepare_sparse_uploads(
 ) {
     let _span = info_span!("prepare_sparse_uploads").entered();
 
+    // Matches `write_sparse_buffers`: blas refs only reach the GPU on the raw TLAS build path
+    let upload_blas_refs = bindings.tlas.uses_raw_build();
+
     let assets = &mut bindings.assets;
     assets
         .materials
@@ -353,9 +353,11 @@ fn prepare_sparse_uploads(
     instances
         .material_ids
         .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
-    instances
-        .blas_refs
-        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    if upload_blas_refs {
+        instances
+            .blas_refs
+            .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    }
 
     let lights = &mut bindings.lights;
     lights

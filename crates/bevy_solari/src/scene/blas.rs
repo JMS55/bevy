@@ -21,7 +21,7 @@ use bevy_render::{
 /// Lower this number to distribute the work across more frames.
 const MAX_COMPACTION_VERTICES_PER_FRAME: u32 = 400_000;
 
-/// Under the wgpu_hal build path, we need to manage BLAS lifetimes ourselves.
+/// Under the `wgpu_hal` build path, we need to manage BLAS lifetimes ourselves.
 /// Since solari keeps both current and previous frame TLAS's around, only after
 /// two TLAS builds since we marked it for deletion is it safe to delete a BLAS.
 const TLAS_BUILDS_BEFORE_DELETION_ALLOWED: usize = 2;

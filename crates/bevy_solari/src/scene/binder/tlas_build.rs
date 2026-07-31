@@ -21,9 +21,9 @@
 //! memory Metal is free to have evicted. That hal method is a no-op on Vulkan and DX12, which is
 //! why they are unaffected, and there is no way to supply the dependency list from outside `wgpu`.
 //!
-//! Rather than matching on [`Backend`](bevy_render::settings::Backend), every operation tries each
-//! compiled-in backend and relies on `as_hal` returning `None` for a resource that doesn't belong
-//! to it. That can't disagree with the adapter actually in use.
+//! Rather than matching on [`Backend`](wgpu::Backend), every operation tries each compiled-in
+//! backend and relies on `as_hal` returning `None` for a resource that doesn't belong to it. That
+//! can't disagree with the adapter actually in use.
 //!
 //! Anything recorded here is invisible to `wgpu-core`'s state tracker, so it emits no barriers for
 //! it and learns nothing about the states left behind. Rather than hand-rolling those, the buffers
@@ -93,7 +93,7 @@ macro_rules! first_supported_backend {
             $body
         });
 
-        #[cfg(target_os = "windows")]
+        #[cfg(windows)]
         let result = result.or_else(|| {
             type $api = hal::api::Dx12;
             $body

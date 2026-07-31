@@ -178,8 +178,10 @@ fn write_sparse_buffers(
     instances.geometry_ids.write_buffers(device, queue);
     instances.material_ids.grow(1);
     instances.material_ids.write_buffers(device, queue);
-    instances.blas_refs.grow(1);
-    instances.blas_refs.write_buffers(device, queue);
+    if bindings.tlas.uses_raw_build() {
+        instances.blas_refs.grow(1);
+        instances.blas_refs.write_buffers(device, queue);
+    }
 
     let lights = &mut bindings.lights;
     lights.sources.grow(1);

@@ -1,7 +1,7 @@
 use super::{
+    allocator::{RetainedBindingArray, SlotAllocator},
     buffers::{new_storage_buffer, set_at},
     instances::InstanceState,
-    slots::{RetainedBindingArray, SlotAllocator},
     StandardMaterialAssets,
 };
 use bevy_asset::AssetId;
@@ -83,6 +83,40 @@ impl AssetState {
         }
         for material_id in &material_assets.changed {
             self.update_material(*material_id, instances, material_assets, texture_assets);
+        }
+    }
+
+    /// Swaps in uploaded replacements and retries materials waiting on images.
+    pub fn update_textures(
+        &mut self,
+        instances: &mut InstanceState,
+        extracted_images: &ExtractedAssets<GpuImage>,
+        texture_assets: &RenderAssets<GpuImage>,
+        material_assets: &StandardMaterialAssets,
+    ) {
+        let _span = info_span!("update_textures").entered();
+
+        let mut pending = core::mem::take(&mut self.pending_texture_updates);
+        pending.extend(extracted_images.added.iter().copied());
+
+        for image_id in pending {
+            if !self.textures.contains(&image_id) {
+                continue;
+            }
+
+            match texture_assets.get(image_id) {
+                Some(image) => self.textures.replace(
+                    &image_id,
+                    (image.texture_view.clone(), image.sampler.clone()),
+                ),
+                None => {
+                    self.pending_texture_updates.insert(image_id);
+                }
+            }
+        }
+
+        for material_id in core::mem::take(&mut self.unresolved_materials) {
+            self.update_material(material_id, instances, material_assets, texture_assets);
         }
     }
 
@@ -227,40 +261,6 @@ impl AssetState {
         };
         for image_id in textures.into_iter().flatten() {
             self.textures.release(&image_id);
-        }
-    }
-
-    /// Swaps in uploaded replacements and retries materials waiting on images.
-    pub fn update_textures(
-        &mut self,
-        instances: &mut InstanceState,
-        extracted_images: &ExtractedAssets<GpuImage>,
-        texture_assets: &RenderAssets<GpuImage>,
-        material_assets: &StandardMaterialAssets,
-    ) {
-        let _span = info_span!("update_textures").entered();
-
-        let mut pending = core::mem::take(&mut self.pending_texture_updates);
-        pending.extend(extracted_images.added.iter().copied());
-
-        for image_id in pending {
-            if !self.textures.contains(&image_id) {
-                continue;
-            }
-
-            match texture_assets.get(image_id) {
-                Some(image) => self.textures.replace(
-                    &image_id,
-                    (image.texture_view.clone(), image.sampler.clone()),
-                ),
-                None => {
-                    self.pending_texture_updates.insert(image_id);
-                }
-            }
-        }
-
-        for material_id in core::mem::take(&mut self.unresolved_materials) {
-            self.update_material(material_id, instances, material_assets, texture_assets);
         }
     }
 }

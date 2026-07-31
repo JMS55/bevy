@@ -1,9 +1,9 @@
+mod allocator;
 mod assets;
 mod bind_group;
 mod buffers;
 mod instances;
 mod lights;
-mod slots;
 mod tlas;
 mod tlas_build;
 

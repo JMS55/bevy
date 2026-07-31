@@ -155,19 +155,19 @@ impl TlasState {
 
         // An empty scene must not allocate an unbuilt TLAS that could resurface as a later
         // previous-frame entry
-        if !build_ready || instances.slots.len() == 0 {
+        if !build_ready || instances.slots.high_water_mark() == 0 {
             return;
         }
 
         debug_assert!(
-            instances.slots.len() < 1 << TLAS_CUSTOM_DATA_BITS,
+            instances.slots.high_water_mark() < 1 << TLAS_CUSTOM_DATA_BITS,
             "instance slot count {} does not fit in a TLAS instance's custom data",
-            instances.slots.len()
+            instances.slots.high_water_mark()
         );
 
         // Secure every build input before committing the parity flip. Neither buffer exists on the
         // wgpu-core path, which builds from instances written into the TLAS itself.
-        let instance_count = instances.slots.len();
+        let instance_count = instances.slots.high_water_mark();
         if self.raw_build {
             self.reserve_instance_descriptors(instance_count, render_device);
             self.reserve_tlas_scratch(render_device);
@@ -179,6 +179,41 @@ impl TlasState {
         self.frame_parity ^= 1;
         let parity = self.frame_parity;
         self.reserve_tlas(parity, instance_count, render_device, bind_groups);
+    }
+
+    /// Rebuilds the pack shader's bind group only when one of its three buffers moves.
+    pub fn update_instance_pack_bind_group(
+        &mut self,
+        instances: &InstanceState,
+        render_device: &RenderDevice,
+        pipeline_cache: &PipelineCache,
+        pipeline: &TlasInstancePackPipeline,
+    ) {
+        let (Some(transforms), Some(blas_refs), Some(instances)) = (
+            instances.transforms.buffer(),
+            instances.blas_refs.buffer(),
+            self.instance_descriptors.as_ref(),
+        ) else {
+            self.instance_pack_bind_group = None;
+            return;
+        };
+
+        let ids = [transforms.id(), blas_refs.id(), instances.id()];
+        if self.instance_pack_bind_group.is_some() && self.instance_pack_buffer_ids == Some(ids) {
+            return;
+        }
+
+        let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
+        self.instance_pack_bind_group = Some(render_device.create_bind_group(
+            "tlas_instance_pack_bind_group",
+            &layout,
+            &BindGroupEntries::sequential((
+                transforms.as_entire_binding(),
+                blas_refs.as_entire_binding(),
+                instances.as_entire_binding(),
+            )),
+        ));
+        self.instance_pack_buffer_ids = Some(ids);
     }
 
     /// Makes sure the instance descriptor buffer covers every stable slot.
@@ -248,41 +283,6 @@ impl TlasState {
         self.built[parity] = false;
         bind_groups.invalid = true;
     }
-
-    /// Rebuilds the pack shader's bind group only when one of its three buffers moves.
-    pub fn update_instance_pack_bind_group(
-        &mut self,
-        instances: &InstanceState,
-        render_device: &RenderDevice,
-        pipeline_cache: &PipelineCache,
-        pipeline: &TlasInstancePackPipeline,
-    ) {
-        let (Some(transforms), Some(blas_refs), Some(instances)) = (
-            instances.transforms.buffer(),
-            instances.blas_refs.buffer(),
-            self.instance_descriptors.as_ref(),
-        ) else {
-            self.instance_pack_bind_group = None;
-            return;
-        };
-
-        let ids = [transforms.id(), blas_refs.id(), instances.id()];
-        if self.instance_pack_bind_group.is_some() && self.instance_pack_buffer_ids == Some(ids) {
-            return;
-        }
-
-        let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
-        self.instance_pack_bind_group = Some(render_device.create_bind_group(
-            "tlas_instance_pack_bind_group",
-            &layout,
-            &BindGroupEntries::sequential((
-                transforms.as_entire_binding(),
-                blas_refs.as_entire_binding(),
-                instances.as_entire_binding(),
-            )),
-        ));
-        self.instance_pack_buffer_ids = Some(ids);
-    }
 }
 
 /// Packs this frame's TLAS instance descriptors on the GPU.
@@ -313,7 +313,7 @@ pub fn pack_raytracing_tlas_instances(
         return;
     };
 
-    let slot_count = bindings.instances.slots.len();
+    let slot_count = bindings.instances.slots.high_water_mark();
     if slot_count == 0 {
         return;
     }
@@ -410,7 +410,7 @@ fn build_tlas_raw(
         &mut command_encoder,
         tlas,
         instances,
-        bindings.instances.slots.len(),
+        bindings.instances.slots.high_water_mark(),
         scratch,
     );
     render_context.add_command_buffer(command_encoder.finish());
@@ -437,7 +437,7 @@ fn build_tlas_through_wgpu_core(
 ) -> bool {
     // An empty scene leaves the parity unflipped, so whatever is here belongs to an earlier frame
     // and is still being traced as the previous one
-    if bindings.instances.slots.len() == 0 {
+    if bindings.instances.slots.high_water_mark() == 0 {
         return false;
     }
     let parity = bindings.tlas.frame_parity;

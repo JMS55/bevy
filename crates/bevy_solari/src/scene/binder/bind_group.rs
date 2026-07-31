@@ -1,5 +1,5 @@
 use super::{
-    buffers::SPARSE_BUFFER_COUNT, lights::GpuLightSource, slots::RetainedBindingArray,
+    allocator::RetainedBindingArray, buffers::SPARSE_BUFFER_COUNT, lights::GpuLightSource,
     RaytracingSceneBindings, TlasInstancePackPipeline,
 };
 use bevy_ecs::system::{Res, ResMut};

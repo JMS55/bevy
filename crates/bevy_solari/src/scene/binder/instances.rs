@@ -1,8 +1,8 @@
 use super::{
+    allocator::{IndexAllocator, RetainedBindingArray},
     assets::AssetState,
     buffers::{new_storage_buffer, set_at, set_existing, GpuU32},
     lights::{GpuLightSource, LightSourceId, LightState},
-    slots::{IndexAllocator, RetainedBindingArray},
     BlasManager, RaytracingMesh3d, RaytracingSceneBindings,
 };
 use bevy_asset::AssetId;
@@ -176,13 +176,6 @@ fn relink<K: Copy + Eq + Hash>(
 }
 
 impl InstanceState {
-    fn reserve_slot(&mut self, slot: u32) {
-        let len = slot + 1;
-        self.transforms.grow(len);
-        self.previous_frame_transforms.grow(len);
-        self.blas_refs.grow(len);
-    }
-
     pub fn remove_instances(
         &mut self,
         lights: &mut LightState,
@@ -238,6 +231,13 @@ impl InstanceState {
                 mesh_allocator,
             );
         }
+    }
+
+    fn reserve_slot(&mut self, slot: u32) {
+        let len = slot + 1;
+        self.transforms.grow(len);
+        self.previous_frame_transforms.grow(len);
+        self.blas_refs.grow(len);
     }
 
     fn refresh_instance(

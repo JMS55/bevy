@@ -1,6 +1,6 @@
 use super::{
+    allocator::SlotAllocator,
     buffers::{new_storage_buffer, set_at, GpuU32},
-    slots::SlotAllocator,
 };
 use bevy_color::ColorToComponents;
 use bevy_ecs::{

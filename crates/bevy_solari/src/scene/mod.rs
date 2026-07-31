@@ -65,8 +65,8 @@ impl Plugin for RaytracingScenePlugin {
         render_app
             .init_gpu_resource::<BlasManager>()
             .init_gpu_resource::<StandardMaterialAssets>()
-            .init_gpu_resource::<TlasInstancePackPipeline>()
             .init_gpu_resource::<RaytracingSceneBindings>()
+            .init_gpu_resource::<TlasInstancePackPipeline>()
             .add_systems(
                 ExtractSchedule,
                 (

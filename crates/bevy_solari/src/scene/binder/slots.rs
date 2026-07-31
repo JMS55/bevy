@@ -3,8 +3,7 @@ use core::{hash::Hash, num::NonZeroU32};
 
 /// Hands out indices that stay put for as long as they're held.
 ///
-/// Indices given back by removals get handed out again to later callers, so the index space stays
-/// about as dense as the live set.
+/// Released indices get handed out again, so the index space stays about as dense as the live set.
 pub struct IndexAllocator {
     free: Vec<u32>,
     len: u32,
@@ -92,16 +91,15 @@ impl<K: Eq + Hash> SlotAllocator<K> {
 /// One occupied slot of a [`RetainedBindingArray`].
 struct BindingSlot<T> {
     item: T,
-    /// Live references to this slot. The slot is freed when the last one goes away, so an occupied
-    /// slot always has at least one — which is what makes this a `NonZeroU32`.
+    /// Live references to this slot. An occupied slot always has at least one, hence `NonZeroU32`.
     references: NonZeroU32,
 }
 
 /// A binding array whose indices are stable across frames.
 ///
-/// Slots are reference counted by whatever points at them — materials for textures, instances for
-/// mesh slab buffers — and are reused once the last reference goes away. `dirty` records whether
-/// the contents changed, which is what forces the bind group to be rebuilt.
+/// Slots are reference counted by whatever points at them (materials for textures, instances for
+/// mesh slab buffers), and are reused once the last reference goes away. `dirty` marks that the
+/// contents changed and the bind group has to be rebuilt.
 pub struct RetainedBindingArray<K, T> {
     allocator: SlotAllocator<K>,
     slots: Vec<Option<BindingSlot<T>>>,
@@ -129,7 +127,7 @@ impl<K: Eq + Hash, T> RetainedBindingArray<K, T> {
     /// Whether [`Self::acquire`] would be able to hand out a reference to `key`.
     ///
     /// Callers that need more than one slot at once check this for all of them before acquiring
-    /// any, so that they never have to hand a slot straight back — see [`Self::acquire`].
+    /// any, so that they never have to hand a slot straight back.
     pub fn has_room(&self, key: &K, capacity: u32) -> bool {
         self.contains(key) || self.vacancies(capacity) > 0
     }
@@ -143,9 +141,9 @@ impl<K: Eq + Hash, T> RetainedBindingArray<K, T> {
 
     /// Takes a reference to `key`'s slot, allocating and filling it if this is the first one.
     ///
-    /// Returns `None` if `key` would need a new slot and every slot below `capacity` is taken.
-    /// The bind group layout declares these arrays with a fixed length, so running past it makes
-    /// `create_bind_group` fail outright — callers have to drop whatever wanted the slot instead.
+    /// Returns `None` if `key` would need a new slot and every slot below `capacity` is taken. The
+    /// bind group layout declares these arrays with a fixed length, so running past it makes
+    /// `create_bind_group` fail outright, and callers have to drop whatever wanted the slot.
     pub fn acquire(&mut self, key: K, capacity: u32, item: impl FnOnce() -> T) -> Option<u32> {
         if !self.has_room(&key, capacity) {
             return None;
@@ -227,7 +225,7 @@ mod tests {
         assert!(bindings.dirty);
         bindings.dirty = false;
 
-        // Sharing the existing stable slot only changes its refcount.
+        // Sharing the existing stable slot only changes its refcount
         assert_eq!(bindings.acquire(7, 2, || 99), Some(0));
         assert!(!bindings.dirty);
         assert_eq!(bindings.iter().next(), Some(Some(&11)));
@@ -236,7 +234,7 @@ mod tests {
         assert!(!bindings.dirty);
         assert!(bindings.contains(&7));
 
-        // The final release changes the binding array and makes the slot reusable.
+        // The final release changes the binding array and makes the slot reusable
         bindings.release(&7);
         assert!(bindings.dirty);
         assert!(!bindings.contains(&7));

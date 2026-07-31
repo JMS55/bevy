@@ -7,9 +7,10 @@ use bevy_pbr::DfgLut;
 use bevy_render::{
     render_asset::RenderAssets,
     render_resource::{
-        BindGroup, BindGroupEntries, BindGroupLayout, Buffer, BufferBinding, BufferId, BufferSize,
-        PipelineCache, Sampler, SamplerId, SparseBufferUpdateBindGroups, SparseBufferUpdateJobs,
-        SparseBufferUpdatePipelines, TextureView, TextureViewId,
+        BindGroup, BindGroupEntries, BindGroupLayout, Buffer, BufferBinding, BufferDescriptor,
+        BufferId, BufferSize, BufferUsages, PipelineCache, Sampler, SamplerId,
+        SparseBufferUpdateBindGroups, SparseBufferUpdateJobs, SparseBufferUpdatePipelines,
+        TextureView, TextureViewId,
     },
     renderer::RenderDevice,
     texture::{FallbackImage, GpuImage},
@@ -27,7 +28,15 @@ pub struct BindGroupCacheState {
 }
 
 impl BindGroupCacheState {
-    pub fn new(dummy_buffer: Buffer) -> Self {
+    pub fn new(render_device: &RenderDevice) -> Self {
+        // Binding arrays are dense, so freed slots still need something valid bound into them
+        let dummy_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_dummy_binding_array_buffer"),
+            size: 48,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         Self {
             cached: [None, None],
             invalid: true,
@@ -208,7 +217,7 @@ impl RaytracingSceneBindings {
         &mut self,
         parity: usize,
         render_device: &RenderDevice,
-        layout: &BindGroupLayout,
+        pipeline_cache: &PipelineCache,
         fallback_texture: &FallbackImage,
         dfg_view: &TextureView,
         dfg_sampler: &Sampler,
@@ -217,10 +226,12 @@ impl RaytracingSceneBindings {
             return bind_group.clone();
         }
 
+        // Only resolve the layout on a miss, as it locks and hashes the whole descriptor
+        let layout = pipeline_cache.get_bind_group_layout(&self.bind_group_layout);
         let bind_group = self.create_bind_group(
             parity,
             render_device,
-            layout,
+            &layout,
             fallback_texture,
             dfg_view,
             dfg_sampler,
@@ -288,11 +299,10 @@ pub fn prepare_raytracing_scene_bind_group(
     }
 
     let parity = bindings.tlas.frame_parity;
-    let layout = pipeline_cache.get_bind_group_layout(&bindings.bind_group_layout);
     bindings.bind_group = Some(bindings.cache_bind_group(
         parity,
         &render_device,
-        &layout,
+        &pipeline_cache,
         &fallback_texture,
         dfg_view,
         dfg_sampler,

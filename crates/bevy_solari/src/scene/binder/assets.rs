@@ -1,5 +1,5 @@
 use super::{
-    buffers::set_at,
+    buffers::{new_storage_buffer, set_at},
     instances::InstanceState,
     slots::{RetainedBindingArray, SlotAllocator},
     StandardMaterialAssets,
@@ -44,9 +44,7 @@ pub struct GpuMaterial {
 
 impl_atomic_pod!(GpuMaterial, GpuMaterialBlob);
 
-/// Asset-backed scene state.
-///
-/// Readiness retries live beside the stable material and texture slots they eventually populate.
+/// Stable material and texture slots, plus the retry state for assets that aren't ready yet.
 pub struct AssetState {
     pub textures: RetainedBindingArray<AssetId<Image>, (TextureView, Sampler)>,
     pub materials: AtomicSparseBufferVec<GpuMaterial>,
@@ -60,10 +58,10 @@ pub struct AssetState {
 }
 
 impl AssetState {
-    pub fn new(materials: AtomicSparseBufferVec<GpuMaterial>) -> Self {
+    pub fn new() -> Self {
         Self {
             textures: RetainedBindingArray::new(),
-            materials,
+            materials: new_storage_buffer("solari_materials"),
             material_slots: SlotAllocator::new(),
             material_textures: HashMap::default(),
             emissive_materials: HashSet::default(),
@@ -109,7 +107,7 @@ impl AssetState {
             &material.metallic_roughness_texture,
         ];
 
-        // Resolve first so a missing texture leaves no partially acquired slots.
+        // Resolve first so a missing texture leaves no partially acquired slots
         let mut textures: MaterialTextures = [None; 4];
         for (slot, handle) in textures.iter_mut().zip(handles) {
             let Some(handle) = handle else { continue };
@@ -122,7 +120,7 @@ impl AssetState {
         }
 
         if self.new_texture_count(&textures) > self.textures.vacancies(MAX_TEXTURE_COUNT.get()) {
-            // At the limit, release the old set once so a replacement can reuse those slots.
+            // At the limit, release the old set once so a replacement can reuse those slots
             self.release_material_textures(material_id);
             self.material_textures.remove(&material_id);
 

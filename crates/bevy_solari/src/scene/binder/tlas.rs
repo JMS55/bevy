@@ -78,9 +78,9 @@ const TLAS_CUSTOM_DATA_BITS: u32 = 24;
 
 /// Instance capacity to allocate to hold `instance_count` slots.
 ///
-/// Geometric rather than a fixed step, so that the number of reallocations over a scene's lifetime
-/// is logarithmic in its size rather than linear. A pure function of the count keeps the descriptor
-/// buffer and both TLASes on the same capacity curve without coordinating their previous sizes.
+/// Grows geometrically rather than by a fixed step, so reallocations over a scene's lifetime are
+/// logarithmic in its size. Being a pure function of the count keeps the descriptor buffer and both
+/// TLASes on the same capacity curve without having to coordinate their previous sizes.
 fn tlas_capacity_for(instance_count: u32) -> u32 {
     let mut capacity = TLAS_MIN_CAPACITY;
     while capacity < instance_count {
@@ -91,9 +91,9 @@ fn tlas_capacity_for(instance_count: u32) -> u32 {
 
 /// TLAS parity and capacity state.
 ///
-/// A parity is only bindable after it has been built. Keeping the BLASes a built parity points at
-/// alive is [`BlasManager`]'s job, which is why nothing here owns one: it defers every retirement
-/// until [`BlasManager::note_tlas_build`] has seen both parities rebuilt.
+/// A parity is only bindable once it has been built. Nothing here owns a BLAS: keeping the ones a
+/// built parity points at alive is [`BlasManager`]'s job, which defers every retirement until
+/// [`BlasManager::note_tlas_build`] has seen both parities rebuilt.
 pub struct TlasState {
     /// Whether builds go through [`tlas_build`]'s raw path rather than `wgpu-core`.
     raw_build: bool,
@@ -142,8 +142,8 @@ impl TlasState {
     /// The two acceleration structures alternate: this frame's is rebuilt, and last frame's stays
     /// intact so the shaders can trace against it.
     ///
-    /// `build_ready` reports whether this frame will be able to record a build. When it is false
-    /// nothing happens at all — not even the parity flip.
+    /// `build_ready` reports whether this frame will be able to record a build. When false, nothing
+    /// happens at all, not even the parity flip.
     pub fn advance(
         &mut self,
         instances: &InstanceState,
@@ -154,7 +154,7 @@ impl TlasState {
         let _span = info_span!("advance_tlas").entered();
 
         // An empty scene must not allocate an unbuilt TLAS that could resurface as a later
-        // previous-frame entry.
+        // previous-frame entry
         if !build_ready || instances.slots.len() == 0 {
             return;
         }
@@ -166,7 +166,7 @@ impl TlasState {
         );
 
         // Secure every build input before committing the parity flip. Neither buffer exists on the
-        // `wgpu-core` path, which builds from instances written into the TLAS itself.
+        // wgpu-core path, which builds from instances written into the TLAS itself.
         let instance_count = instances.slots.len();
         if self.raw_build {
             self.reserve_instance_descriptors(instance_count, render_device);
@@ -218,7 +218,7 @@ impl TlasState {
         }
 
         // The pack transition lets wgpu retain an outgrown scratch buffer until in-flight work
-        // releases it.
+        // releases it
         self.scratch = tlas_build::create_scratch_buffer(render_device, needed);
         self.scratch_capacity = if self.scratch.is_some() { needed } else { 0 };
     }
@@ -369,7 +369,7 @@ pub fn build_raytracing_tlas(
     if built {
         bindings.tlas.built[parity] = true;
         // This parity no longer points at whatever was retired before it, which is what lets the
-        // oldest retirements go.
+        // oldest retirements go
         blas_manager.note_tlas_build();
     }
 }
@@ -427,16 +427,16 @@ fn build_tlas_raw(
 
 /// Builds from instance descriptors filled in on the CPU, through `wgpu-core`.
 ///
-/// The portable path, and the only one Metal can use. It costs a slot's worth of work per frame
-/// for every instance rather than only the ones that moved, and `wgpu-core` then re-derives the
-/// whole build from what it is handed here, which is what [`tlas_build`] exists to avoid.
+/// The portable path, and the only one Metal can use. It costs work per instance every frame rather
+/// than only for the ones that moved, and `wgpu-core` then re-derives the whole build from what it
+/// is handed here, which is the cost [`tlas_build`] exists to avoid.
 fn build_tlas_through_wgpu_core(
     bindings: &mut RaytracingSceneBindings,
     blas_manager: &BlasManager,
     render_context: &mut RenderContext,
 ) -> bool {
     // An empty scene leaves the parity unflipped, so whatever is here belongs to an earlier frame
-    // and is still being traced as the previous one.
+    // and is still being traced as the previous one
     if bindings.instances.slots.len() == 0 {
         return false;
     }
@@ -449,13 +449,13 @@ fn build_tlas_through_wgpu_core(
         let _span = info_span!("fill_tlas_instances").entered();
 
         // The TLAS outlives the frame, so a slot freed or deactivated since its last build still
-        // holds that build's instance and has to be cleared before this frame's are written.
+        // holds that build's instance and has to be cleared before this frame's are written
         let capacity = tlas.get().len();
         tlas[0..capacity].iter_mut().for_each(|entry| *entry = None);
 
         for (slot, mesh, transform) in bindings.instances.drawable() {
             // A mesh can lose its acceleration structure after the instance resolved against it,
-            // which leaves the slot with nothing to point at for a frame.
+            // which leaves the slot with nothing to point at for a frame
             let Some(blas) = blas_manager.get(&mesh) else {
                 continue;
             };

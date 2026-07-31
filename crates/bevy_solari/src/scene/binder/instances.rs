@@ -79,9 +79,6 @@ struct Instance {
 }
 
 /// Stable slots, reverse dependency indices and GPU data owned by raytracing instances.
-///
-/// Transform buffers remain in this domain so the extract hot path is one entity lookup followed
-/// by two allocation-free sparse writes.
 pub struct InstanceState {
     pub vertex_buffers: RetainedBindingArray<BufferId, Buffer>,
     pub index_buffers: RetainedBindingArray<BufferId, Buffer>,
@@ -119,9 +116,9 @@ impl InstanceState {
 
     /// Every drawable instance's slot, mesh and world-from-local transform.
     ///
-    /// Only the `wgpu-core` TLAS build path needs this, to fill in instance descriptors the raw
-    /// path would have packed on the GPU. A slot whose instance isn't currently drawable has a
-    /// null acceleration structure reference and is left out.
+    /// Only the `wgpu-core` TLAS build path needs this, to fill in the instance descriptors that
+    /// the raw path packs on the GPU. Slots with a null acceleration structure reference are not
+    /// currently drawable, and are left out.
     pub fn drawable(&self) -> impl Iterator<Item = (u32, AssetId<Mesh>, [f32; 12])> + '_ {
         self.records.values().filter_map(|instance| {
             let slot = instance.slot;
@@ -278,7 +275,7 @@ impl InstanceState {
         };
         self.reserve_slot(slot);
 
-        // Seed exactly once; later refreshes must not overwrite transforms written by extraction.
+        // Seed only once. Later refreshes must not overwrite transforms written by extraction.
         if previous.is_none() {
             self.write_transforms(slot, transform, previous_frame_transform);
         }
@@ -454,7 +451,7 @@ impl InstanceState {
 }
 
 impl RaytracingSceneBindings {
-    /// Tiny parallel hot path: one entity lookup followed by two existing-slot sparse writes.
+    /// Parallel hot path: one entity lookup, then two allocation-free sparse writes.
     pub fn move_instance(
         &self,
         entity: Entity,

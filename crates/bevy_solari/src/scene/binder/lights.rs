@@ -1,5 +1,5 @@
 use super::{
-    buffers::{set_at, GpuU32},
+    buffers::{new_storage_buffer, set_at, GpuU32},
     slots::SlotAllocator,
 };
 use bevy_color::ColorToComponents;
@@ -148,15 +148,13 @@ pub struct LightState {
 }
 
 impl LightState {
-    pub fn new(
-        sources: AtomicSparseBufferVec<GpuLightSource>,
-        directional_lights: AtomicSparseBufferVec<GpuDirectionalLight>,
-        previous_frame_id_translations: AtomicSparseBufferVec<GpuU32>,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
-            sources,
-            directional_lights,
-            previous_frame_id_translations,
+            sources: new_storage_buffer("solari_light_sources"),
+            directional_lights: new_storage_buffer("solari_directional_lights"),
+            previous_frame_id_translations: new_storage_buffer(
+                "solari_previous_frame_light_id_translations",
+            ),
             index: DenseLightIndex::default(),
             previous_index: HashMap::default(),
             nonidentity_translations: Vec::new(),
@@ -165,7 +163,7 @@ impl LightState {
     }
 
     pub fn update(&mut self, directional_lights: &Query<(Entity, &ExtractedDirectionalLight)>) {
-        // There are few enough directional lights to just walk them every frame.
+        // There are few enough directional lights to just walk them every frame
         let _span = info_span!("update_lights").entered();
 
         let mut live_directional_lights = EntityHashSet::default();
@@ -236,7 +234,7 @@ impl LightState {
         let changed: Vec<LightSourceId> = self.index.changed.drain().collect();
 
         for id in &changed {
-            // Lights that first appeared this frame have no previous id to translate from.
+            // Lights that first appeared this frame have no previous id to translate from
             let Some(&previous) = self.previous_index.get(id) else {
                 continue;
             };
@@ -259,7 +257,7 @@ impl LightState {
             };
         }
 
-        // Every index the shader might read has to be backed by a real element.
+        // Every index the shader might read has to be backed by a real element
         let light_count = self.index.len() as u32;
         let translations = &mut self.previous_frame_id_translations;
         if translations.len() < light_count {

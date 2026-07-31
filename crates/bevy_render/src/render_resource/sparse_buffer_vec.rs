@@ -768,6 +768,48 @@ where
     }
 }
 
+impl<T> AtomicSparseBufferVec<T>
+where
+    T: AtomicPod + PartialEq,
+{
+    /// Sets the value at the given index, growing the buffer if the index isn't in range.
+    ///
+    /// If the buffer already holds `value` there, this does nothing, leaving the element's dirty
+    /// bit clear so that a sparse update skips it.
+    ///
+    /// Requires `&mut self` because growing reallocates.
+    ///
+    /// Use [`Self::set_if_changed`] when the index is known to be in range and
+    /// only a shared reference is available.
+    pub fn grow_and_set(&mut self, index: u32, value: T) {
+        if self.len() > index {
+            if self.get(index) == value {
+                return;
+            }
+        } else {
+            self.grow(index + 1);
+        }
+        self.set(index, value);
+    }
+
+    /// Sets the value at an index that's already in range, without growing the buffer.
+    ///
+    /// If the buffer already holds `value` there, this does nothing, leaving the element's dirty
+    /// bit clear so that a sparse update skips it.
+    ///
+    /// Like [`Self::set`], this is thread-safe, doesn't require `&mut self`, and panics if the
+    /// index isn't in range.
+    pub fn set_if_changed(&self, index: u32, value: T) {
+        debug_assert!(
+            index < self.len(),
+            "buffer was not grown past index {index}"
+        );
+        if self.get(index) != value {
+            self.set(index, value);
+        }
+    }
+}
+
 impl FromWorld for SparseBufferUpdateBindGroups {
     fn from_world(world: &mut World) -> Self {
         world.resource_scope::<SpecializedComputePipelines<SparseBufferUpdatePipelines>, _>(

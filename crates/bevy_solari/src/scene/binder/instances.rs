@@ -1,7 +1,6 @@
 use super::{
     allocator::{IndexAllocator, RetainedBindingArray},
     assets::AssetState,
-    buffers::{new_storage_buffer, set_at, set_existing, GpuU32},
     lights::{GpuLightSource, LightSourceId, LightState},
     BlasManager, RaytracingMesh3d, RaytracingSceneBindings,
 };
@@ -18,7 +17,7 @@ use bevy_platform::collections::HashMap;
 use bevy_render::{
     impl_atomic_pod,
     mesh::allocator::MeshAllocator,
-    render_resource::{AtomicPod, AtomicSparseBufferVec, Buffer, BufferId},
+    render_resource::{AtomicPod, AtomicSparseBufferVec, Buffer, BufferId, BufferUsages},
 };
 use bevy_transform::components::GlobalTransform;
 use bevy_utils::once;
@@ -85,7 +84,7 @@ pub struct InstanceState {
     pub transforms: AtomicSparseBufferVec<GpuTransform>,
     pub previous_frame_transforms: AtomicSparseBufferVec<GpuTransform>,
     pub geometry_ids: AtomicSparseBufferVec<GpuInstanceGeometryIds>,
-    pub material_ids: AtomicSparseBufferVec<GpuU32>,
+    pub material_ids: AtomicSparseBufferVec<u32>,
     pub blas_refs: AtomicSparseBufferVec<GpuBlasRef>,
     pub slots: IndexAllocator,
     records: EntityHashMap<Instance>,
@@ -100,11 +99,23 @@ impl InstanceState {
         Self {
             vertex_buffers: RetainedBindingArray::new(),
             index_buffers: RetainedBindingArray::new(),
-            transforms: new_storage_buffer("solari_transforms"),
-            previous_frame_transforms: new_storage_buffer("solari_previous_frame_transforms"),
-            geometry_ids: new_storage_buffer("solari_geometry_ids"),
-            material_ids: new_storage_buffer("solari_material_ids"),
-            blas_refs: new_storage_buffer("solari_blas_refs"),
+            transforms: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "solari_transforms".into(),
+            ),
+            previous_frame_transforms: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "solari_previous_frame_transforms".into(),
+            ),
+            geometry_ids: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "solari_geometry_ids".into(),
+            ),
+            material_ids: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "solari_material_ids".into(),
+            ),
+            blas_refs: AtomicSparseBufferVec::new(BufferUsages::STORAGE, "solari_blas_refs".into()),
             slots: IndexAllocator::new(),
             records: EntityHashMap::default(),
             live_count: 0,
@@ -352,8 +363,7 @@ impl InstanceState {
         self.release_buffers(previous_buffers);
 
         let triangle_count = (index_slice.range.len() / 3) as u32;
-        set_at(
-            &mut self.geometry_ids,
+        self.geometry_ids.grow_and_set(
             slot,
             GpuInstanceGeometryIds {
                 vertex_buffer_id,
@@ -363,7 +373,7 @@ impl InstanceState {
                 triangle_count,
             },
         );
-        set_at(&mut self.material_ids, slot, GpuU32(material_slot));
+        self.material_ids.grow_and_set(slot, material_slot);
         self.set_live(slot, blas_address);
 
         if assets.emissive_materials.contains(&instance.material) {
@@ -383,13 +393,11 @@ impl InstanceState {
         transform: &GlobalTransform,
         previous_frame_transform: &PreviousGlobalTransform,
     ) {
-        set_existing(
-            &self.transforms,
+        self.transforms.set_if_changed(
             slot,
             GpuTransform(Affine3::from(transform.affine()).to_transpose()),
         );
-        set_existing(
-            &self.previous_frame_transforms,
+        self.previous_frame_transforms.set_if_changed(
             slot,
             GpuTransform(Affine3::from(previous_frame_transform.0).to_transpose()),
         );

@@ -1,6 +1,6 @@
 use super::{
-    allocator::RetainedBindingArray, buffers::SPARSE_BUFFER_COUNT, lights::GpuLightSource,
-    RaytracingSceneBindings, TlasInstancePackPipeline,
+    allocator::RetainedBindingArray, lights::GpuLightSource, RaytracingSceneBindings,
+    TlasInstancePackPipeline,
 };
 use bevy_ecs::system::{Res, ResMut};
 use bevy_pbr::DfgLut;
@@ -21,7 +21,7 @@ use tracing::info_span;
 pub struct BindGroupCacheState {
     cached: [Option<BindGroup>; 2],
     pub invalid: bool,
-    last_buffer_ids: [Option<BufferId>; SPARSE_BUFFER_COUNT],
+    last_buffer_ids: [Option<BufferId>; 9],
     last_light_count: u32,
     last_dfg_ids: Option<(TextureViewId, SamplerId)>,
     pub dummy_buffer: Buffer,
@@ -40,7 +40,7 @@ impl BindGroupCacheState {
         Self {
             cached: [None, None],
             invalid: true,
-            last_buffer_ids: [None; SPARSE_BUFFER_COUNT],
+            last_buffer_ids: [None; 9],
             last_light_count: 0,
             last_dfg_ids: None,
             dummy_buffer,
@@ -59,9 +59,28 @@ fn buffer_bindings<'a>(
 }
 
 impl RaytracingSceneBindings {
-    fn buffer_ids(&self) -> [Option<BufferId>; SPARSE_BUFFER_COUNT] {
-        let buffers = super::buffers::sparse_buffers(self);
-        core::array::from_fn(|index| buffers[index].buffer_id())
+    /// Each sparse buffer's GPU buffer id, or `None` where it has not been created yet.
+    fn buffer_ids(&self) -> [Option<BufferId>; 9] {
+        let bindings = self;
+        [
+            bindings.assets.materials.buffer().map(Buffer::id),
+            bindings.instances.transforms.buffer().map(Buffer::id),
+            bindings
+                .instances
+                .previous_frame_transforms
+                .buffer()
+                .map(Buffer::id),
+            bindings.instances.geometry_ids.buffer().map(Buffer::id),
+            bindings.instances.material_ids.buffer().map(Buffer::id),
+            bindings.instances.blas_refs.buffer().map(Buffer::id),
+            bindings.lights.sources.buffer().map(Buffer::id),
+            bindings.lights.directional_lights.buffer().map(Buffer::id),
+            bindings
+                .lights
+                .previous_frame_id_translations
+                .buffer()
+                .map(Buffer::id),
+        ]
     }
 
     fn take_bind_group_invalidation(
@@ -258,18 +277,14 @@ pub fn prepare_raytracing_scene_bind_group(
 ) {
     let bindings = &mut *bindings;
 
-    {
-        let _span = info_span!("prepare_sparse_uploads").entered();
-        for buffer in super::buffers::sparse_buffers_mut(bindings) {
-            buffer.prepare_upload(
-                &render_device,
-                &pipeline_cache,
-                &mut sparse_buffer_update_jobs,
-                &mut sparse_buffer_update_bind_groups,
-                &sparse_buffer_update_pipelines,
-            );
-        }
-    }
+    prepare_sparse_uploads(
+        bindings,
+        &render_device,
+        &pipeline_cache,
+        &mut sparse_buffer_update_jobs,
+        &mut sparse_buffer_update_bind_groups,
+        &sparse_buffer_update_pipelines,
+    );
 
     bindings.tlas.update_instance_pack_bind_group(
         &bindings.instances,
@@ -307,4 +322,49 @@ pub fn prepare_raytracing_scene_bind_group(
         dfg_view,
         dfg_sampler,
     ));
+}
+
+/// Queues the compute jobs that scatter each buffer's staged elements into its GPU buffer.
+fn prepare_sparse_uploads(
+    bindings: &mut RaytracingSceneBindings,
+    device: &RenderDevice,
+    cache: &PipelineCache,
+    jobs: &mut SparseBufferUpdateJobs,
+    groups: &mut SparseBufferUpdateBindGroups,
+    pipelines: &SparseBufferUpdatePipelines,
+) {
+    let _span = info_span!("prepare_sparse_uploads").entered();
+
+    let assets = &mut bindings.assets;
+    assets
+        .materials
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+
+    let instances = &mut bindings.instances;
+    instances
+        .transforms
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    instances
+        .previous_frame_transforms
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    instances
+        .geometry_ids
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    instances
+        .material_ids
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    instances
+        .blas_refs
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+
+    let lights = &mut bindings.lights;
+    lights
+        .sources
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    lights
+        .directional_lights
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
+    lights
+        .previous_frame_id_translations
+        .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
 }

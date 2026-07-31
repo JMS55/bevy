@@ -1,7 +1,4 @@
-use super::{
-    allocator::SlotAllocator,
-    buffers::{new_storage_buffer, set_at, GpuU32},
-};
+use super::allocator::SlotAllocator;
 use bevy_color::ColorToComponents;
 use bevy_ecs::{
     entity::{Entity, EntityHashSet},
@@ -10,7 +7,7 @@ use bevy_ecs::{
 use bevy_math::{ops::cos, Vec3};
 use bevy_pbr::ExtractedDirectionalLight;
 use bevy_platform::collections::{HashMap, HashSet};
-use bevy_render::render_resource::AtomicSparseBufferVec;
+use bevy_render::render_resource::{AtomicSparseBufferVec, BufferUsages};
 use bevy_render::{impl_atomic_pod, render_resource::AtomicPod};
 use bytemuck::{Pod, Zeroable};
 use core::{f32::consts::TAU, hash::Hash};
@@ -140,7 +137,7 @@ pub struct LightState {
     /// Kept dense because shaders derive the light count with `arrayLength`.
     pub sources: AtomicSparseBufferVec<GpuLightSource>,
     pub directional_lights: AtomicSparseBufferVec<GpuDirectionalLight>,
-    pub previous_frame_id_translations: AtomicSparseBufferVec<GpuU32>,
+    pub previous_frame_id_translations: AtomicSparseBufferVec<u32>,
     pub index: DenseLightIndex,
     previous_index: HashMap<LightSourceId, u32>,
     nonidentity_translations: Vec<u32>,
@@ -150,10 +147,17 @@ pub struct LightState {
 impl LightState {
     pub fn new() -> Self {
         Self {
-            sources: new_storage_buffer("solari_light_sources"),
-            directional_lights: new_storage_buffer("solari_directional_lights"),
-            previous_frame_id_translations: new_storage_buffer(
-                "solari_previous_frame_light_id_translations",
+            sources: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "solari_light_sources".into(),
+            ),
+            directional_lights: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "solari_directional_lights".into(),
+            ),
+            previous_frame_id_translations: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "solari_previous_frame_light_id_translations".into(),
             ),
             index: DenseLightIndex::default(),
             previous_index: HashMap::default(),
@@ -171,11 +175,8 @@ impl LightState {
             live_directional_lights.insert(entity);
 
             let slot = self.directional_slots.get_or_allocate(entity);
-            set_at(
-                &mut self.directional_lights,
-                slot,
-                GpuDirectionalLight::new(directional_light),
-            );
+            self.directional_lights
+                .grow_and_set(slot, GpuDirectionalLight::new(directional_light));
             self.add_light(
                 LightSourceId::Directional(entity),
                 GpuLightSource::new_directional_light(slot),
@@ -202,7 +203,7 @@ impl LightState {
 
     pub fn add_light(&mut self, id: LightSourceId, source: GpuLightSource) {
         let index = self.index.insert(id);
-        set_at(&mut self.sources, index, source);
+        self.sources.grow_and_set(index, source);
     }
 
     /// Removes a light, moving the last one down into the hole to keep the array dense.
@@ -213,18 +214,15 @@ impl LightState {
 
         if index != last {
             let source = self.sources.get(last);
-            set_at(&mut self.sources, index, source);
+            self.sources.grow_and_set(index, source);
         }
     }
 
     /// Restores the translation entries written last frame back to identity.
     pub fn reset_id_translations(&mut self) {
         for index in core::mem::take(&mut self.nonidentity_translations) {
-            set_at(
-                &mut self.previous_frame_id_translations,
-                index,
-                GpuU32(index),
-            );
+            self.previous_frame_id_translations
+                .grow_and_set(index, index);
         }
     }
 
@@ -241,11 +239,8 @@ impl LightState {
             let current = self.index.get(id).unwrap_or(LIGHT_NOT_PRESENT_THIS_FRAME);
 
             if current != previous {
-                set_at(
-                    &mut self.previous_frame_id_translations,
-                    previous,
-                    GpuU32(current),
-                );
+                self.previous_frame_id_translations
+                    .grow_and_set(previous, current);
                 self.nonidentity_translations.push(previous);
             }
         }
@@ -264,7 +259,7 @@ impl LightState {
             let start = translations.len();
             translations.grow(light_count);
             for index in start..light_count {
-                translations.set(index, GpuU32(index));
+                translations.set(index, index);
             }
         }
     }

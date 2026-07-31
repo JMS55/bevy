@@ -1,6 +1,5 @@
 use super::{
     allocator::{RetainedBindingArray, SlotAllocator},
-    buffers::{new_storage_buffer, set_at},
     instances::InstanceState,
     StandardMaterialAssets,
 };
@@ -13,7 +12,7 @@ use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
     impl_atomic_pod,
     render_asset::{ExtractedAssets, RenderAssets},
-    render_resource::{AtomicPod, AtomicSparseBufferVec, Sampler, TextureView},
+    render_resource::{AtomicPod, AtomicSparseBufferVec, BufferUsages, Sampler, TextureView},
     texture::GpuImage,
 };
 use bevy_utils::once;
@@ -61,7 +60,7 @@ impl AssetState {
     pub fn new() -> Self {
         Self {
             textures: RetainedBindingArray::new(),
-            materials: new_storage_buffer("solari_materials"),
+            materials: AtomicSparseBufferVec::new(BufferUsages::STORAGE, "solari_materials".into()),
             material_slots: SlotAllocator::new(),
             material_textures: HashMap::default(),
             emissive_materials: HashSet::default(),
@@ -191,8 +190,7 @@ impl AssetState {
         let slot = self.material_slots.get_or_allocate(material_id);
         let emissive = material.emissive.to_vec3();
         let is_emissive = emissive != Vec3::ZERO;
-        set_at(
-            &mut self.materials,
+        self.materials.grow_and_set(
             slot,
             GpuMaterial {
                 normal_map_texture_id: texture_ids[0],

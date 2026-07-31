@@ -1,7 +1,6 @@
 mod allocator;
 mod assets;
 mod bind_group;
-mod buffers;
 mod instances;
 mod lights;
 mod tlas;
@@ -34,6 +33,7 @@ use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
     texture::GpuImage,
 };
+use tracing::info_span;
 
 #[derive(Resource)]
 pub struct RaytracingSceneBindings {
@@ -137,8 +137,8 @@ pub fn prepare_raytracing_scene_resources(
     // Update the light set, now that emissive instances are resolved
     bindings.lights.update(&directional_lights);
 
-    // Make every sparse write above available for GPU upload
-    buffers::write_sparse_buffers(bindings, &render_device, &render_queue);
+    // Upload the above writes
+    write_sparse_buffers(bindings, &render_device, &render_queue);
 
     // Prepare the next TLAS
     let build_ready = !bindings.tlas.uses_raw_build()
@@ -152,4 +152,42 @@ pub fn prepare_raytracing_scene_resources(
         &render_device,
         build_ready,
     );
+}
+
+/// Grows every sparse buffer to hold at least one element, then snapshots its dirty set into
+/// either a staged sparse update or a full reupload.
+fn write_sparse_buffers(
+    bindings: &mut RaytracingSceneBindings,
+    device: &RenderDevice,
+    queue: &RenderQueue,
+) {
+    let _span = info_span!("write_buffers").entered();
+
+    let assets = &mut bindings.assets;
+    assets.materials.grow(1);
+    assets.materials.write_buffers(device, queue);
+
+    let instances = &mut bindings.instances;
+    instances.transforms.grow(1);
+    instances.transforms.write_buffers(device, queue);
+    instances.previous_frame_transforms.grow(1);
+    instances
+        .previous_frame_transforms
+        .write_buffers(device, queue);
+    instances.geometry_ids.grow(1);
+    instances.geometry_ids.write_buffers(device, queue);
+    instances.material_ids.grow(1);
+    instances.material_ids.write_buffers(device, queue);
+    instances.blas_refs.grow(1);
+    instances.blas_refs.write_buffers(device, queue);
+
+    let lights = &mut bindings.lights;
+    lights.sources.grow(1);
+    lights.sources.write_buffers(device, queue);
+    lights.directional_lights.grow(1);
+    lights.directional_lights.write_buffers(device, queue);
+    lights.previous_frame_id_translations.grow(1);
+    lights
+        .previous_frame_id_translations
+        .write_buffers(device, queue);
 }

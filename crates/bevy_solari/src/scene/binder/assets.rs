@@ -33,6 +33,7 @@ pub struct GpuMaterial {
     base_color_texture_id: u32,
     emissive_texture_id: u32,
     metallic_roughness_texture_id: u32,
+
     base_color: Vec3,
     perceptual_roughness: f32,
     emissive: Vec3,

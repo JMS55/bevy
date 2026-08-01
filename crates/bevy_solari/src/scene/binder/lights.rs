@@ -22,7 +22,7 @@ pub struct GpuLightSource {
     id: u32,
 }
 
-/// Stable identity for one source in the dense light array.
+/// Stable identity for one source in the light array.
 ///
 /// An entity can contribute both kinds at once, so the entity alone is not enough to identify a
 /// source.
@@ -33,13 +33,13 @@ pub enum LightSourceId {
 }
 
 #[derive(Default)]
-pub struct DenseLightIndex {
+pub struct LightIndex {
     indices: HashMap<LightSourceId, u32>,
     ids: Vec<LightSourceId>,
     changed: HashSet<LightSourceId>,
 }
 
-impl DenseLightIndex {
+impl LightIndex {
     pub fn len(&self) -> usize {
         self.ids.len()
     }
@@ -66,7 +66,8 @@ impl DenseLightIndex {
 
     /// Removes `id` and reports both its old index and the old final index.
     ///
-    /// When these differ, the caller must move the final GPU light source into the hole.
+    /// Only the ids tracked here are swapped down. When the two indices differ, the caller has to
+    /// mirror that swap in `sources`, copying the element at the old final index into the hole.
     fn remove(&mut self, id: LightSourceId) -> Option<(u32, u32)> {
         let index = self.indices.remove(&id)?;
         self.changed.insert(id);
@@ -132,13 +133,13 @@ impl GpuDirectionalLight {
     }
 }
 
-/// Dense light slots and the incremental previous-frame id translation state.
+/// Light slots and the incremental previous-frame id translation state.
 pub struct LightState {
-    /// Kept dense because shaders derive the light count with `arrayLength`.
+    /// Kept gap-free because shaders derive the light count with `arrayLength`.
     pub sources: AtomicSparseBufferVec<GpuLightSource>,
     pub directional_lights: AtomicSparseBufferVec<GpuDirectionalLight>,
     pub previous_frame_id_translations: AtomicSparseBufferVec<u32>,
-    pub index: DenseLightIndex,
+    pub index: LightIndex,
     previous_index: HashMap<LightSourceId, u32>,
     nonidentity_translations: Vec<u32>,
     directional_slots: SlotAllocator<Entity>,
@@ -159,7 +160,7 @@ impl LightState {
                 BufferUsages::STORAGE,
                 "solari_previous_frame_light_id_translations".into(),
             ),
-            index: DenseLightIndex::default(),
+            index: LightIndex::default(),
             previous_index: HashMap::default(),
             nonidentity_translations: Vec::new(),
             directional_slots: SlotAllocator::new(),
@@ -206,7 +207,7 @@ impl LightState {
         self.sources.grow_and_set(index, source);
     }
 
-    /// Removes a light, moving the last one down into the hole to keep the array dense.
+    /// Removes a light, moving the last one down into the hole so the array stays gap-free.
     pub fn remove_light(&mut self, id: LightSourceId) {
         let Some((index, last)) = self.index.remove(id) else {
             return;
@@ -267,7 +268,7 @@ impl LightState {
 
 #[cfg(test)]
 mod tests {
-    use super::{DenseLightIndex, LightSourceId};
+    use super::{LightIndex, LightSourceId};
     use bevy_ecs::entity::Entity;
 
     #[test]
@@ -275,7 +276,7 @@ mod tests {
         let entity = Entity::PLACEHOLDER;
         let emissive = LightSourceId::EmissiveMesh(entity);
         let directional = LightSourceId::Directional(entity);
-        let mut lights = DenseLightIndex::default();
+        let mut lights = LightIndex::default();
 
         assert_eq!(lights.insert(emissive), 0);
         assert_eq!(lights.insert(directional), 1);

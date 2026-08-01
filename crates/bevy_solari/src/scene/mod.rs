@@ -22,8 +22,8 @@ use bevy_render::{
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 use binder::{
-    build_raytracing_tlas, pack_raytracing_tlas_instances, prepare_raytracing_scene_bind_group,
-    prepare_raytracing_scene_resources, TlasInstancePackPipeline,
+    build_raytracing_tlas, prepare_raytracing_scene_bind_group, prepare_raytracing_scene_resources,
+    TlasInstanceSetupPipeline,
 };
 use blas::{compact_raytracing_blas, delete_raytracing_blas, prepare_raytracing_blas, BlasManager};
 use extract::{
@@ -66,7 +66,7 @@ impl Plugin for RaytracingScenePlugin {
             .init_gpu_resource::<BlasManager>()
             .init_gpu_resource::<StandardMaterialAssets>()
             .init_gpu_resource::<RaytracingSceneBindings>()
-            .init_gpu_resource::<TlasInstancePackPipeline>()
+            .init_gpu_resource::<TlasInstanceSetupPipeline>()
             .add_systems(
                 ExtractSchedule,
                 (
@@ -93,8 +93,7 @@ impl Plugin for RaytracingScenePlugin {
             .add_systems(
                 RenderGraph,
                 (
-                    (pack_raytracing_tlas_instances, build_raytracing_tlas)
-                        .chain()
+                    build_raytracing_tlas
                         .after(update_sparse_buffers)
                         .in_set(RenderGraphSystems::Begin),
                     delete_raytracing_blas.in_set(RenderGraphSystems::Finish),

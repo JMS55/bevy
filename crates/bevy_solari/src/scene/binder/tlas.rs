@@ -24,17 +24,17 @@ use bevy_utils::{default, once};
 use tracing::{info_span, warn};
 use wgpu::{BufferTransition, BufferUses};
 
-/// Compute pipeline that packs per-slot transforms and BLAS addresses into TLAS descriptors.
+/// Compute pipeline that writes per-slot transforms and BLAS addresses into TLAS descriptors.
 #[derive(Resource)]
-pub struct TlasInstancePackPipeline {
+pub struct TlasInstanceSetupPipeline {
     pub layout: BindGroupLayoutDescriptor,
     pub id: Option<CachedComputePipelineId>,
 }
 
-impl FromWorld for TlasInstancePackPipeline {
+impl FromWorld for TlasInstanceSetupPipeline {
     fn from_world(world: &mut World) -> Self {
         let layout = BindGroupLayoutDescriptor::new(
-            "tlas_instance_pack_bind_group_layout",
+            "tlas_instance_setup_bind_group_layout",
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::COMPUTE,
                 (
@@ -45,7 +45,7 @@ impl FromWorld for TlasInstancePackPipeline {
             ),
         );
 
-        if !tlas_build::supported(world.resource::<RenderDevice>()) {
+        if tlas_build::resolve(world.resource::<RenderDevice>()).is_none() {
             return Self { layout, id: None };
         }
 
@@ -54,7 +54,7 @@ impl FromWorld for TlasInstancePackPipeline {
             world
                 .resource::<PipelineCache>()
                 .queue_compute_pipeline(ComputePipelineDescriptor {
-                    label: Some("tlas_instance_pack_pipeline".into()),
+                    label: Some("tlas_instance_setup_pipeline".into()),
                     layout: vec![layout.clone()],
                     shader,
                     entry_point: Some("setup_tlas_instances".into()),
@@ -72,8 +72,8 @@ impl FromWorld for TlasInstancePackPipeline {
 const TLAS_MIN_CAPACITY: u32 = 128;
 
 /// Width of a TLAS instance's custom data in both Vulkan (`instanceCustomIndex`) and DXR
-/// (`InstanceID`). `setup_tlas_instances.wgsl` packs instance slots into that field, so they have to
-/// fit.
+/// (`InstanceID`). `setup_tlas_instances.wgsl` writes instance slots into that field, so they have
+/// to fit.
 const TLAS_CUSTOM_DATA_BITS: u32 = 24;
 
 /// Instance capacity to allocate to hold `instance_count` slots.
@@ -89,61 +89,60 @@ fn tlas_capacity_for(instance_count: u32) -> u32 {
     capacity
 }
 
-/// TLAS parity and capacity state.
+/// The double-buffered TLAS and its capacity state.
 ///
-/// A parity is only bindable once it has been built. Nothing here owns a BLAS: keeping the ones a
-/// built parity points at alive is [`BlasManager`]'s job, which defers every retirement until
-/// [`BlasManager::note_tlas_build`] has seen both parities rebuilt.
+/// An acceleration structure is only bindable once it has been built. Nothing here owns a BLAS:
+/// keeping the ones a built structure points at alive is [`BlasManager`]'s job, which defers every
+/// retirement until [`BlasManager::note_tlas_build`] has seen both structures rebuilt.
 pub struct TlasState {
-    /// Whether builds go through [`tlas_build`]'s raw path rather than `wgpu-core`.
-    raw_build: bool,
+    /// The backend to build through, or `None` to go through `wgpu-core`.
+    raw: Option<&'static dyn tlas_build::RawTlasBackend>,
     /// Alternating current/previous acceleration structures.
     pub structures: [Option<Tlas>; 2],
     capacity: [u32; 2],
     /// Whether each structure has had a build recorded since its latest allocation.
     pub built: [bool; 2],
-    pub frame_parity: usize,
+    /// Which of [`Self::structures`] this frame builds into. The other holds last frame's.
+    pub current_index: usize,
     pub instance_descriptors: Option<Buffer>,
     instance_descriptor_capacity: u32,
     pub scratch: Option<Buffer>,
     scratch_capacity: u64,
     scratch_sized_for: u32,
-    pub instances_packed: bool,
-    pub instance_pack_bind_group: Option<BindGroup>,
-    instance_pack_buffer_ids: Option<[BufferId; 3]>,
+    pub instance_setup_bind_group: Option<BindGroup>,
+    instance_setup_buffer_ids: Option<[BufferId; 3]>,
 }
 
 impl TlasState {
     pub fn new(render_device: &RenderDevice) -> Self {
         Self {
-            raw_build: tlas_build::supported(render_device),
+            raw: tlas_build::resolve(render_device),
             structures: [None, None],
             capacity: [0, 0],
             built: [false, false],
-            frame_parity: 0,
+            current_index: 0,
             instance_descriptors: None,
             instance_descriptor_capacity: 0,
             scratch: None,
             scratch_capacity: 0,
             scratch_sized_for: 0,
-            instances_packed: false,
-            instance_pack_bind_group: None,
-            instance_pack_buffer_ids: None,
+            instance_setup_bind_group: None,
+            instance_setup_buffer_ids: None,
         }
     }
 
     /// Whether builds go through [`tlas_build`]'s raw path rather than `wgpu-core`.
     pub fn uses_raw_build(&self) -> bool {
-        self.raw_build
+        self.raw.is_some()
     }
 
-    /// Moves to the next TLAS parity and brings it up to date with this frame's changes.
+    /// Swaps to the other acceleration structure and brings it up to date with this frame's changes.
     ///
-    /// The two acceleration structures alternate: this frame's is rebuilt, and last frame's stays
-    /// intact so the shaders can trace against it.
+    /// The two alternate: this frame's is rebuilt, and last frame's stays intact so the shaders can
+    /// trace against it.
     ///
     /// `build_ready` reports whether this frame will be able to record a build. When false, nothing
-    /// happens at all, not even the parity flip.
+    /// happens at all, not even the swap.
     pub fn advance(
         &mut self,
         instances: &InstanceState,
@@ -165,10 +164,10 @@ impl TlasState {
             instances.slots.high_water_mark()
         );
 
-        // Secure every build input before committing the parity flip. Neither buffer exists on the
+        // Secure every build input before committing the swap. Neither buffer exists on the
         // wgpu-core path, which builds from instances written into the TLAS itself.
         let instance_count = instances.slots.high_water_mark();
-        if self.raw_build {
+        if self.raw.is_some() {
             self.reserve_instance_descriptors(instance_count, render_device);
             self.reserve_tlas_scratch(render_device);
             if self.instance_descriptors.is_none() || self.scratch.is_none() {
@@ -176,36 +175,36 @@ impl TlasState {
             }
         }
 
-        self.frame_parity ^= 1;
-        let parity = self.frame_parity;
-        self.reserve_tlas(parity, instance_count, render_device, bind_groups);
+        self.current_index ^= 1;
+        let current_index = self.current_index;
+        self.reserve_tlas(current_index, instance_count, render_device, bind_groups);
     }
 
-    /// Rebuilds the pack shader's bind group only when one of its three buffers moves.
-    pub fn update_instance_pack_bind_group(
+    /// Rebuilds the setup shader's bind group only when one of its three buffers moves.
+    pub fn update_instance_setup_bind_group(
         &mut self,
         instances: &InstanceState,
         render_device: &RenderDevice,
         pipeline_cache: &PipelineCache,
-        pipeline: &TlasInstancePackPipeline,
+        pipeline: &TlasInstanceSetupPipeline,
     ) {
         let (Some(transforms), Some(blas_refs), Some(instances)) = (
             instances.transforms.buffer(),
             instances.blas_refs.buffer(),
             self.instance_descriptors.as_ref(),
         ) else {
-            self.instance_pack_bind_group = None;
+            self.instance_setup_bind_group = None;
             return;
         };
 
         let ids = [transforms.id(), blas_refs.id(), instances.id()];
-        if self.instance_pack_bind_group.is_some() && self.instance_pack_buffer_ids == Some(ids) {
+        if self.instance_setup_bind_group.is_some() && self.instance_setup_buffer_ids == Some(ids) {
             return;
         }
 
         let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
-        self.instance_pack_bind_group = Some(render_device.create_bind_group(
-            "tlas_instance_pack_bind_group",
+        self.instance_setup_bind_group = Some(render_device.create_bind_group(
+            "tlas_instance_setup_bind_group",
             &layout,
             &BindGroupEntries::sequential((
                 transforms.as_entire_binding(),
@@ -213,7 +212,7 @@ impl TlasState {
                 instances.as_entire_binding(),
             )),
         ));
-        self.instance_pack_buffer_ids = Some(ids);
+        self.instance_setup_buffer_ids = Some(ids);
     }
 
     /// Makes sure the instance descriptor buffer covers every stable slot.
@@ -230,7 +229,7 @@ impl TlasState {
             mapped_at_creation: false,
         }));
         self.instance_descriptor_capacity = capacity;
-        self.instance_pack_bind_group = None;
+        self.instance_setup_bind_group = None;
     }
 
     /// Makes sure the build scratch buffer is big enough for this frame's descriptor capacity.
@@ -240,10 +239,11 @@ impl TlasState {
             return;
         }
 
-        let Some(instances) = self.instance_descriptors.as_ref() else {
+        let (Some(backend), Some(instances)) = (self.raw, self.instance_descriptors.as_ref())
+        else {
             return;
         };
-        let Some(needed) = tlas_build::tlas_scratch_size(render_device, instances, capacity) else {
+        let Some(needed) = backend.scratch_size(render_device, instances, capacity) else {
             return;
         };
         self.scratch_sized_for = capacity;
@@ -252,26 +252,26 @@ impl TlasState {
             return;
         }
 
-        // The pack transition lets wgpu retain an outgrown scratch buffer until in-flight work
+        // The setup transition lets wgpu retain an outgrown scratch buffer until in-flight work
         // releases it
-        self.scratch = tlas_build::create_scratch_buffer(render_device, needed);
+        self.scratch = backend.create_scratch_buffer(render_device, needed);
         self.scratch_capacity = if self.scratch.is_some() { needed } else { 0 };
     }
 
-    /// Makes sure one parity can hold every instance slot without disturbing the other parity.
+    /// Makes sure one of the two structures can hold every instance slot, leaving the other alone.
     fn reserve_tlas(
         &mut self,
-        parity: usize,
+        current_index: usize,
         needed: u32,
         render_device: &RenderDevice,
         bind_groups: &mut BindGroupCacheState,
     ) {
-        if self.structures[parity].is_some() && needed <= self.capacity[parity] {
+        if self.structures[current_index].is_some() && needed <= self.capacity[current_index] {
             return;
         }
 
         let capacity = tlas_capacity_for(needed);
-        self.structures[parity] = Some(render_device.wgpu_device().create_tlas(
+        self.structures[current_index] = Some(render_device.wgpu_device().create_tlas(
             &CreateTlasDescriptor {
                 label: Some("tlas"),
                 flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
@@ -279,43 +279,74 @@ impl TlasState {
                 max_instances: capacity,
             },
         ));
-        self.capacity[parity] = capacity;
-        self.built[parity] = false;
+        self.capacity[current_index] = capacity;
+        self.built[current_index] = false;
         bind_groups.invalid = true;
     }
 }
 
-/// Packs this frame's TLAS instance descriptors on the GPU.
-pub fn pack_raytracing_tlas_instances(
+/// Records this frame's TLAS build into the render graph's command encoder.
+pub fn build_raytracing_tlas(
     mut bindings: ResMut<RaytracingSceneBindings>,
+    mut blas_manager: ResMut<BlasManager>,
     pipeline_cache: Res<PipelineCache>,
-    pipeline: Res<TlasInstancePackPipeline>,
+    pipeline: Res<TlasInstanceSetupPipeline>,
     mut render_context: RenderContext,
 ) {
     let bindings = &mut *bindings;
-    bindings.tlas.instances_packed = false;
+    let current_index = bindings.tlas.current_index;
 
-    if !bindings.tlas.raw_build {
-        return;
+    let built = match bindings.tlas.raw {
+        Some(backend) => {
+            setup_tlas_instances(bindings, &pipeline_cache, &pipeline, &mut render_context)
+                && build_tlas_raw(bindings, backend, &mut render_context)
+        }
+        None => build_tlas_through_wgpu_core(bindings, &blas_manager, &mut render_context),
+    };
+
+    if built {
+        bindings.tlas.built[current_index] = true;
+        // This structure no longer points at whatever was retired before it, which is what lets the
+        // oldest retirements go
+        blas_manager.note_tlas_build();
     }
-    if bindings.tlas.structures[bindings.tlas.frame_parity].is_none() {
-        return;
+}
+
+/// Writes this frame's TLAS instance descriptors on the GPU, ready for [`build_tlas_raw`].
+///
+/// Returns whether the pass was recorded. The build has nothing to read when it wasn't.
+fn setup_tlas_instances(
+    bindings: &mut RaytracingSceneBindings,
+    pipeline_cache: &PipelineCache,
+    pipeline: &TlasInstanceSetupPipeline,
+    render_context: &mut RenderContext,
+) -> bool {
+    if bindings.tlas.structures[bindings.tlas.current_index].is_none() {
+        return false;
     }
 
     let (Some(bind_group), Some(compute_pipeline), Some(instances), Some(scratch)) = (
-        bindings.tlas.instance_pack_bind_group.as_ref(),
+        bindings.tlas.instance_setup_bind_group.as_ref(),
         pipeline
             .id
             .and_then(|id| pipeline_cache.get_compute_pipeline(id)),
         bindings.tlas.instance_descriptors.as_ref(),
         bindings.tlas.scratch.as_ref(),
     ) else {
-        return;
+        // `advance` secures all of these before it allocates the TLAS this is setting up for
+        once!(warn!(
+            "TLAS allocated but its instance setup pass could not be recorded: bind group={}, \
+             descriptors={}, scratch={}",
+            bindings.tlas.instance_setup_bind_group.is_some(),
+            bindings.tlas.instance_descriptors.is_some(),
+            bindings.tlas.scratch.is_some(),
+        ));
+        return false;
     };
 
     let slot_count = bindings.instances.slots.high_water_mark();
     if slot_count == 0 {
-        return;
+        return false;
     }
 
     let diagnostics = render_context.diagnostic_recorder();
@@ -348,50 +379,24 @@ pub fn pack_raytracing_tlas_instances(
         core::iter::empty(),
     );
 
-    bindings.tlas.instances_packed = true;
+    true
 }
 
-/// Records this frame's TLAS build into the render graph's command encoder.
-pub fn build_raytracing_tlas(
-    mut bindings: ResMut<RaytracingSceneBindings>,
-    mut blas_manager: ResMut<BlasManager>,
-    mut render_context: RenderContext,
-) {
-    let bindings = &mut *bindings;
-    let parity = bindings.tlas.frame_parity;
-
-    let built = if bindings.tlas.raw_build {
-        build_tlas_raw(bindings, &mut render_context)
-    } else {
-        build_tlas_through_wgpu_core(bindings, &blas_manager, &mut render_context)
-    };
-
-    if built {
-        bindings.tlas.built[parity] = true;
-        // This parity no longer points at whatever was retired before it, which is what lets the
-        // oldest retirements go
-        blas_manager.note_tlas_build();
-    }
-}
-
-/// Builds from the descriptors the pack pass wrote, straight through `wgpu_hal`.
+/// Builds from the descriptors [`setup_tlas_instances`] wrote, straight through `wgpu_hal`.
 fn build_tlas_raw(
     bindings: &mut RaytracingSceneBindings,
+    backend: &dyn tlas_build::RawTlasBackend,
     render_context: &mut RenderContext,
 ) -> bool {
-    let parity = bindings.tlas.frame_parity;
-    let Some(tlas) = bindings.tlas.structures[parity].as_mut() else {
-        return false;
-    };
-
-    let (true, Some(instances), Some(scratch)) = (
-        bindings.tlas.instances_packed,
+    let current_index = bindings.tlas.current_index;
+    let (Some(tlas), Some(instances), Some(scratch)) = (
+        bindings.tlas.structures[current_index].as_mut(),
         bindings.tlas.instance_descriptors.as_ref(),
         bindings.tlas.scratch.as_ref(),
     ) else {
         once!(warn!(
-            "TLAS allocated but not built: packed={}, descriptors={}, scratch={}",
-            bindings.tlas.instances_packed,
+            "TLAS instances were set up but not built: structure={}, descriptors={}, scratch={}",
+            bindings.tlas.structures[current_index].is_some(),
             bindings.tlas.instance_descriptors.is_some(),
             bindings.tlas.scratch.is_some(),
         ));
@@ -406,7 +411,7 @@ fn build_tlas_raw(
     let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("tlas_build_command_encoder"),
     });
-    let built = tlas_build::build_tlas(
+    let built = backend.build_tlas(
         &mut command_encoder,
         tlas,
         instances,
@@ -418,8 +423,7 @@ fn build_tlas_raw(
     time_span.end(render_context.command_encoder());
     if !built {
         once!(warn!(
-            "TLAS build recorded nothing; the backend probe and the build disagree about hal \
-             access."
+            "TLAS build recorded nothing; the resolved backend does not own the build resources."
         ));
     }
     built
@@ -435,13 +439,13 @@ fn build_tlas_through_wgpu_core(
     blas_manager: &BlasManager,
     render_context: &mut RenderContext,
 ) -> bool {
-    // An empty scene leaves the parity unflipped, so whatever is here belongs to an earlier frame
+    // An empty scene leaves the index unswapped, so whatever is here belongs to an earlier frame
     // and is still being traced as the previous one
     if bindings.instances.slots.high_water_mark() == 0 {
         return false;
     }
-    let parity = bindings.tlas.frame_parity;
-    let Some(tlas) = bindings.tlas.structures[parity].as_mut() else {
+    let current_index = bindings.tlas.current_index;
+    let Some(tlas) = bindings.tlas.structures[current_index].as_mut() else {
         return false;
     };
 

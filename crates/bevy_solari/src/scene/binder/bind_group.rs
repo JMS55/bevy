@@ -1,6 +1,6 @@
 use super::{
     allocator::RetainedBindingArray, lights::GpuLightSource, RaytracingSceneBindings,
-    TlasInstancePackPipeline,
+    TlasInstanceSetupPipeline,
 };
 use bevy_ecs::system::{Res, ResMut};
 use bevy_pbr::DfgLut;
@@ -119,7 +119,7 @@ impl RaytracingSceneBindings {
 
     fn create_bind_group(
         &self,
-        parity: usize,
+        current_index: usize,
         render_device: &RenderDevice,
         layout: &BindGroupLayout,
         fallback_texture: &FallbackImage,
@@ -199,10 +199,10 @@ impl RaytracingSceneBindings {
             .unwrap()
             .as_entire_buffer_binding();
 
-        let current = self.tlas.structures[parity].as_ref().unwrap();
-        let previous = self.tlas.structures[parity ^ 1]
+        let current = self.tlas.structures[current_index].as_ref().unwrap();
+        let previous = self.tlas.structures[current_index ^ 1]
             .as_ref()
-            .filter(|_| self.tlas.built[parity ^ 1])
+            .filter(|_| self.tlas.built[current_index ^ 1])
             .unwrap_or(current);
 
         render_device.create_bind_group(
@@ -231,35 +231,35 @@ impl RaytracingSceneBindings {
 
     fn cache_bind_group(
         &mut self,
-        parity: usize,
+        current_index: usize,
         render_device: &RenderDevice,
         pipeline_cache: &PipelineCache,
         fallback_texture: &FallbackImage,
         dfg_view: &TextureView,
         dfg_sampler: &Sampler,
     ) -> BindGroup {
-        if let Some(bind_group) = &self.bind_groups.cached[parity] {
+        if let Some(bind_group) = &self.bind_groups.cached[current_index] {
             return bind_group.clone();
         }
 
         // Only resolve the layout on a miss, as it locks and hashes the whole descriptor
         let layout = pipeline_cache.get_bind_group_layout(&self.bind_group_layout);
         let bind_group = self.create_bind_group(
-            parity,
+            current_index,
             render_device,
             &layout,
             fallback_texture,
             dfg_view,
             dfg_sampler,
         );
-        if self.tlas.built[parity ^ 1] {
-            self.bind_groups.cached[parity] = Some(bind_group.clone());
+        if self.tlas.built[current_index ^ 1] {
+            self.bind_groups.cached[current_index] = Some(bind_group.clone());
         }
         bind_group
     }
 }
 
-/// Finalizes sparse uploads and selects the cached bind group for this TLAS parity.
+/// Finalizes sparse uploads and selects the cached bind group for this frame's TLAS.
 pub fn prepare_raytracing_scene_bind_group(
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
@@ -267,7 +267,7 @@ pub fn prepare_raytracing_scene_bind_group(
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     sparse_buffer_update_pipelines: Res<SparseBufferUpdatePipelines>,
-    instance_pack_pipeline: Res<TlasInstancePackPipeline>,
+    instance_setup_pipeline: Res<TlasInstanceSetupPipeline>,
     mut sparse_buffer_update_jobs: ResMut<SparseBufferUpdateJobs>,
     mut sparse_buffer_update_bind_groups: ResMut<SparseBufferUpdateBindGroups>,
     mut bindings: ResMut<RaytracingSceneBindings>,
@@ -283,18 +283,18 @@ pub fn prepare_raytracing_scene_bind_group(
         &sparse_buffer_update_pipelines,
     );
 
-    bindings.tlas.update_instance_pack_bind_group(
+    bindings.tlas.update_instance_setup_bind_group(
         &bindings.instances,
         &render_device,
         &pipeline_cache,
-        &instance_pack_pipeline,
+        &instance_setup_pipeline,
     );
     bindings.bind_group = None;
 
     if bindings.instances.live_count == 0 || bindings.lights.index.is_empty() {
         return;
     }
-    if bindings.tlas.structures[bindings.tlas.frame_parity].is_none() {
+    if bindings.tlas.structures[bindings.tlas.current_index].is_none() {
         return;
     }
 
@@ -310,9 +310,9 @@ pub fn prepare_raytracing_scene_bind_group(
         bindings.bind_groups.cached = [None, None];
     }
 
-    let parity = bindings.tlas.frame_parity;
+    let current_index = bindings.tlas.current_index;
     bindings.bind_group = Some(bindings.cache_bind_group(
-        parity,
+        current_index,
         &render_device,
         &pipeline_cache,
         &fallback_texture,
@@ -332,11 +332,8 @@ fn prepare_sparse_uploads(
 ) {
     let _span = info_span!("prepare_sparse_uploads").entered();
 
-    // Matches `write_sparse_buffers`: blas refs only reach the GPU on the raw TLAS build path
-    let upload_blas_refs = bindings.tlas.uses_raw_build();
-
-    let assets = &mut bindings.assets;
-    assets
+    bindings
+        .assets
         .materials
         .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
 
@@ -353,7 +350,7 @@ fn prepare_sparse_uploads(
     instances
         .material_ids
         .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);
-    if upload_blas_refs {
+    if bindings.tlas.uses_raw_build() {
         instances
             .blas_refs
             .prepare_to_populate_buffers(device, cache, jobs, groups, pipelines);

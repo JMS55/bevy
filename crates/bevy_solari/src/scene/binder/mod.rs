@@ -10,13 +10,11 @@ use self::assets::{AssetState, MAX_TEXTURE_COUNT};
 pub use self::bind_group::prepare_raytracing_scene_bind_group;
 use self::bind_group::BindGroupCacheState;
 use self::instances::{
-    ChangedInstanceFilter, InstanceQueryData, InstanceState, MAX_MESH_SLAB_COUNT,
+    ChangedInstanceFilter, InstanceInputs, InstanceQueryData, InstanceState, MAX_MESH_SLAB_COUNT,
 };
 use self::lights::LightState;
 use self::tlas::TlasState;
-pub use self::tlas::{
-    build_raytracing_tlas, pack_raytracing_tlas_instances, TlasInstancePackPipeline,
-};
+pub use self::tlas::{build_raytracing_tlas, TlasInstanceSetupPipeline};
 use super::{blas::BlasManager, extract::StandardMaterialAssets, RaytracingMesh3d};
 use bevy_ecs::{
     entity::Entity,
@@ -102,7 +100,7 @@ pub fn prepare_raytracing_scene_resources(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
-    instance_pack_pipeline: Res<TlasInstancePackPipeline>,
+    instance_setup_pipeline: Res<TlasInstanceSetupPipeline>,
     mut bindings: ResMut<RaytracingSceneBindings>,
 ) {
     let bindings = &mut *bindings;
@@ -125,13 +123,16 @@ pub fn prepare_raytracing_scene_resources(
     bindings
         .instances
         .remove_instances(&mut bindings.lights, removed_instances.read());
+    let inputs = InstanceInputs {
+        assets: &bindings.assets,
+        blas_manager: &blas_manager,
+        mesh_allocator: &mesh_allocator,
+    };
     bindings.instances.refresh_instances(
-        &bindings.assets,
+        &inputs,
         &mut bindings.lights,
         &instances,
         &changed_instances,
-        &blas_manager,
-        &mesh_allocator,
     );
 
     // Update the light set, now that emissive instances are resolved
@@ -142,7 +143,7 @@ pub fn prepare_raytracing_scene_resources(
 
     // Prepare the next TLAS
     let build_ready = !bindings.tlas.uses_raw_build()
-        || instance_pack_pipeline
+        || instance_setup_pipeline
             .id
             .and_then(|id| pipeline_cache.get_compute_pipeline(id))
             .is_some();

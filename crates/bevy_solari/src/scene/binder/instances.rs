@@ -58,15 +58,15 @@ pub struct GpuBlasRef(u64);
 
 impl GpuBlasRef {
     const NONE: Self = Self(0);
-
-    fn new(address: u64) -> Self {
-        Self(address)
-    }
 }
 
 impl_atomic_pod!(GpuInstanceGeometryIds, GpuInstanceGeometryIdsBlob);
 impl_atomic_pod!(GpuTransform, GpuTransformBlob);
 impl_atomic_pod!(GpuBlasRef, GpuBlasRefBlob);
+
+fn storage_buffer<T: AtomicPod>(label: &str) -> AtomicSparseBufferVec<T> {
+    AtomicSparseBufferVec::new(BufferUsages::STORAGE, label.into())
+}
 
 /// Everything tracked per raytracing instance.
 #[derive(Clone, Copy)]
@@ -99,23 +99,11 @@ impl InstanceState {
         Self {
             vertex_buffers: RetainedBindingArray::new(),
             index_buffers: RetainedBindingArray::new(),
-            transforms: AtomicSparseBufferVec::new(
-                BufferUsages::STORAGE,
-                "solari_transforms".into(),
-            ),
-            previous_frame_transforms: AtomicSparseBufferVec::new(
-                BufferUsages::STORAGE,
-                "solari_previous_frame_transforms".into(),
-            ),
-            geometry_ids: AtomicSparseBufferVec::new(
-                BufferUsages::STORAGE,
-                "solari_geometry_ids".into(),
-            ),
-            material_ids: AtomicSparseBufferVec::new(
-                BufferUsages::STORAGE,
-                "solari_material_ids".into(),
-            ),
-            blas_refs: AtomicSparseBufferVec::new(BufferUsages::STORAGE, "solari_blas_refs".into()),
+            transforms: storage_buffer("solari_transforms"),
+            previous_frame_transforms: storage_buffer("solari_previous_frame_transforms"),
+            geometry_ids: storage_buffer("solari_geometry_ids"),
+            material_ids: storage_buffer("solari_material_ids"),
+            blas_refs: storage_buffer("solari_blas_refs"),
             slots: IndexAllocator::new(),
             records: EntityHashMap::default(),
             live_count: 0,
@@ -128,7 +116,7 @@ impl InstanceState {
     /// Every drawable instance's slot, mesh and world-from-local transform.
     ///
     /// Only the `wgpu-core` TLAS build path needs this, to fill in the instance descriptors that
-    /// the raw path packs on the GPU. Slots with a null acceleration structure reference are not
+    /// the raw path sets up on the GPU. Slots with a null acceleration structure reference are not
     /// currently drawable, and are left out.
     pub fn drawable(&self) -> impl Iterator<Item = (u32, AssetId<Mesh>, [f32; 12])> + '_ {
         self.records.values().filter_map(|instance| {
@@ -160,6 +148,13 @@ pub type ChangedInstanceFilter = (
         Changed<MeshMaterial3d<StandardMaterial>>,
     )>,
 );
+
+/// The scene state an instance resolves its GPU data against.
+pub struct InstanceInputs<'a> {
+    pub assets: &'a AssetState,
+    pub blas_manager: &'a BlasManager,
+    pub mesh_allocator: &'a MeshAllocator,
+}
 
 fn unlink<K: Eq + Hash>(map: &mut HashMap<K, EntityHashSet>, key: &K, entity: Entity) {
     let now_empty = map.get_mut(key).is_some_and(|instances| {
@@ -200,20 +195,19 @@ impl InstanceState {
 
     pub fn refresh_instances(
         &mut self,
-        assets: &AssetState,
+        inputs: &InstanceInputs,
         lights: &mut LightState,
         instances: &Query<InstanceQueryData>,
         changed_instances: &Query<Entity, ChangedInstanceFilter>,
-        blas_manager: &BlasManager,
-        mesh_allocator: &MeshAllocator,
     ) {
         let _span = info_span!("refresh_instances").entered();
 
         let mut refresh = core::mem::take(&mut self.pending_refresh);
         refresh.extend(changed_instances.iter());
 
-        let moved_meshes = mesh_allocator.meshes_displaced_by_slab_growth();
-        for mesh_id in blas_manager
+        let moved_meshes = inputs.mesh_allocator.meshes_displaced_by_slab_growth();
+        for mesh_id in inputs
+            .blas_manager
             .changed_meshes()
             .iter()
             .copied()
@@ -225,22 +219,10 @@ impl InstanceState {
         }
 
         for entity in refresh {
-            let Ok((mesh, material, transform, previous_frame_transform)) = instances.get(entity)
-            else {
-                self.remove_instance(lights, entity);
-                continue;
-            };
-            self.refresh_instance(
-                assets,
-                lights,
-                entity,
-                mesh,
-                material,
-                transform,
-                previous_frame_transform,
-                blas_manager,
-                mesh_allocator,
-            );
+            match instances.get(entity) {
+                Ok(data) => self.refresh_instance(inputs, lights, entity, data),
+                Err(_) => self.remove_instance(lights, entity),
+            }
         }
     }
 
@@ -253,15 +235,10 @@ impl InstanceState {
 
     fn refresh_instance(
         &mut self,
-        assets: &AssetState,
+        inputs: &InstanceInputs,
         lights: &mut LightState,
         entity: Entity,
-        mesh: &RaytracingMesh3d,
-        material: &MeshMaterial3d<StandardMaterial>,
-        transform: &GlobalTransform,
-        previous_frame_transform: &PreviousGlobalTransform,
-        blas_manager: &BlasManager,
-        mesh_allocator: &MeshAllocator,
+        (mesh, material, transform, previous_frame_transform): InstanceQueryData,
     ) {
         let mesh_id = mesh.id();
         let material_id = material.id();
@@ -297,14 +274,7 @@ impl InstanceState {
             material: material_id,
             buffers: previous.and_then(|instance| instance.buffers),
         };
-        let resolved = self.resolve_instance(
-            assets,
-            lights,
-            entity,
-            &mut instance,
-            blas_manager,
-            mesh_allocator,
-        );
+        let resolved = self.resolve_instance(inputs, lights, entity, &mut instance);
 
         self.records.insert(entity, instance);
         if !resolved {
@@ -314,23 +284,18 @@ impl InstanceState {
 
     fn resolve_instance(
         &mut self,
-        assets: &AssetState,
+        inputs: &InstanceInputs,
         lights: &mut LightState,
         entity: Entity,
         instance: &mut Instance,
-        blas_manager: &BlasManager,
-        mesh_allocator: &MeshAllocator,
     ) -> bool {
         let slot = instance.slot;
-        let (Some(vertex_slice), Some(index_slice), Some(material_slot)) = (
-            mesh_allocator.mesh_vertex_slice(&instance.mesh),
-            mesh_allocator.mesh_index_slice(&instance.mesh),
-            assets.material_slots.get(&instance.material),
+        let (Some(vertex_slice), Some(index_slice), Some(material_slot), Some(blas_address)) = (
+            inputs.mesh_allocator.mesh_vertex_slice(&instance.mesh),
+            inputs.mesh_allocator.mesh_index_slice(&instance.mesh),
+            inputs.assets.material_slots.get(&instance.material),
+            inputs.blas_manager.device_address(&instance.mesh),
         ) else {
-            self.deactivate_instance(lights, entity, instance);
-            return false;
-        };
-        let Some(blas_address) = blas_manager.device_address(&instance.mesh) else {
             self.deactivate_instance(lights, entity, instance);
             return false;
         };
@@ -374,9 +339,13 @@ impl InstanceState {
             },
         );
         self.material_ids.grow_and_set(slot, material_slot);
-        self.set_live(slot, blas_address);
+        self.set_blas_ref(slot, GpuBlasRef(blas_address));
 
-        if assets.emissive_materials.contains(&instance.material) {
+        let is_emissive = inputs
+            .assets
+            .emissive_materials
+            .contains(&instance.material);
+        if is_emissive {
             lights.add_light(
                 LightSourceId::EmissiveMesh(entity),
                 GpuLightSource::new_emissive_mesh_light(slot, triangle_count),
@@ -403,26 +372,20 @@ impl InstanceState {
         );
     }
 
-    fn set_live(&mut self, slot: u32, address: u64) {
-        if self.set_blas_ref(slot, GpuBlasRef::new(address)) {
-            self.live_count += 1;
-        }
-    }
-
-    fn clear_live(&mut self, slot: u32) {
-        if self.set_blas_ref(slot, GpuBlasRef::NONE) {
-            self.live_count -= 1;
-        }
-    }
-
-    fn set_blas_ref(&mut self, slot: u32, reference: GpuBlasRef) -> bool {
+    /// Points a slot at an acceleration structure, or at nothing, keeping `live_count` in step.
+    fn set_blas_ref(&mut self, slot: u32, reference: GpuBlasRef) {
         self.blas_refs.grow(slot + 1);
         let previous = self.blas_refs.get(slot);
         if previous == reference {
-            return false;
+            return;
         }
         self.blas_refs.set(slot, reference);
-        (previous == GpuBlasRef::NONE) != (reference == GpuBlasRef::NONE)
+
+        if previous == GpuBlasRef::NONE {
+            self.live_count += 1;
+        } else if reference == GpuBlasRef::NONE {
+            self.live_count -= 1;
+        }
     }
 
     fn deactivate_instance(
@@ -431,7 +394,7 @@ impl InstanceState {
         entity: Entity,
         instance: &mut Instance,
     ) {
-        self.clear_live(instance.slot);
+        self.set_blas_ref(instance.slot, GpuBlasRef::NONE);
         lights.remove_light(LightSourceId::EmissiveMesh(entity));
         self.release_buffers(instance.buffers.take());
     }
@@ -444,15 +407,13 @@ impl InstanceState {
     }
 
     fn remove_instance(&mut self, lights: &mut LightState, entity: Entity) {
-        let Some(instance) = self.records.remove(&entity) else {
+        let Some(mut instance) = self.records.remove(&entity) else {
             return;
         };
 
-        self.clear_live(instance.slot);
+        self.deactivate_instance(lights, entity, &mut instance);
         self.slots.release(instance.slot);
         self.pending_refresh.remove(&entity);
-        lights.remove_light(LightSourceId::EmissiveMesh(entity));
-        self.release_buffers(instance.buffers);
         unlink(&mut self.mesh_instances, &instance.mesh, entity);
         unlink(&mut self.material_instances, &instance.material, entity);
     }
@@ -466,15 +427,9 @@ impl RaytracingSceneBindings {
         transform: &GlobalTransform,
         previous_frame_transform: &PreviousGlobalTransform,
     ) {
-        let Some(slot) = self
-            .instances
-            .records
-            .get(&entity)
-            .map(|instance| instance.slot)
-        else {
-            return;
-        };
-        self.instances
-            .write_transforms(slot, transform, previous_frame_transform);
+        if let Some(instance) = self.instances.records.get(&entity) {
+            self.instances
+                .write_transforms(instance.slot, transform, previous_frame_transform);
+        }
     }
 }

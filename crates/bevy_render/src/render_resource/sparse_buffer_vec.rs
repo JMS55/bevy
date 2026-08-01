@@ -666,6 +666,9 @@ where
             atomic_dirty_word.store(0, Ordering::Relaxed);
         }
         self.sparse_update_scheduled = false;
+
+        // The GPU now matches `values` in full, which is the only thing this flag was asking for.
+        self.needs_full_reupload = false;
     }
 
     /// Schedules a sparse upload of only the elements that changed.
@@ -770,8 +773,9 @@ where
         self.staging_buffers.source_data.clear();
         self.staging_buffers.indices.clear();
 
-        // Reset the `needs_full_reupload` and `needs_sparse_update` flags.
-        self.needs_full_reupload = retry_with_full_reupload;
+        // Accumulate rather than assign, so a reupload that `reserve` asked for survives a frame
+        // where `write_buffers` bailed out early on an empty vector.
+        self.needs_full_reupload |= retry_with_full_reupload;
         self.sparse_update_scheduled = false;
     }
 }

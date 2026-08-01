@@ -10,6 +10,7 @@ use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::render_resource::{AtomicSparseBufferVec, BufferUsages};
 use bevy_render::{impl_atomic_pod, render_resource::AtomicPod};
 use bytemuck::{Pod, Zeroable};
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::{f32::consts::TAU, hash::Hash};
 use tracing::info_span;
 
@@ -140,9 +141,12 @@ pub struct LightState {
     pub directional_lights: AtomicSparseBufferVec<GpuDirectionalLight>,
     pub previous_frame_id_translations: AtomicSparseBufferVec<u32>,
     pub index: LightIndex,
+    /// Light ids as of the last frame whose translation table the lighting shader actually read.
     previous_index: HashMap<LightSourceId, u32>,
     nonidentity_translations: Vec<u32>,
     directional_slots: SlotAllocator<Entity>,
+    /// Set by the lighting node once it has recorded work reading the translation table.
+    translations_consumed: AtomicBool,
 }
 
 impl LightState {
@@ -164,6 +168,7 @@ impl LightState {
             previous_index: HashMap::default(),
             nonidentity_translations: Vec::new(),
             directional_slots: SlotAllocator::new(),
+            translations_consumed: AtomicBool::new(false),
         }
     }
 
@@ -219,21 +224,39 @@ impl LightState {
         }
     }
 
-    /// Restores the translation entries written last frame back to identity.
-    pub fn reset_id_translations(&mut self) {
+    /// Rolls the translation table over for a new frame.
+    ///
+    /// `previous_index` and `changed` only advance once the shader has read the table. The
+    /// lighting node bails out while its pipelines compile, and the reservoirs keep the older ids
+    /// across such a gap, so the next table has to translate from those instead. `has_consumers`
+    /// is false when no view runs Solari lighting, where deferring forever would grow both
+    /// without bound.
+    pub fn begin_frame(&mut self, has_consumers: bool) {
         for index in core::mem::take(&mut self.nonidentity_translations) {
             self.previous_frame_id_translations
                 .grow_and_set(index, index);
         }
+
+        if !has_consumers || self.translations_consumed.swap(false, Ordering::Relaxed) {
+            for id in core::mem::take(&mut self.index.changed) {
+                match self.index.get(&id) {
+                    Some(index) => self.previous_index.insert(id, index),
+                    None => self.previous_index.remove(&id),
+                };
+            }
+        }
+    }
+
+    /// Records that the lighting shader read this frame's translation table.
+    pub fn note_translations_consumed(&self) {
+        self.translations_consumed.store(true, Ordering::Relaxed);
     }
 
     /// Records where each light that moved or disappeared this frame ended up, so that reservoirs
     /// still carrying last frame's light ids can be remapped.
     fn write_light_id_translations(&mut self) {
-        let changed: Vec<LightSourceId> = self.index.changed.drain().collect();
-
-        for id in &changed {
-            // Lights that first appeared this frame have no previous id to translate from
+        for id in &self.index.changed {
+            // Lights that first appeared since the last read table have no previous id
             let Some(&previous) = self.previous_index.get(id) else {
                 continue;
             };
@@ -244,13 +267,6 @@ impl LightState {
                     .grow_and_set(previous, current);
                 self.nonidentity_translations.push(previous);
             }
-        }
-
-        for id in changed {
-            match self.index.get(&id) {
-                Some(index) => self.previous_index.insert(id, index),
-                None => self.previous_index.remove(&id),
-            };
         }
 
         // Every index the shader might read has to be backed by a real element

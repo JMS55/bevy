@@ -16,9 +16,11 @@ use self::lights::LightState;
 use self::tlas::TlasState;
 pub use self::tlas::{build_raytracing_tlas, TlasInstanceSetupPipeline};
 use super::{blas::BlasManager, extract::StandardMaterialAssets, RaytracingMesh3d};
+use crate::realtime::SolariLighting;
 use bevy_ecs::{
     entity::Entity,
     lifecycle::RemovedComponents,
+    query::With,
     resource::Resource,
     system::{Query, Res, ResMut},
     world::{FromWorld, World},
@@ -42,6 +44,14 @@ pub struct RaytracingSceneBindings {
     lights: LightState,
     tlas: TlasState,
     bind_groups: BindGroupCacheState,
+}
+
+impl RaytracingSceneBindings {
+    /// Records that a lighting pass read `previous_frame_light_id_translations`, so the next
+    /// frame's table translates from this frame's light ids rather than older ones.
+    pub fn note_light_translations_consumed(&self) {
+        self.lights.note_translations_consumed();
+    }
 }
 
 impl FromWorld for RaytracingSceneBindings {
@@ -92,6 +102,7 @@ pub fn prepare_raytracing_scene_resources(
     changed_instances: Query<Entity, ChangedInstanceFilter>,
     mut removed_instances: RemovedComponents<RaytracingMesh3d>,
     directional_lights: Query<(Entity, &ExtractedDirectionalLight)>,
+    lighting_views: Query<(), With<SolariLighting>>,
     mesh_allocator: Res<MeshAllocator>,
     blas_manager: Res<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
@@ -105,8 +116,8 @@ pub fn prepare_raytracing_scene_resources(
 ) {
     let bindings = &mut *bindings;
 
-    // Reset lights before any removal or compaction writes this frame's light id translations
-    bindings.lights.reset_id_translations();
+    // Roll light ids over before any removal or compaction writes this frame's translations
+    bindings.lights.begin_frame(!lighting_views.is_empty());
 
     // Update material and texture assets
     bindings

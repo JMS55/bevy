@@ -13,7 +13,7 @@ enable wgpu_ray_query;
 #import bevy_solari::scene_bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
 #ifdef DLSS_RR_GUIDE_BUFFERS
-#import bevy_pbr::pbr_functions::{calculate_diffuse_color, calculate_F0}
+#import bevy_pbr::pbr_functions::calculate_F0
 #import bevy_solari::realtime_bindings::{diffuse_albedo, normal_roughness, previous_view, specular_albedo, specular_motion_vectors}
 #import bevy_solari::resolve_dlss_rr_textures::env_brdf_approx2
 #endif
@@ -444,9 +444,10 @@ fn replace_primary_surface(pixel_id: vec2<u32>, ray_hit: ResolvedRayHitFull, mir
     let F0 = calculate_F0(ray_hit.material.base_color, ray_hit.material.metallic, vec3(ray_hit.material.reflectance));
     let wo = normalize(view.world_position - virtual_position);
     let virtual_normal = normalize(mirror_rotations * ray_hit.world_normal);
+    let albedo = ray_hit.material.base_color * (1.0 - ray_hit.material.metallic);
 
     textureStore(specular_motion_vectors, pixel_id, vec4(specular_motion_vector, vec2(0.0)));
-    textureStore(diffuse_albedo, pixel_id, vec4(calculate_diffuse_color(ray_hit.material.base_color, ray_hit.material.metallic, 0.0, 0.0), 0.0));
+    textureStore(diffuse_albedo, pixel_id, vec4(albedo, 0.0));
     textureStore(specular_albedo, pixel_id, vec4(env_brdf_approx2(F0, ray_hit.material.roughness, virtual_normal, wo), 0.0));
     textureStore(normal_roughness, pixel_id, vec4(virtual_normal, ray_hit.material.perceptual_roughness));
 }

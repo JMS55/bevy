@@ -87,10 +87,14 @@ struct LightingInput {
 
     // Constants for the BRDF approximation.
     //
-    // See `EnvBRDFApprox` in
+    // See the split-sum approximation in
     // <https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile>.
     // What we call `F_ab` they call `AB`.
     F_ab: vec2<f32>,
+
+    // `compute_multiscatter_factor(F_ab)`, cached here because it is the same
+    // for every light hitting this fragment.
+    multiscatter_factor: f32,
 
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     // The strength of the clearcoat layer.
@@ -322,6 +326,26 @@ fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
     return F_Schlick_vec(f0, f90, LdotH);
 }
 
+// The energy compensation factor accounting for light that scatters off more
+// than one microfacet, which a single-scattering BRDF would otherwise lose.
+//
+// Note that this is nonlinear in F0, so a material that is part metallic and
+// part dielectric must evaluate each with its own F0 and mix the results.
+// Mixing F0 first and evaluating once gives a different, incorrect answer.
+fn multiscatter_energy_compensation(F0: vec3<f32>, multiscatter_factor: f32) -> vec3<f32> {
+    return max(1.0 + F0 * multiscatter_factor, vec3(0.0));
+}
+
+// The `F_ab`-dependent half of `multiscatter_energy_compensation`. It does not
+// depend on F0 or on the light, so it is computed once per fragment and cached
+// in `LightingInput`.
+//
+// F_ab.x + F_ab.y is dfg.y in Filament
+// See section 9.5 and listing 29 in the Filament spec
+fn compute_multiscatter_factor(F_ab: vec2<f32>) -> f32 {
+    return 1.0 / (F_ab.x + F_ab.y) - 1.0;
+}
+
 // Given distribution, visibility, and Fresnel term, calculates the final
 // specular light.
 //
@@ -332,13 +356,11 @@ fn specular_multiscatter(
     V: f32,
     F: vec3<f32>,
     F0: vec3<f32>,
-    F_ab: vec2<f32>,
+    multiscatter_factor: f32,
     specular_intensity: f32,
 ) -> vec3<f32> {
     var Fr = (specular_intensity * D * V) * F;
-    // F_ab.x + F_ab.y is dfg.y in Filament
-    // See section 9.5 and listing 29 in the Filament spec
-    Fr *= 1.0 + F0 * (1.0 / (F_ab.x + F_ab.y) - 1.0);
+    Fr *= multiscatter_energy_compensation(F0, multiscatter_factor);
     return Fr;
 }
 
@@ -409,7 +431,9 @@ fn specular(
 ) -> vec3<f32> {
     // Unpack.
     let NdotV = (*input).layers[LAYER_BASE].NdotV;
-    let F0 = mix((*input).F0_dielectric, (*input).F0_metallic, (*input).metallic);
+    let F0_dielectric = (*input).F0_dielectric;
+    let F0_metallic = (*input).F0_metallic;
+    let multiscatter_factor = (*input).multiscatter_factor;
     let NdotL = (*derived_input).NdotL;
     let NdotH = (*derived_input).NdotH;
     let LdotH = (*derived_input).LdotH;
@@ -418,12 +442,19 @@ fn specular(
     let D = D_GGX(roughness, NdotH);
     // Calculate visibility.
     let V = V_SmithGGXCorrelated(roughness, NdotV, NdotL);
-    // Calculate the Fresnel term.
-    let F = fresnel(F0, LdotH);
 
-    // Calculate the specular light.
-    let Fr = specular_multiscatter(D, V, F, F0, (*input).F_ab, specular_intensity);
-    return Fr;
+    // Evaluate the dielectric and metallic lobes separately and mix the
+    // results, since `specular_multiscatter` is nonlinear in F0.
+    //
+    // The metallic lobe uses the physical f90 of 1.0. `fresnel`'s f90 heuristic
+    // doubles as pre-baked specular occlusion, which is meaningful for an
+    // implausibly low dielectric reflectance but would darken a dark metal that
+    // should still have a grazing highlight.
+    let Fr_dielectric = specular_multiscatter(
+        D, V, fresnel(F0_dielectric, LdotH), F0_dielectric, multiscatter_factor, specular_intensity);
+    let Fr_metallic = specular_multiscatter(
+        D, V, F_Schlick_vec(F0_metallic, 1.0, LdotH), F0_metallic, multiscatter_factor, specular_intensity);
+    return mix(Fr_dielectric, Fr_metallic, (*input).metallic);
 }
 
 // Calculates the specular light for the clearcoat layer. Returns Fc, the
@@ -465,7 +496,9 @@ fn specular_anisotropy(
     // Unpack.
     let NdotV = (*input).layers[LAYER_BASE].NdotV;
     let V = (*input).V;
-    let F0 = mix((*input).F0_dielectric, (*input).F0_metallic, (*input).metallic);
+    let F0_dielectric = (*input).F0_dielectric;
+    let F0_metallic = (*input).F0_metallic;
+    let multiscatter_factor = (*input).multiscatter_factor;
     let anisotropy = (*input).anisotropy;
     let Ta = (*input).Ta;
     let Ba = (*input).Ba;
@@ -486,11 +519,13 @@ fn specular_anisotropy(
 
     let Da = D_GGX_anisotropic(at, ab, NdotH, TdotH, BdotH);
     let Va = V_GGX_anisotropic(at, ab, NdotL, NdotV, BdotV, TdotV, TdotL, BdotL);
-    let Fa = fresnel(F0, LdotH);
-
-    // Calculate the specular light.
-    let Fr = specular_multiscatter(Da, Va, Fa, F0, (*input).F_ab, specular_intensity);
-    return Fr;
+    // Evaluate the dielectric and metallic lobes separately and mix the
+    // results, since `specular_multiscatter` is nonlinear in F0.
+    let Fr_dielectric = specular_multiscatter(
+        Da, Va, fresnel(F0_dielectric, LdotH), F0_dielectric, multiscatter_factor, specular_intensity);
+    let Fr_metallic = specular_multiscatter(
+        Da, Va, F_Schlick_vec(F0_metallic, 1.0, LdotH), F0_metallic, multiscatter_factor, specular_intensity);
+    return mix(Fr_dielectric, Fr_metallic, (*input).metallic);
 }
 
 #endif  // STANDARD_MATERIAL_ANISOTROPY
@@ -535,14 +570,57 @@ fn F_AB(perceptual_roughness: f32, NdotV: f32) -> vec2<f32> {
     let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
     let r = perceptual_roughness * c0 + c1;
     let a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
-    // Keep F_ab positive to avoid divide-by-zero in downstream BRDF terms.
-    let f_ab_epsilon = 0.00005;
-    return max(vec2<f32>(-1.04, 1.04) * a004 + r.zw, vec2<f32>(f_ab_epsilon));
+    // The two `a004` terms cancel in the sum, so `F_ab.x + F_ab.y` is exactly
+    // `1.0 - 0.55 * perceptual_roughness`, independent of `NdotV`. Clamping the
+    // channels independently would break that identity and push the sum above 1,
+    // which is where the energy compensation term takes its reciprocal.
+    // `F_ab.x` can go slightly negative at grazing angles on smooth surfaces,
+    // which is fine for the scale-and-bias consumers.
+    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
 #endif
 }
 
-fn EnvBRDFApprox(F0: vec3<f32>, F_ab: vec2<f32>) -> vec3<f32> {
-    return F0 * F_ab.x + F_ab.y;
+// The hemispherical reflectance of the specular lobe: the fraction of incoming
+// energy the specular layer reflects, including multiple scattering.
+//
+// The diffuse layer sits underneath the specular layer, so it only receives the
+// energy the specular layer let through. Use the dielectric F0 for that: metals
+// have no diffuse lobe, which `calculate_diffuse_color` handles via `metallic`.
+fn specular_reflectance(F0: vec3<f32>, F_ab: vec2<f32>) -> vec3<f32> {
+    return saturate(
+        (F0 * F_ab.x + F_ab.y) *
+            multiscatter_energy_compensation(F0, compute_multiscatter_factor(F_ab))
+    );
+}
+
+// No real world material has specular values under 0.02, so we use this range as a
+// "pre-baked specular occlusion" that extinguishes the fresnel term, for artistic control.
+// See: https://google.github.io/filament/Filament.md.html#specularocclusion
+//
+// This only covers dielectrics. A metal takes its F0 from base color, where a
+// low value is a legitimately dark metal rather than an implausible reflectance,
+// so extinguishing it there would darken a valid material.
+fn dielectric_specular_occlusion(F0_dielectric: vec3<f32>) -> f32 {
+    return saturate(dot(F0_dielectric, vec3(50.0 * 0.33)));
+}
+
+// `specular_reflectance` for a material that blends between dielectric and
+// metallic. It's nonlinear in F0, so each lobe has to be evaluated with its own
+// F0 and the results mixed. Mixing F0 first gives a different, incorrect answer.
+//
+// `specular_occlusion` scales the dielectric lobe only. Pass 1.0 to skip it.
+fn material_specular_reflectance(
+    F0_dielectric: vec3<f32>,
+    F0_metallic: vec3<f32>,
+    metallic: f32,
+    F_ab: vec2<f32>,
+    specular_occlusion: f32,
+) -> vec3<f32> {
+    return mix(
+        specular_reflectance(F0_dielectric, F_ab) * specular_occlusion,
+        specular_reflectance(F0_metallic, F_ab),
+        metallic
+    );
 }
 
 fn perceptualRoughnessToRoughness(perceptualRoughness: f32) -> f32 {
@@ -1067,8 +1145,19 @@ fn rect_light(
     let diff = select(0.0, ltc_integrate_quad(N, V, P, identity, corners), enable_diffuse);
 
     // t2.x encodes the bsdf magnitude and t2.y the fresnel direction
-    let F0 = mix((*input).F0_dielectric, (*input).F0_metallic, (*input).metallic);
-    let spec_weight = F0 * t2.x + (1.0 - F0) * t2.y;
+    //
+    // The LUT is single-scattering, so it needs the multiple-scattering energy
+    // compensation applied on top. That term is nonlinear in F0, so evaluate the
+    // dielectric and metallic lobes separately and mix the results.
+    let F0_dielectric = (*input).F0_dielectric;
+    let F0_metallic = (*input).F0_metallic;
+    let multiscatter_factor = (*input).multiscatter_factor;
+    let spec_weight_dielectric = (F0_dielectric * t2.x + (1.0 - F0_dielectric) * t2.y) *
+        multiscatter_energy_compensation(F0_dielectric, multiscatter_factor) *
+        dielectric_specular_occlusion(F0_dielectric);
+    let spec_weight_metallic = (F0_metallic * t2.x + (1.0 - F0_metallic) * t2.y) *
+        multiscatter_energy_compensation(F0_metallic, multiscatter_factor);
+    let spec_weight = mix(spec_weight_dielectric, spec_weight_metallic, (*input).metallic);
 
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     let clearcoat_N = (*input).layers[LAYER_CLEARCOAT].N;

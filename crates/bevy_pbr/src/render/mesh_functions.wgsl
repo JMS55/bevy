@@ -118,6 +118,12 @@ fn mesh_tangent_local_to_world(world_from_local: mat4x4<f32>, vertex_tangent: ve
             ),
             // NOTE: Multiplying by the sign of the determinant of the 3x3 model matrix accounts for
             // situations such as negative scaling.
+            //
+            // TODO: For skinned meshes `world_from_local` is the skin matrix, but
+            // this sign still comes from the model matrix. A skin hierarchy that
+            // contains a mirroring joint gets the wrong bitangent handedness. The
+            // sign should be taken from the determinant of the matrix actually
+            // used for the transform.
             vertex_tangent.w * sign_determinant_model_3x3m(mesh[instance_index].flags)
         );
     } else {
@@ -142,7 +148,7 @@ fn get_visibility_range_dither_level(instance_index: u32, world_position: vec4<f
 #endif  // AVAILABLE_STORAGE_BUFFER_BINDINGS >= 6
 
     let visibility_buffer_index = mesh[instance_index].flags & 0xffffu;
-    if (visibility_buffer_index > visibility_buffer_array_len) {
+    if (visibility_buffer_index >= visibility_buffer_array_len) {
         return -16;
     }
 

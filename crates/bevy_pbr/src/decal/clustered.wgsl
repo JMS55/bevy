@@ -58,6 +58,11 @@ struct ClusteredDecalIterator {
     emissive_texture_index: i32,
     // The UV coordinates at which to sample that decal texture.
     uv: vec2<f32>,
+    // The decal's own tangent frame in world space, matching the UV axes above.
+    // Normal maps are authored against this frame, not the surface's.
+    T: vec3<f32>,
+    B: vec3<f32>,
+    N: vec3<f32>,
     // A custom tag you can use for your own purposes.
     tag: u32,
 
@@ -138,6 +143,14 @@ fn clustered_decal_iterator_next(iterator: ptr<function, ClusteredDecalIterator>
                 mesh_view_bindings::clustered_decals.decals[decal_index].emissive_texture_index
             );
             (*iterator).uv = decal_space_vector.xy * vec2(1.0, -1.0) + vec2(0.5);
+
+            // `local_from_world` maps world space into decal space, so its rows
+            // are the world-space directions of the decal's local axes. `u`
+            // follows local +X and `v` follows local -Y, matching the UV above.
+            let m = mesh_view_bindings::clustered_decals.decals[decal_index].local_from_world;
+            (*iterator).T = normalize(vec3(m[0][0], m[1][0], m[2][0]));
+            (*iterator).B = -normalize(vec3(m[0][1], m[1][1], m[2][1]));
+            (*iterator).N = normalize(vec3(m[0][2], m[1][2], m[2][2]));
             (*iterator).tag =
                 mesh_view_bindings::clustered_decals.decals[decal_index].tag;
             return true;
@@ -214,12 +227,12 @@ fn apply_decals(pbr_input: ptr<function, PbrInput>) {
                 );
                 // Use OVER compositing using the base color alpha.
                 metallic = mix(
-                    metallic * base_color.a,
+                    metallic,
                     metallic_roughness_sampler.b,
                     decal_base_color.a
                 );
                 perceptual_roughness = mix(
-                    perceptual_roughness * base_color.a,
+                    perceptual_roughness,
                     metallic_roughness_sampler.g,
                     decal_base_color.a
                 );
@@ -237,10 +250,14 @@ fn apply_decals(pbr_input: ptr<function, PbrInput>) {
                 iterator.uv,
                 0.0
             ).rgb * 2.0 - 1.0;
-            // This is the *Whiteout* normal map blending operator from [1].
+            // This is the *Whiteout* normal map blending operator from [1], which
+            // requires both normals in the same tangent frame. Take the surface
+            // normal into the decal's frame, blend, and bring it back.
             //
             // [1]: https://blog.selfshadow.com/publications/blending-in-detail/
-            Nt = vec3(Nt.xy + Nd.xy, Nt.z * Nd.z);
+            let Ns = vec3(dot(Nt, iterator.T), dot(Nt, iterator.B), dot(Nt, iterator.N));
+            let blended = vec3(Ns.xy + Nd.xy, Ns.z * Nd.z);
+            Nt = blended.x * iterator.T + blended.y * iterator.B + blended.z * iterator.N;
         }
 #endif  // VERTEX_TANGENTS
 

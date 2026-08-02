@@ -32,7 +32,8 @@ fn lod_error_is_imperceptible(lod_sphere: vec4<f32>, simplification_error: f32, 
         let world_sphere_radius = lod_sphere.w * world_scale;
         let d_pos = world_sphere_center - camera_pos;
         let d = sqrt(dot(d_pos, d_pos)) - world_sphere_radius;
-        let norm_error = simplification_error / max(d, near) * projection[1][1] * 0.5;
+        let world_error = simplification_error * world_scale;
+        let norm_error = world_error / max(d, near) * projection[1][1] * 0.5;
         return norm_error * view.viewport.w < 1.0;
     }
 }

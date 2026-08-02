@@ -4,7 +4,7 @@ enable wgpu_ray_query;
 #import bevy_pbr::utils::{rand_f, rand_vec2f}
 #import bevy_render::view::View
 #import bevy_solari::brdf::{evaluate_brdf, evaluate_and_sample_brdf, brdf_pdf, F_AB}
-#import bevy_solari::sampling::{sample_random_light, random_emissive_light_pdf, power_heuristic}
+#import bevy_solari::sampling::{sample_random_light, random_emissive_light_pdf, power_heuristic, isinf}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX, MIRROR_ROUGHNESS_THRESHOLD}
 
 @group(1) @binding(0) var accumulation_texture: texture_storage_2d<rgba32float, read_write>;
@@ -47,8 +47,12 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let F_ab = F_AB(ray_hit.material.perceptual_roughness, NdotV);
 
             // Emissive contribution
+            //
+            // Only weight against light sampling when light sampling actually ran
+            // at the previous vertex. `isinf(p_bounce)` marks a delta bounce,
+            // where NEE was skipped, so its emissive hit carries full weight.
             var mis_weight = 1.0;
-            if p_bounce != 0.0 { // Not first bounce
+            if p_bounce != 0.0 && !isinf(p_bounce) { // Not first bounce, not a delta bounce
                 let p_light = random_emissive_light_pdf(ray_hit, ray.t, NdotV);
                 mis_weight = power_heuristic(p_bounce, p_light);
             }
@@ -57,7 +61,10 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
 
             // Sample direct lighting, but only if the surface is not mirror-like
-            let is_perfectly_specular = ray_hit.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD && ray_hit.material.metallic > 0.9999;
+            // Gate on the lobe rather than the material. A mirror-rough surface
+            // that is not fully metallic still has a diffuse lobe that NEE can
+            // serve, and skipping it there loses that energy.
+            let is_perfectly_specular = ray_hit.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD;
             if !is_perfectly_specular {
                 let direct_lighting = sample_random_light(ray_hit.world_position, ray_hit.world_normal, &rng);
 

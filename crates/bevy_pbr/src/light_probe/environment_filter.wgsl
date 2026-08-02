@@ -114,7 +114,7 @@ fn generate_radiance_map(@builtin(global_invocation_id) global_id: vec3u) {
             let G = lighting::G_Smith(NdotV, NdotL, roughness);
             
             // PDF that matches the bounded-VNDF sampling
-            let pdf = lighting::ggx_vndf_pdf(view, NdotH, roughness);
+            let pdf = lighting::ggx_vndf_pdf(vec3(0.0, 0.0, 1.0), NdotH, roughness);
             
             // Calculate LOD using filtered importance sampling
             // This is crucial to avoid fireflies and improve quality

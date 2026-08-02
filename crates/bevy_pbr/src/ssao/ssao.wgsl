@@ -127,7 +127,10 @@ fn processSample(
         fast_acos(dot(normalize(delta_position_back_face), view_vec)),
     );
 
-    front_back_horizon = saturate(fma(vec2(sampling_direction), -front_back_horizon, n));
+    // `n` already carries the `1.0 / PI`, so the horizon angles need it too to
+    // land in the same normalized sector space.
+    front_back_horizon =
+        saturate(fma(vec2(sampling_direction), -front_back_horizon * (1.0 / PI), n));
     front_back_horizon = select(front_back_horizon.xy, front_back_horizon.yx, sampling_direction >= 0.0);
 
     *bitmask = updateSectors(front_back_horizon.x, front_back_horizon.y, samples_per_slice, *bitmask);
@@ -140,6 +143,11 @@ fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let samples_per_slice_side = f32(#SAMPLES_PER_SLICE_SIDE);
 
     let pixel_coordinates = vec2<i32>(global_id.xy);
+    // TODO: This ignores `view.viewport.xy`, so SSAO is wrong for a camera with a
+    // viewport offset. The same omission is in `load_noise` and in
+    // `spatial_denoise.wgsl`, and the meshlet rasterizers disagree with each
+    // other about the offset too. They need fixing together, since correcting one
+    // in isolation makes the mismatch worse.
     let uv = (vec2<f32>(pixel_coordinates) + 0.5) / view.viewport.zw;
 
     var pixel_depth = calculate_neighboring_depth_differences(pixel_coordinates);
@@ -151,7 +159,9 @@ fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let noise = load_noise(pixel_coordinates);
     let safe_radius = max(settings.radius, 0.0001);
-    let sample_scale = (-0.5 * safe_radius * view.clip_from_view[0][0]) / pixel_position.z;
+    // The two projection scales differ by the aspect ratio, so using [0][0] for
+    // both axes would make the sampling disc elliptical.
+    let sample_scale = (-0.5 * safe_radius) / pixel_position.z;
 
     var visibility = 0.0;
     var occluded_sample_count = 0u;
@@ -172,7 +182,10 @@ fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         var bitmask = 0u;
 
-        let sample_mul = vec2<f32>(omega.x, -omega.y) * sample_scale;
+        let sample_mul = vec2<f32>(
+            omega.x * view.clip_from_view[0][0],
+            -omega.y * view.clip_from_view[1][1]
+        ) * sample_scale;
         for (var sample_t = 0.0; sample_t < samples_per_slice_side; sample_t += 1.0) {
             var sample_noise = (slice_t + sample_t * samples_per_slice_side) * 0.6180339887498948482;
             sample_noise = fract(noise.y + sample_noise);

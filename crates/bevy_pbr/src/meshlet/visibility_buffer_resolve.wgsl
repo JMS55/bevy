@@ -67,10 +67,12 @@ fn compute_partial_derivatives(vertex_world_positions: array<vec4<f32>, 3>, ndc_
         interp_w * (delta_v.x * result.ddx.z + delta_v.y * result.ddy.z),
     );
 
-    result.ddx *= half_screen_size.x;
-    result.ddy *= half_screen_size.y;
-    ddx_sum *= half_screen_size.x;
-    ddy_sum *= half_screen_size.y;
+    // These are per-NDC-unit. One pixel spans 2 / viewport NDC units, so converting
+    // to per-pixel divides by half the viewport rather than multiplying by it.
+    result.ddx /= half_screen_size.x;
+    result.ddy /= half_screen_size.y;
+    ddx_sum /= half_screen_size.x;
+    ddy_sum /= half_screen_size.y;
 
     result.ddy *= -1.0;
     ddy_sum *= -1.0;
@@ -91,6 +93,9 @@ struct VertexOutput {
     ddx_uv: vec2<f32>,
     ddy_uv: vec2<f32>,
     world_tangent: vec4<f32>,
+    // The rasterizers do not hand us `@builtin(front_facing)`, so derive it from
+    // the triangle's winding against the view direction.
+    is_front: bool,
     mesh_flags: u32,
     cluster_id: u32,
     material_bind_group_slot: u32,
@@ -152,6 +157,14 @@ fn resolve_vertex_output(frag_coord: vec4<f32>) -> VertexOutput {
 
     let world_tangent = calculate_world_tangent(world_normal, ddx_world_position, ddy_world_position, ddx_uv, ddy_uv);
 
+    // Geometric facing, from the winding of the world-space triangle relative to
+    // the vector back toward the camera.
+    let geometric_normal = cross(
+        world_position_1.xyz - world_position_0.xyz,
+        world_position_2.xyz - world_position_0.xyz,
+    );
+    let is_front = dot(geometric_normal, view.world_position - world_position.xyz) >= 0.0;
+
 #ifdef PREPASS_FRAGMENT
 #ifdef MOTION_VECTOR_PREPASS
     let previous_world_from_local = affine3_to_square(instance_uniform.previous_world_from_local);
@@ -171,6 +184,7 @@ fn resolve_vertex_output(frag_coord: vec4<f32>) -> VertexOutput {
         ddx_uv,
         ddy_uv,
         world_tangent,
+        is_front,
         instance_uniform.flags,
         instance_id ^ meshlet_id,
         instance_uniform.material_and_lightmap_bind_group_slot & 0xffffu,

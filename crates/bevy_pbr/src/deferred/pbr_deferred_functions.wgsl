@@ -50,7 +50,10 @@ fn deferred_gbuffer_from_pbr_input(in: PbrInput) -> vec4<u32> {
         diffuse_occlusion, // is this worth including?
         clearcoat_props));
 #endif // WEBGL2
-    let flags = deferred_types::deferred_flags_from_mesh_material_flags(in.flags, in.material.flags);
+    var flags = deferred_types::deferred_flags_from_mesh_material_flags(in.flags, in.material.flags);
+#ifdef LIGHTMAP
+    flags |= deferred_types::DEFERRED_FLAGS_LIGHTMAPPED_BIT;
+#endif
     let octahedral_normal = octahedral_encode(normalize(in.N));
     var base_color_srgb = vec3(0.0);
     var emissive = in.material.emissive.rgb;
@@ -66,9 +69,10 @@ fn deferred_gbuffer_from_pbr_input(in: PbrInput) -> vec4<u32> {
     // with the calculated diffuse color the way forward shading would.
     //
     // `DFG_LUT` is only defined for the main mesh and SSR pipelines, so `F_AB`
-    // resolves to the polynomial approximation here while the lighting pass can
-    // use the LUT. The energy conservation factor inside `calculate_diffuse_color`
-    // therefore differs slightly between the two.
+    // resolves to the polynomial approximation here and in the deferred lighting
+    // pass, while forward shading can use the LUT. The energy conservation factor
+    // inside `calculate_diffuse_color` therefore differs slightly between the
+    // deferred and forward results.
     let base_color = in.material.base_color.rgb;
     let metallic = in.material.metallic;
     let specular_transmission = in.material.specular_transmission;
@@ -103,6 +107,8 @@ fn pbr_input_from_deferred_gbuffer(frag_coord: vec4<f32>, gbuffer: vec4<u32>) ->
     let deferred_flags = deferred_types::mesh_material_flags_from_deferred_flags(flags);
     pbr.flags = deferred_flags.x;
     pbr.material.flags = deferred_flags.y;
+    pbr.diffuse_indirect_is_baked =
+        (flags & deferred_types::DEFERRED_FLAGS_LIGHTMAPPED_BIT) != 0u;
 
     let base_rough = deferred_types::unpack_unorm4x8_(gbuffer.r);
     pbr.material.perceptual_roughness = base_rough.a;

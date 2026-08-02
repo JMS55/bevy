@@ -120,10 +120,11 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
             path.x2_reusable = reconnection_reusable(ray.t, p_brdf, next_bounce.wi, next_bounce.diffuse_selected, ray_hit, world_position, material.perceptual_roughness, primary_NdotV);
 
-            // The primary brdf*cos is applied at shade time, so divide it out of next_bounce.throughput
-            // to leave 1/pdf (or 1/specular_weight for mirrors, avoiding the 1/INF = 0 that would kill
-            // mirror GI).
-            path.throughput_past_first_hit *= next_bounce.throughput / max(path.x1_brdf, vec3(0.0001));
+            // The primary brdf*cos is applied at shade time, so use the sampler's
+            // own 1/pdf rather than dividing the BRDF back out. Dividing lost any
+            // color channel below the epsilon in the divisor, which bites on
+            // saturated albedos and at grazing angles.
+            path.throughput_past_first_hit *= next_bounce.inverse_pdf;
         } else {
             // Later bounces keep the full brdf*cos/pdf for L_at_reconnection.
             path.throughput_past_first_hit *= next_bounce.throughput;

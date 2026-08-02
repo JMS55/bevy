@@ -20,7 +20,7 @@
 @compute
 @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
-    let uv = vec2<f32>(idx.xy) / vec2<f32>(settings.sky_view_lut_size);
+    let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(settings.sky_view_lut_size);
 
     let cam_pos = get_view_position();
     let r = length(cam_pos);

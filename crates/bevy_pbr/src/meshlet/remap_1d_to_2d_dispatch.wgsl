@@ -15,10 +15,14 @@ var<immediate> max_compute_workgroups_per_dimension: u32;
 fn remap_dispatch() {
     let cluster_count = meshlet_software_raster_indirect_args.x;
 
+    // The consumers read `cluster_count` unconditionally under
+    // `MESHLET_2D_DISPATCH`, so it has to be written on both paths or the
+    // no-remap case leaves a stale value behind.
+    meshlet_software_raster_cluster_count = cluster_count;
+
     if cluster_count > max_compute_workgroups_per_dimension {
         let n = u32(ceil(sqrt(f32(cluster_count))));
         meshlet_software_raster_indirect_args.x = n;
         meshlet_software_raster_indirect_args.y = n;
-        meshlet_software_raster_cluster_count = cluster_count;
     }
 }

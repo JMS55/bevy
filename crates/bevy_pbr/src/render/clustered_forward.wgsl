@@ -43,10 +43,10 @@ fn view_z_to_z_slice(
     var z_slice: u32 = 0u;
     if is_orthographic {
         // NOTE: view_z is correct in the orthographic case
-        z_slice = u32(floor((view_z - cluster_factors.x) * cluster_factors.y));
+        z_slice = u32(max(0.0, floor((view_z - cluster_factors.x) * cluster_factors.y)));
     } else {
         // NOTE: had to use -view_z to make it positive else log(negative) is nan
-        z_slice = u32(log(-view_z) * cluster_factors.x - cluster_factors.y + 1.0);
+        z_slice = u32(max(0.0, log(-view_z) * cluster_factors.x - cluster_factors.y + 1.0));
     }
     // NOTE: We use min as we may limit the far z plane used for clustering to be closer than
     // the furthest thing being drawn. This means that we need to limit to the maximum cluster.

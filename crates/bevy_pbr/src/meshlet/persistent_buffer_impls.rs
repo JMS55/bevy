@@ -62,6 +62,10 @@ impl PersistentGpuBufferable for Arc<[Meshlet]> {
         mut buffer_slice: WriteOnly<[u8]>,
         _: BufferAddress,
     ) {
+        // TODO: These truncate without checking. `vertex_position_offset * 8`
+        // wraps at 512 MiB of packed position data and `index_offset` at 4 GiB,
+        // after which every asset uploaded reads geometry from the wrong place
+        // with no diagnostic. They should be checked, or the fields widened.
         let vertex_position_offset = (vertex_position_offset * 8) as u32;
         let vertex_attribute_offset = (vertex_attribute_offset as usize / size_of::<u32>()) as u32;
         let index_offset = index_offset as u32;

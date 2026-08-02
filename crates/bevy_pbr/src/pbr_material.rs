@@ -1194,7 +1194,11 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             emissive,
             roughness: self.perceptual_roughness,
             metallic: self.metallic,
-            reflectance: LinearRgba::from(self.specular_tint).to_vec3() * self.reflectance,
+            // `specular_tint` is a linear multiplier on F0 per
+            // `KHR_materials_specular`, but `calculate_F0_dielectric` squares
+            // reflectance, so pre-apply the square root.
+            reflectance: LinearRgba::from(self.specular_tint).to_vec3().powf(0.5)
+                * self.reflectance,
             clearcoat: self.clearcoat,
             clearcoat_perceptual_roughness: self.clearcoat_perceptual_roughness,
             anisotropy_strength: self.anisotropy_strength,

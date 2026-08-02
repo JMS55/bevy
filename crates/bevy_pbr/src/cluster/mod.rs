@@ -657,8 +657,10 @@ impl ViewClusterBindings {
                 let component = (self.n_indices >> 2) & ((1 << 2) - 1);
                 let sub_index = self.n_indices & ((1 << 2) - 1);
 
+                // Only 8 bits belong to this slot. A wider `index` (the dummy
+                // is `!0`) would spill into the neighbouring three.
                 clusterable_object_index_lists.get_mut().data[array_index][component] |=
-                    index << (8 * sub_index);
+                    (index & 0xff) << (8 * sub_index);
             }
             ViewClusterBuffers::Storage {
                 clusterable_object_index_lists,

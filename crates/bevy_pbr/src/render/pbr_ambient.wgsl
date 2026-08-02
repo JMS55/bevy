@@ -17,7 +17,8 @@ fn ambient_light(
     F0_metallic: vec3<f32>,
     metallic: f32,
     perceptual_roughness: f32,
-    occlusion: vec3<f32>,
+    diffuse_occlusion: vec3<f32>,
+    specular_occlusion: f32,
 ) -> vec3<f32> {
     let diffuse_ambient = diffuse_color;
 
@@ -30,5 +31,6 @@ fn ambient_light(
         dielectric_specular_occlusion(F0_dielectric)
     );
 
-    return (diffuse_ambient + specular_ambient) * lights.ambient_color.rgb * occlusion;
+    return (diffuse_ambient * diffuse_occlusion + specular_ambient * specular_occlusion) *
+        lights.ambient_color.rgb;
 }

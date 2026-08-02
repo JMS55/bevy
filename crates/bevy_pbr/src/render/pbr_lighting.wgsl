@@ -11,6 +11,11 @@
 const LAYER_BASE: u32 = 0;
 const LAYER_CLEARCOAT: u32 = 1;
 
+// Reflectance at normal incidence of the clearcoat layer, which is always a
+// polyurethane-like dielectric with an IOR of 1.5.
+// <https://google.github.io/filament/Filament.md.html#materialsystem/clearcoatmodel>
+const CLEARCOAT_F0: f32 = 0.04;
+
 // From the Filament design doc
 // https://google.github.io/filament/Filament.md.html#table_symbols
 // Symbol Definition
@@ -340,7 +345,12 @@ fn multiscatter_energy_compensation(F0: vec3<f32>, multiscatter_factor: f32) -> 
 // depend on F0 or on the light, so it is computed once per fragment and cached
 // in `LightingInput`.
 fn compute_multiscatter_factor(F_ab: vec2<f32>) -> f32 {
-    return 1.0 / (F_ab.x + F_ab.y) - 1.0;
+    // `F_ab.x + F_ab.y` is the energy a specular lobe reflects at F0 of 1, so it
+    // lies in (0, 1]. Clamp it, because the polynomial approximation clamps its
+    // two channels independently and can push the sum just above 1, and because
+    // a placeholder DFG LUT can read back as pure white.
+    let single_scatter_energy = clamp(F_ab.x + F_ab.y, 0.0001, 1.0);
+    return 1.0 / single_scatter_energy - 1.0;
 }
 
 // Given distribution, visibility, and Fresnel term, calculates the final
@@ -475,7 +485,7 @@ fn specular_clearcoat(
     // Calculate visibility.
     let Vc = V_Kelemen(LdotH);
     // Calculate the Fresnel term.
-    let Fc = F_Schlick(0.04, 1.0, LdotH) * clearcoat_strength;
+    let Fc = F_Schlick(CLEARCOAT_F0, 1.0, LdotH) * clearcoat_strength;
     // Calculate the specular light.
     let Frc = (specular_intensity * Dc * Vc) * Fc;
     return vec2(Fc, Frc);
@@ -589,8 +599,13 @@ fn EnvBRDFApprox(F0: vec3<f32>, F_ab: vec2<f32>) -> vec3<f32> {
 // energy the specular layer let through. Use the dielectric F0 for that: metals
 // have no diffuse lobe, which `calculate_diffuse_color` handles via `metallic`.
 fn specular_reflectance(F0: vec3<f32>, F_ab: vec2<f32>) -> vec3<f32> {
-    return EnvBRDFApprox(F0, F_ab) *
-        multiscatter_energy_compensation(F0, compute_multiscatter_factor(F_ab));
+    // Capped at 1 so this stays a reflectance. The polynomial approximation of
+    // `F_ab` overshoots slightly at grazing angles on very smooth surfaces.
+    return min(
+        EnvBRDFApprox(F0, F_ab) *
+            multiscatter_energy_compensation(F0, compute_multiscatter_factor(F_ab)),
+        vec3(1.0)
+    );
 }
 
 // No real world material has specular values under 0.02, so we use this range as a
@@ -750,7 +765,10 @@ fn point_light(
     let brdf_roughness = mix(a, a_prime, specular_fix_remap(a));
 
 #ifdef STANDARD_MATERIAL_ANISOTROPY
-    var specular_light = specular_anisotropy(input, &specular_derived_input, L, brdf_roughness, specular_intensity);
+    // `L_spec`, not `L`. `specular_derived_input` is built from the representative
+    // point on the sphere, and feeding the two functions different light
+    // directions leaves the anisotropic visibility term inconsistent.
+    var specular_light = specular_anisotropy(input, &specular_derived_input, L_spec, brdf_roughness, specular_intensity);
 #else   // STANDARD_MATERIAL_ANISOTROPY
     var specular_light = specular(input, &specular_derived_input, brdf_roughness, specular_intensity);
 #endif  // STANDARD_MATERIAL_ANISOTROPY
@@ -1175,8 +1193,7 @@ fn rect_light(
     );
     let spec_cc = ltc_integrate_quad(clearcoat_N, V, P, Minv_cc, corners);
 
-    // Clearcoat has F0=0.04
-    let spec_weight_cc = 0.04 * tc2.x + (1.0 - 0.04) * tc2.y;
+    let spec_weight_cc = CLEARCOAT_F0 * tc2.x + (1.0 - CLEARCOAT_F0) * tc2.y;
     let Fc = clearcoat_strength * spec_weight_cc;
     let inv_Fc = 1.0 - Fc;
 

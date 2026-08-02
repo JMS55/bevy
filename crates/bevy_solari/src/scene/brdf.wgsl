@@ -14,6 +14,11 @@ struct EvaluateAndSampleBrdfResult {
     wi: vec3<f32>,
     throughput: vec3<f32>,
     pdf: f32,
+    // `throughput` divided by the BRDF, i.e. `1 / pdf` (or `1 / specular_weight`
+    // for the delta lobe, where `1 / INF` would be zero). Returned directly so
+    // callers that need it do not have to reconstruct it by dividing the BRDF
+    // back out, which loses dim color channels to the epsilon in the divisor.
+    inverse_pdf: f32,
     diffuse_selected: bool,
 }
 
@@ -49,7 +54,7 @@ fn evaluate_and_sample_brdf(
     rng: ptr<function, u32>,
 ) -> EvaluateAndSampleBrdfResult {
     let NdotV = dot(world_normal, wo);
-    if NdotV < 0.0001 { return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false); }
+    if NdotV < 0.0001 { return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, 0.0, false); }
     let F0_metal = material.base_color;
     let F0_dielectric = calculate_F0_dielectric(vec3(material.reflectance));
     let rho = lobe_reflectances(F0_metal, F0_dielectric, material, F_ab);
@@ -72,7 +77,7 @@ fn evaluate_and_sample_brdf(
     } else {
         wi_tangent = sample_ggx_vndf(wo_tangent, material.roughness, rng);
         if ggx_vndf_sample_invalid(wi_tangent) {
-            return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, false);
+            return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, 0.0, false);
         }
         wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
 
@@ -82,6 +87,7 @@ fn evaluate_and_sample_brdf(
                 wi,
                 evaluate_specular_brdf(wo, wi, world_normal, material, F_ab) / specular_weight,
                 bitcast<f32>(0x7F800000u), // INF
+                1.0 / specular_weight,
                 false,
             );
         }
@@ -90,8 +96,9 @@ fn evaluate_and_sample_brdf(
     let diffuse_pdf = wi_tangent.z / PI;
     let specular_pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, material.roughness);
     let pdf = (diffuse_weight * diffuse_pdf) + (specular_weight * specular_pdf);
-    let throughput = evaluate_brdf(wo, wi, world_normal, material, F_ab) / pdf;
-    return EvaluateAndSampleBrdfResult(wi, throughput, pdf, diffuse_selected);
+    let inverse_pdf = 1.0 / pdf;
+    let throughput = evaluate_brdf(wo, wi, world_normal, material, F_ab) * inverse_pdf;
+    return EvaluateAndSampleBrdfResult(wi, throughput, pdf, inverse_pdf, diffuse_selected);
 }
 
 fn evaluate_brdf(
@@ -101,7 +108,14 @@ fn evaluate_brdf(
     material: ResolvedMaterial,
     F_ab: vec2<f32>,
 ) -> vec3<f32> {
-    return max(evaluate_diffuse_brdf(wo, wi, world_normal, material, F_ab) + evaluate_specular_brdf(wo, wi, world_normal, material, F_ab), vec3(0.0));
+    var brdf = evaluate_diffuse_brdf(wo, wi, world_normal, material, F_ab);
+    // The mirror branch of the specular lobe returns a delta magnitude, which is
+    // only meaningful when divided by the delta pdf. Reaching it from here would
+    // divide it by a finite pdf instead and produce a firefly.
+    if material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
+        brdf += evaluate_specular_brdf(wo, wi, world_normal, material, F_ab);
+    }
+    return max(brdf, vec3(0.0));
 }
 
 fn evaluate_diffuse_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> vec3<f32> {
@@ -172,5 +186,9 @@ fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
 
 // Scale/bias approximation
 fn F_AB(perceptual_roughness: f32, NdotV: f32) -> vec2<f32> {
-    return textureSampleLevel(brdf_dfg_lut, brdf_dfg_lut_sampler, vec2<f32>(NdotV, perceptual_roughness), 0.0).rg;
+    // Clamped because the LUT reads back as white until the image finishes
+    // uploading, which would otherwise drive the multiscatter factor negative and
+    // black out every diffuse surface for a frame.
+    let dfg = textureSampleLevel(brdf_dfg_lut, brdf_dfg_lut_sampler, vec2<f32>(NdotV, perceptual_roughness), 0.0).rg;
+    return clamp(dfg, vec2(0.0001), vec2(1.0));
 }

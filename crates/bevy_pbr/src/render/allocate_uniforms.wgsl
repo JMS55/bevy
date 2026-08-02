@@ -136,8 +136,14 @@ fn allocate_local_scan(
     // instances (plus the first output mesh uniform index if we're the first
     // workgroup) in the fan buffer in preparation for the next phase.
     if (local_id.x == WORKGROUP_SIZE - 1u) {
-        fan_buffer[group_id.x] = output_offsets[WORKGROUP_SIZE - 1u] +
-            bin_metadata[global_id.x].instance_count;
+        // The last chunk is partial, so this lane can sit past the end of the
+        // bin list. Its result is never consumed, but the read still has to be
+        // in bounds.
+        var tail_count = 0u;
+        if (global_id.x < arrayLength(&bin_metadata)) {
+            tail_count = bin_metadata[global_id.x].instance_count;
+        }
+        fan_buffer[group_id.x] = output_offsets[WORKGROUP_SIZE - 1u] + tail_count;
     }
 }
 

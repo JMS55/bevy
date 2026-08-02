@@ -45,7 +45,7 @@ fn fragment(
 ) -> FragmentOutput {
 #ifdef MESHLET_MESH_MATERIAL_PASS
     let vertex_output = resolve_vertex_output(frag_coord);
-    let is_front = true;
+    let is_front = in.is_front;
 #endif
 
     var in = vertex_output;

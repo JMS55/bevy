@@ -326,6 +326,10 @@ pub fn init_meshlet_pipelines(
                     })],
                     ..default()
                 }),
+                primitive: PrimitiveState {
+                    cull_mode: Some(Face::Back),
+                    ..default()
+                },
                 ..default()
             },
         ),
@@ -352,6 +356,10 @@ pub fn init_meshlet_pipelines(
                     })],
                     ..default()
                 }),
+                primitive: PrimitiveState {
+                    cull_mode: Some(Face::Back),
+                    ..default()
+                },
                 ..default()
             },
         ),
@@ -379,6 +387,13 @@ pub fn init_meshlet_pipelines(
                     })],
                     ..default()
                 }),
+                primitive: PrimitiveState {
+                    cull_mode: Some(Face::Back),
+                    // Directional shadow casters outside the cascade depth range
+                    // must not be clipped away.
+                    unclipped_depth: true,
+                    ..default()
+                },
                 ..default()
             }),
 

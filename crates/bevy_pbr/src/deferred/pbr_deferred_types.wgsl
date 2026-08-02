@@ -9,6 +9,10 @@
 const DEFERRED_FLAGS_UNLIT_BIT: u32                 = 1u << 0u;
 const DEFERRED_FLAGS_FOG_ENABLED_BIT: u32           = 1u << 1u;
 const DEFERRED_MESH_FLAGS_SHADOW_RECEIVER_BIT: u32  = 1u << 2u;
+// Set when the g-buffer already carries lightmapped diffuse in its emissive
+// channel, so the lighting pass does not add another source of diffuse indirect
+// on top of it.
+const DEFERRED_FLAGS_LIGHTMAPPED_BIT: u32           = 1u << 3u;
 
 fn deferred_flags_from_mesh_material_flags(mesh_flags: u32, mat_flags: u32) -> u32 {
     var flags = 0u;

@@ -210,7 +210,7 @@ pub fn meshlet_prepass(
         {
             let x = *material_id * 3;
             render_pass.set_render_pipeline(material_pipeline);
-            render_pass.set_bind_group(2, material_bind_group, &[]);
+            render_pass.set_bind_group(3, material_bind_group, &[]);
             render_pass.draw(x..(x + 3), 0..1);
         }
     }
@@ -326,7 +326,7 @@ pub fn meshlet_deferred_gbuffer_prepass(
         {
             let x = *material_id * 3;
             render_pass.set_render_pipeline(material_pipeline);
-            render_pass.set_bind_group(2, material_bind_group, &[]);
+            render_pass.set_bind_group(3, material_bind_group, &[]);
             render_pass.draw(x..(x + 3), 0..1);
         }
     }

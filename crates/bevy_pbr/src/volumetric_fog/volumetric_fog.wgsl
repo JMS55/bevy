@@ -187,15 +187,21 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if (ray_length_view == 0.0) {
         return vec4(0.0, 0.0, 0.0, 0.0);
     }
-    let inv_step_count = 1.0 / f32(step_count);
-    let step_size_world = ray_length_view * inv_step_count;
-
     let directional_light_count = lights.n_directional_lights;
 
     // Calculate the ray origin (`Ro`) and the ray direction (`Rd`) in NDC,
     // view, and world coordinates.
     let Rd_ndc = vec3(frag_coord_to_ndc(position).xy, 1.0);
     let Rd_view = normalize(position_ndc_to_view(Rd_ndc));
+
+    // `ray_length_view` is a depth along the view axis, but the steps march along
+    // the unit ray, so convert it to an arc length. Without this the segment is
+    // short by `cos` of the angle off-axis and the fog thins toward the edges of
+    // a wide field of view.
+    let inv_step_count = 1.0 / f32(step_count);
+    let ray_length_world = ray_length_view / max(-Rd_view.z, 0.0001);
+    let step_size_world = ray_length_world * inv_step_count;
+
     var Ro_world = position_view_to_world(view_start_pos.xyz);
     let Rd_world = normalize(position_ndc_to_world(Rd_ndc) - view.world_position);
 
@@ -213,8 +219,9 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // [2]: https://en.wikipedia.org/wiki/Beer%E2%80%93Lambert_law
 
     // Use Beer's law again to accumulate the ambient light all along the path.
-    var accumulated_color = exp(-ray_length_view * (absorption + scattering)) * ambient_color *
-        ambient_intensity;
+    let ambient_extinction = density_factor * (absorption + scattering);
+    var accumulated_color = (1.0 - exp(-ray_length_world * ambient_extinction)) *
+        ambient_color * ambient_intensity * exposure;
 
     // This is the amount of the background that shows through. We're actually
     // going to recompute this over and over again for each directional light,
@@ -257,8 +264,8 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             }
 
             // Calculate where we are in the ray.
-            let P_world = Ro_world + Rd_world * f32(step) * step_size_world;
-            let P_view = view_start_pos + Rd_view * f32(step) * step_size_world;
+            let P_world = Ro_world + Rd_world * (f32(step) + 0.5) * step_size_world;
+            let P_view = view_start_pos + Rd_view * (f32(step) + 0.5) * step_size_world;
 
             var density = density_factor;
 #ifdef DENSITY_TEXTURE
@@ -267,7 +274,7 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             // The uvs should never go outside the (0, 0, 0) to (1, 1, 1) box,
             // but sometimes due to floating point error they can. Handle this
             // case.
-            let P_uvw = Ro_uvw + Rd_step_uvw * f32(step);
+            let P_uvw = Ro_uvw + Rd_step_uvw * (f32(step) + 0.5);
             if (all(P_uvw >= vec3(0.0)) && all(P_uvw <= vec3(1.0))) {
                 density *= textureSampleLevel(density_texture, density_sampler, P_uvw + density_texture_offset, 0.0).r;
             } else {
@@ -351,8 +358,8 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
 
         // Calculate where we are in the ray.
-        let P_world = Ro_world + Rd_world * f32(step) * step_size_world;
-        let P_view = view_start_pos + Rd_view * f32(step) * step_size_world;
+        let P_world = Ro_world + Rd_world * (f32(step) + 0.5) * step_size_world;
+        let P_view = view_start_pos + Rd_view * (f32(step) + 0.5) * step_size_world;
 
         var density = density_factor;
 #ifdef DENSITY_TEXTURE
@@ -361,7 +368,7 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             // The uvs should never go outside the (0, 0, 0) to (1, 1, 1) box,
             // but sometimes due to floating point error they can. Handle this
             // case.
-            let P_uvw = Ro_uvw + Rd_step_uvw * f32(step);
+            let P_uvw = Ro_uvw + Rd_step_uvw * (f32(step) + 0.5);
             if (all(P_uvw >= vec3(0.0)) && all(P_uvw <= vec3(1.0))) {
                 density *= textureSampleLevel(density_texture, density_sampler, P_uvw + density_texture_offset, 0.0).r;
             } else {
@@ -424,7 +431,9 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 
             // Modulate the factor we calculated above by the phase, fog color,
             // light color, light tint.
-            let light_color_per_step = (*light).color_inverse_square_range.rgb * light_factors_per_step;
+            let phase = henyey_greenstein(dot(L, V));
+            let light_color_per_step = (*light).color_inverse_square_range.rgb * phase *
+                light_factors_per_step;
 
             // Accumulate the light.
             sample_color += light_color_per_step * local_light_attenuation;

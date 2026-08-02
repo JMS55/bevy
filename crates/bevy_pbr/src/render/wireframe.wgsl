@@ -26,6 +26,10 @@ struct VertexPullParams {
 }
 
 @group(3) @binding(0) var<storage, read> vertex_data: array<u32>;
+// TODO: This assumes the mesh uses `Indices::U32`. Nothing checks `IndexFormat`,
+// so a `Indices::U16` mesh (common for glTF assets) reads two packed 16-bit
+// indices per element and draws garbage triangles. Needs either a `Uint16`
+// unpack path or a fallback to the thin-line pipeline.
 @group(3) @binding(1) var<storage, read> index_data: array<u32>;
 @group(3) @binding(2) var<uniform> vp_params: VertexPullParams;
 

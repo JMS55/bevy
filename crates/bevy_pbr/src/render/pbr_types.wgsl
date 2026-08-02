@@ -111,6 +111,10 @@ struct PbrInput {
     // view world position
     V: vec3<f32>,
     lightmap_light: vec3<f32>,
+    // True when a diffuse indirect source is already folded into this input, so
+    // the lighting pass must not add another one. Deferred sets this from the
+    // g-buffer, since the lightmap was baked in at g-buffer write time.
+    diffuse_indirect_is_baked: bool,
     clearcoat_N: vec3<f32>,
     anisotropy_strength: f32,
     // These two aren't specific to anisotropy, but we only fill them in if
@@ -147,6 +151,7 @@ fn pbr_input_new() -> PbrInput {
     pbr_input.anisotropy_B = vec3<f32>(0.0);
 
     pbr_input.lightmap_light = vec3<f32>(0.0);
+    pbr_input.diffuse_indirect_is_baked = false;
 
     pbr_input.flags = 0u;
     pbr_input.directional_shadow_factor = 1.0;

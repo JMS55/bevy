@@ -40,7 +40,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(settings.multiscattering_lut_size);
 
     let r_mu = multiscattering_lut_uv_to_r_mu(uv);
-    let light_dir = normalize(vec3(0.0, r_mu.y, -1.0));
+    // `local_up` is +Y here, so the third component has to complete the unit
+    // vector for `r_mu.y` to actually be the zenith cosine.
+    let light_dir = vec3(0.0, r_mu.y, -sqrt(max(1.0 - r_mu.y * r_mu.y, 0.0)));
 
     let ray_dir = uv_to_sphere(s2_sequence(global_id.z));
     let ms_sample = sample_multiscattering_dir(r_mu.x, ray_dir, light_dir);
@@ -127,7 +129,9 @@ fn sample_multiscattering_dir(r: f32, ray_dir: vec3<f32>, light_dir: vec3<f32>) 
         let transmittance_to_ground = exp(-optical_depth);
         let local_up = get_local_up(r, t_max, ray_dir);
         let mu_light = dot(light_dir, local_up);
-        let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
+        // At r = 0 the LUT parameterization collapses to the zenith for every
+        // `mu_light`, so sample at the ground radius instead.
+        let transmittance_to_light = sample_transmittance_lut(atmosphere.inner_radius, mu_light);
         let ground_luminance = transmittance_to_light * transmittance_to_ground * max(mu_light, 0.0) * atmosphere.ground_albedo;
         l_2 += ground_luminance;
     }

@@ -109,8 +109,11 @@ fn pbr_input_from_standard_material(
     // Fill in the sample bias so we can sample from textures.
     var bias: SampleBias;
 #ifdef MESHLET_MESH_MATERIAL_PASS
-    bias.ddx_uv = in.ddx_uv;
-    bias.ddy_uv = in.ddy_uv;
+    // `textureSampleGrad` takes no bias parameter, so fold `view.mip_bias` into
+    // the gradients. A bias of n mips scales the footprint by 2^n.
+    let mip_bias_scale = exp2(view.mip_bias);
+    bias.ddx_uv = in.ddx_uv * mip_bias_scale;
+    bias.ddy_uv = in.ddy_uv * mip_bias_scale;
 #else   // MESHLET_MESH_MATERIAL_PASS
     bias.mip_bias = view.mip_bias;
 #endif  // MESHLET_MESH_MATERIAL_PASS
@@ -295,9 +298,11 @@ pbr_input.material.uv_transform = uv_transform;
                     bias.mip_bias,
 #endif  // MESHLET_MESH_MATERIAL_PASS
             ).a;
-            // This 0.5 factor is from the `KHR_materials_specular` specification:
-            // <https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular#materials-with-reflectance-parameter>
-            pbr_input.material.reflectance *= specular * 0.5;
+            // `KHR_materials_specular` defines `specularFactor` as a linear
+            // multiplier on F0, but `calculate_F0_dielectric` squares reflectance,
+            // so take the square root to keep the product linear in F0.
+            // <https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular>
+            pbr_input.material.reflectance *= sqrt(specular);
         }
 
         // Specular tint texture
@@ -327,7 +332,8 @@ pbr_input.material.uv_transform = uv_transform;
                     bias.mip_bias,
 #endif  // MESHLET_MESH_MATERIAL_PASS
             ).rgb;
-            pbr_input.material.reflectance *= specular_tint;
+            // Linear in F0, as above.
+            pbr_input.material.reflectance *= sqrt(specular_tint);
         }
 
 #endif  // VERTEX_UVS
@@ -773,6 +779,8 @@ pbr_input.material.uv_transform = uv_transform;
         // This code comes from the `KHR_materials_anisotropy` spec:
         // <https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_anisotropy/README.md#individual-lights>
 #ifdef PBR_ANISOTROPY_TEXTURE_SUPPORTED
+// This block reads `TBN` and the UV sets, which only exist under `VERTEX_UVS`.
+#ifdef VERTEX_UVS
 #ifdef VERTEX_TANGENTS
 #ifdef STANDARD_MATERIAL_ANISOTROPY
 
@@ -825,12 +833,13 @@ pbr_input.material.uv_transform = uv_transform;
         pbr_input.anisotropy_strength = anisotropy_strength;
 
         let anisotropy_T = normalize(TBN * vec3(anisotropy_direction, 0.0));
-        let anisotropy_B = normalize(cross(pbr_input.world_normal, anisotropy_T));
+        let anisotropy_B = normalize(cross(pbr_input.N, anisotropy_T));
         pbr_input.anisotropy_T = anisotropy_T;
         pbr_input.anisotropy_B = anisotropy_B;
 
 #endif  // STANDARD_MATERIAL_ANISOTROPY
 #endif  // VERTEX_TANGENTS
+#endif  // VERTEX_UVS
 #endif  // PBR_ANISOTROPY_TEXTURE_SUPPORTED
 
 #endif  // LOAD_PREPASS_NORMALS

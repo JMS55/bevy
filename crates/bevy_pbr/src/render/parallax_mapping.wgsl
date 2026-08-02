@@ -78,7 +78,7 @@ fn parallaxed_uv(
     // texture_depth > current_layer_depth means the depth map depth is deeper
     // than the depth the ray would be at this UV offset so the ray has not
     // intersected the surface
-    for (var i: i32 = 0; texture_depth > current_layer_depth && i <= i32(layer_count); i++) {
+    for (var i: i32 = 0; texture_depth > current_layer_depth && i < i32(layer_count); i++) {
         current_layer_depth += layer_depth;
         uv += delta_uv;
         texture_depth = sample_depth_map(uv, material_bind_group_slot);

@@ -78,18 +78,26 @@ fn sample_specular_brdf(
     let NdotV = max(dot(N, wo), 0.0001);
     let VdotH = max(dot(wo, H), 0.0001);
 
-    // Height-correlated Smith G2 / G1(V)
-    let a2 = roughness * roughness;
-    let lambdaV = NdotL * sqrt((NdotV - a2 * NdotV) * NdotV + a2);
-    let lambdaL = NdotV * sqrt((NdotL - a2 * NdotL) * NdotL + a2);
-    let G = (NdotV * NdotL + lambdaV) / (lambdaV + lambdaL);
+    // `f * cos / pdf`, using the pdf that actually matches `sample_visible_ggx`.
+    //
+    // The G2/G1 shorthand is only correct for the *unbounded* VNDF pdf, but the
+    // sampler is the bounded one, whose pdf carries an extra `k` on the `i.z`
+    // term. Dividing by the matching pdf keeps the estimator unbiased instead of
+    // running roughness-dependently bright.
+    let NdotH = dot(N, H);
+    let D = lighting::D_GGX(roughness, NdotH);
+    let Vis = lighting::V_SmithGGXCorrelated(roughness, NdotV, NdotL);
+    let pdf = lighting::ggx_vndf_pdf(wo, NdotH, roughness);
+    let G = D * Vis * NdotL / max(pdf, 0.0001);
 
-    // Apply the same multiple-scattering energy compensation the environment
-    // map gets, so the two agree where SSR fades in and out. That term is
-    // nonlinear in F0, so evaluate each lobe separately and mix the results.
+    // Apply the same multiple-scattering energy compensation and dielectric
+    // specular occlusion the environment map gets, so the two agree where SSR
+    // fades in and out. Both are nonlinear in F0, so evaluate each lobe
+    // separately and mix the results.
     let multiscatter_factor = lighting::compute_multiscatter_factor(F_ab);
     let F_dielectric = lighting::F_Schlick_vec(F0_dielectric, 1.0, VdotH) *
-        lighting::multiscatter_energy_compensation(F0_dielectric, multiscatter_factor);
+        lighting::multiscatter_energy_compensation(F0_dielectric, multiscatter_factor) *
+        lighting::dielectric_specular_occlusion(F0_dielectric);
     let F_metallic = lighting::F_Schlick_vec(F0_metallic, 1.0, VdotH) *
         lighting::multiscatter_energy_compensation(F0_metallic, multiscatter_factor);
 
@@ -333,7 +341,15 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Accumulate the environment map light.
     // Note that we multiply by (1.0 - ssr_specular.a * fade) to occlude the
     // environment map if SSR hits.
-    indirect_light += (view.exposure * environment_light.specular * specular_occlusion) * (1.0 - (1.0 - ssr_specular.a) * fade);
+    //
+    // The main pass only skips its own environment specular for fragments inside
+    // the SSR roughness window, so this has to use the same predicate rather than
+    // `fade`, or the two passes both add it outside that window.
+    let use_ssr = perceptual_roughness <= ssr_settings.max_perceptual_roughness
+        && perceptual_roughness >= ssr_settings.min_perceptual_roughness;
+    if (use_ssr) {
+        indirect_light += (view.exposure * environment_light.specular * specular_occlusion) * (1.0 - (1.0 - ssr_specular.a) * fade);
+    }
 #endif
 
     // Write the results.

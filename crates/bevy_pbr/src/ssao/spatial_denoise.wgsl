@@ -63,7 +63,9 @@ fn spatial_denoise(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bottom_left_visibility = visibility2.w;
     let bottom_right_visibility = visibility3.w;
 
-    var sum = center_visibility;
+    // Weighted by `center_weight` here as well as in `sum_weight`, so that a flat
+    // visibility field passes through unchanged.
+    var sum = center_visibility * center_weight;
     sum += left_visibility * left_weight;
     sum += right_visibility * right_weight;
     sum += top_visibility * top_weight;

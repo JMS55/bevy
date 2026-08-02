@@ -6,7 +6,7 @@
 #import bevy_pbr::mesh_view_types::{
     LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE, LIGHT_PROBE_FLAG_PARALLAX_CORRECT
 }
-#import bevy_pbr::lighting::{F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT, material_specular_reflectance, dielectric_specular_occlusion}
+#import bevy_pbr::lighting::{F_Schlick_vec, LightingInput, LayerLightingInput, LAYER_BASE, LAYER_CLEARCOAT, material_specular_reflectance, dielectric_specular_occlusion, CLEARCOAT_F0}
 #import bevy_pbr::clustered_forward::ClusterableObjectIndexRanges
 
 // The maximum representable value in a 32-bit floating point number.
@@ -167,15 +167,18 @@ fn compute_radiances(
         let parallax_correct = (query_result.flags & LIGHT_PROBE_FLAG_PARALLAX_CORRECT) != 0u;
 
         if (enable_diffuse) {
+            // Irradiance is prefiltered over the hemisphere around `N`, so a
+            // parallax-corrected direction has no meaning for it. Only the
+            // specular lookup below is parallax corrected.
             let irradiance_sample_dir = compute_cubemap_sample_dir(
                 world_position,
                 N,
                 query_result.light_from_world,
                 query_result.parallax_correction_bounds,
-                parallax_correct,
+                /*parallax_correct=*/ false,
                 view_rotation,
             );
-            radiances.irradiance = textureSampleLevel(
+            radiances.irradiance += textureSampleLevel(
                 bindings::diffuse_environment_maps[query_result.texture_index],
                 bindings::environment_map_sampler,
                 irradiance_sample_dir,
@@ -244,7 +247,7 @@ fn compute_radiances(
     var enable_diffuse = !found_diffuse_indirect;
 #ifdef LIGHTMAP
     enable_diffuse = enable_diffuse &&
-        light_probes.view_environment_map_affects_lightmapped_mesh_diffuse;
+        light_probes.view_environment_map_affects_lightmapped_mesh_diffuse != 0u;
 #endif  // LIGHTMAP
 
     if (enable_diffuse) {
@@ -294,16 +297,16 @@ fn environment_map_light_clearcoat(
     let clearcoat_strength = (*input).clearcoat_strength;
 
     // Calculate the Fresnel term `Fc` for the clearcoat layer.
-    // 0.04 is a hardcoded value for F0 from the Filament spec.
-    let clearcoat_F0 = vec3<f32>(0.04);
+    let clearcoat_F0 = vec3<f32>(CLEARCOAT_F0);
     let Fc = F_Schlick_vec(clearcoat_F0, 1.0, clearcoat_NdotV) * clearcoat_strength;
     let inv_Fc = 1.0 - Fc;
 
+    // Only `radiance` is used below, so skip the irradiance cubemap fetch.
     let clearcoat_radiances = compute_radiances(
         (*input).layers[LAYER_CLEARCOAT],
         clusterable_object_index_ranges,
         world_position,
-        found_diffuse_indirect,
+        /*found_diffuse_indirect=*/ true,
     );
 
     // Composite the clearcoat layer on top of the existing one.

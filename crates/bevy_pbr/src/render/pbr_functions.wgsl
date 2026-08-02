@@ -141,13 +141,19 @@ fn prepare_world_normal(
     is_front: bool,
 ) -> vec3<f32> {
     var output: vec3<f32> = world_normal;
-#ifndef VERTEX_TANGENTS
-#ifndef STANDARD_MATERIAL_NORMAL_MAP
     // NOTE: When NOT using normal-mapping, if looking at the back face of a double-sided
     // material, the normal needs to be inverted. This is a branchless version of that.
+    //
+    // `apply_normal_mapping` does the flip itself, but only runs when the mesh has
+    // tangents *and* the material has a normal map. Either one alone still needs
+    // the flip here.
+#ifndef VERTEX_TANGENTS
     output = (f32(!double_sided || is_front) * 2.0 - 1.0) * output;
-#endif
-#endif
+#else   // VERTEX_TANGENTS
+#ifndef STANDARD_MATERIAL_NORMAL_MAP
+    output = (f32(!double_sided || is_front) * 2.0 - 1.0) * output;
+#endif  // STANDARD_MATERIAL_NORMAL_MAP
+#endif  // VERTEX_TANGENTS
     return output;
 }
 
@@ -204,7 +210,9 @@ fn apply_normal_mapping(
     if (standard_material_flags & pbr_types::STANDARD_MATERIAL_FLAGS_TWO_COMPONENT_NORMAL_MAP) != 0u {
         // Only use the xy components and derive z for 2-component normal maps.
         Nt = vec3<f32>(Nt.rg * 2.0 - 1.0, 0.0);
-        Nt.z = sqrt(1.0 - Nt.x * Nt.x - Nt.y * Nt.y);
+        // Block compression and mip filtering can push the reconstructed length
+        // past 1, which would make this the square root of a negative number.
+        Nt.z = sqrt(max(0.0, 1.0 - Nt.x * Nt.x - Nt.y * Nt.y));
     } else {
         Nt = Nt * 2.0 - 1.0;
     }
@@ -295,10 +303,12 @@ fn calculate_diffuse_color(
     F0_dielectric: vec3<f32>,
     F_ab: vec2<f32>,
 ) -> vec3<f32> {
-    // `F_ab.x + F_ab.y` can exceed 1 in the polynomial approximation at grazing
-    // angles on smooth surfaces, which would drive the attenuation negative.
-    let specular_layer_transmission =
-        max(vec3(0.0), 1.0 - lighting::specular_reflectance(F0_dielectric, F_ab));
+    // Only the energy the specular layer actually reflects is unavailable to the
+    // diffuse layer. Specular occlusion extinguishes part of that lobe, so it has
+    // to be accounted for here or a low reflectance loses the energy from both.
+    let specular_layer_reflectance = lighting::specular_reflectance(F0_dielectric, F_ab) *
+        lighting::dielectric_specular_occlusion(F0_dielectric);
+    let specular_layer_transmission = 1.0 - specular_layer_reflectance;
     return base_color * (1.0 - metallic) * (1.0 - specular_transmission) *
         (1.0 - diffuse_transmission) * specular_layer_transmission;
 }
@@ -709,7 +719,7 @@ fn apply_pbr_lighting(
     // NdotV = 1.0;
     // F0 = vec3<f32>(0.0)
     // diffuse_occlusion = vec3<f32>(1.0)
-    transmitted_light += ambient::ambient_light(diffuse_transmissive_lobe_world_position, -in.N, -in.V, 1.0, diffuse_transmissive_color, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 1.0, vec3<f32>(1.0));
+    transmitted_light += ambient::ambient_light(diffuse_transmissive_lobe_world_position, -in.N, -in.V, 1.0, diffuse_transmissive_color, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 1.0, vec3<f32>(1.0), 1.0);
 #endif
 
     // Diffuse indirect lighting can come from a variety of sources. The
@@ -724,10 +734,19 @@ fn apply_pbr_lighting(
     // example, both lightmaps and irradiance volumes are present.
 
     var indirect_light = vec3(0.0f);
-    var found_diffuse_indirect = false;
+    // Deferred bakes the lightmap into the g-buffer's emissive channel, so the
+    // lighting pass has to know not to add a second source of diffuse indirect.
+    var found_diffuse_indirect = in.diffuse_indirect_is_baked;
 
 #ifdef LIGHTMAP
     indirect_light += in.lightmap_light * diffuse_color;
+    // TODO: This makes `LIGHT_PROBE_FLAG_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE` and
+    // `EnvironmentMapLight::affects_lightmapped_mesh_diffuse` unreachable. The
+    // environment map ANDs its own flag against `!found_diffuse_indirect`, so
+    // setting this unconditionally means the flag can never re-enable diffuse.
+    // Splitting this into "a lightmap exists" and "stop accumulating" would let
+    // the environment map honor its flag while irradiance volumes and ambient
+    // stay suppressed.
     found_diffuse_indirect = true;
 #endif
 
@@ -739,8 +758,13 @@ fn apply_pbr_lighting(
             in.N,
             &clusterable_object_index_ranges,
         );
-        indirect_light += irradiance_volume_light * diffuse_color * diffuse_occlusion;
-        found_diffuse_indirect = true;
+        // The shader def is per view, but coverage is per fragment. Only claim
+        // the diffuse indirect slot where a volume actually covered this
+        // fragment, or meshes outside every volume lose their environment map.
+        if (irradiance_volume_light.w > 0.0) {
+            indirect_light += irradiance_volume_light.rgb * diffuse_color * diffuse_occlusion;
+            found_diffuse_indirect = true;
+        }
     }
 #endif
 
@@ -785,8 +809,12 @@ fn apply_pbr_lighting(
 #else   // LIGHTMAP
     let enable_ambient = true;
 #endif  // LIGHTMAP
-    if (enable_ambient) {
-        indirect_light += ambient::ambient_light(in.world_position, in.N, in.V, NdotV, diffuse_color, F0_dielectric, F0_metallic, metallic, perceptual_roughness, diffuse_occlusion);
+    // Deferred carries the lightmap in the g-buffer, so it has to honor the same
+    // rule at runtime rather than through the `LIGHTMAP` shader def.
+    let ambient_allowed = enable_ambient && !(in.diffuse_indirect_is_baked &&
+        (view_bindings::lights.ambient_light_flags & mesh_view_types::AMBIENT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESHES_BIT) == 0u);
+    if (ambient_allowed) {
+        indirect_light += ambient::ambient_light(in.world_position, in.N, in.V, NdotV, diffuse_color, F0_dielectric, F0_metallic, metallic, perceptual_roughness, diffuse_occlusion, specular_occlusion);
     }
 
     // we'll use the specular component of the transmitted environment
@@ -854,7 +882,9 @@ fn apply_pbr_lighting(
     transmitted_light += transmitted_environment_light.diffuse * diffuse_transmissive_color;
 #endif  // STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
 #ifdef STANDARD_MATERIAL_SPECULAR_TRANSMISSION
-    specular_transmitted_environment_light = transmitted_environment_light.specular * specular_transmissive_color;
+    // Not scaled by `specular_transmissive_color` here. `specular_transmissive_light`
+    // applies it to the whole mix of this and the background.
+    specular_transmitted_environment_light = transmitted_environment_light.specular;
 #endif  // STANDARD_MATERIAL_SPECULAR_TRANSMISSION
 
 #endif  // STANDARD_MATERIAL_SPECULAR_OR_DIFFUSE_TRANSMISSION
@@ -868,7 +898,10 @@ fn apply_pbr_lighting(
     //
     // <https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_clearcoat/README.md#emission>
 #ifdef STANDARD_MATERIAL_CLEARCOAT
-    emissive_light = emissive_light * (0.04 + (1.0 - 0.04) * pow(1.0 - clearcoat_NdotV, 5.0));
+    // glTF: the emission sits under the coat, so it is scaled by what the coat
+    // transmits, not by what the coat reflects.
+    let clearcoat_fresnel = lighting::F_Schlick(lighting::CLEARCOAT_F0, 1.0, clearcoat_NdotV);
+    emissive_light = emissive_light * (1.0 - clearcoat * clearcoat_fresnel);
 #endif
 
     emissive_light = emissive_light * mix(1.0, view_bindings::view.exposure, emissive.a);

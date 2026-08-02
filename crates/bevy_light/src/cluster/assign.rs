@@ -264,17 +264,22 @@ pub(crate) fn assign_objects_to_clusters(
             ));
         }
 
+        // `ClusterableObjectIndexRanges` slices each cluster's index list by type,
+        // so the list has to be ordered by type. Relying on the order the objects
+        // were extended in is not enough: reflection probes and irradiance volumes
+        // come from a single query, and archetype iteration order decides which
+        // comes first.
+        clusterable_objects.sort_by_cached_key(|clusterable_object| {
+            (
+                clusterable_object.object_type.ordering(),
+                clusterable_object.entity,
+            )
+        });
+
         if clusterable_objects.len()
             > global_cluster_settings.max_uniform_buffer_clusterable_objects
             && !global_cluster_settings.supports_storage_buffers
         {
-            clusterable_objects.sort_by_cached_key(|clusterable_object| {
-                (
-                    clusterable_object.object_type.ordering(),
-                    clusterable_object.entity,
-                )
-            });
-
             if clusterable_objects.len()
                 > global_cluster_settings.max_uniform_buffer_clusterable_objects
                 && !*max_clusterable_objects_warning_emitted

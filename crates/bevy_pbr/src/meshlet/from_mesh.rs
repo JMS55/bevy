@@ -478,6 +478,12 @@ fn group_meshlets(
         .part_recursive(&mut group_per_meshlet)
         .unwrap();
 
+    // TODO: METIS can return an empty partition. Downstream, `child_counts[i] == 0`
+    // doubles as the "unused slot" sentinel and the BVH aggregation loops break on
+    // it, so an empty group silently drops every later sibling from the parent's
+    // AABB, LOD sphere, and error. That yields non-enclosing bounds and breaks the
+    // monotone-error invariant the LOD selection relies on. Empty groups should be
+    // dropped, or the sentinel should be distinct from a zero count.
     let mut groups = vec![TempMeshletGroup::default(); partition_count];
     for (i, meshlet_group) in group_per_meshlet.into_iter().enumerate() {
         let group = &mut groups[meshlet_group as usize];
@@ -623,7 +629,7 @@ fn build_and_compress_per_meshlet_vertex_data(
         vertex_normals.push(pack2x16snorm(octahedral_encode(normal)));
 
         // Quantize position to a fixed-point IVec3
-        let quantized_position = (position * quantization_factor + 0.5).as_ivec3();
+        let quantized_position = (position * quantization_factor + 0.5).floor().as_ivec3();
         quantized_positions[i] = quantized_position;
 
         // Compute per X/Y/Z-channel quantized position min/max for this meshlet

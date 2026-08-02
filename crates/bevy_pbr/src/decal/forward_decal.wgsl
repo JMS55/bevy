@@ -21,8 +21,14 @@ struct ForwardDecalInformation {
 
 fn get_forward_decal_info(in: VertexOutput) -> ForwardDecalInformation {
     let world_from_local = get_world_from_local(in.instance_index);
-    let scale = (world_from_local * vec4(1.0, 1.0, 1.0, 0.0)).xyz;
-    let scaled_tangent = vec4(in.world_tangent.xyz / scale, in.world_tangent.w);
+    // Per-axis scale is the length of each basis column. Summing the columns only
+    // happens to give that for an unrotated transform.
+    let scale = vec3(
+        length(world_from_local[0].xyz),
+        length(world_from_local[1].xyz),
+        length(world_from_local[2].xyz)
+    );
+    let scaled_tangent = vec4(in.world_tangent.xyz / max(scale, vec3(0.0001)), in.world_tangent.w);
 
     let V = normalize(view.world_position - in.world_position.xyz);
 
@@ -36,7 +42,6 @@ fn get_forward_decal_info(in: VertexOutput) -> ForwardDecalInformation {
     let frag_depth = depth_ndc_to_view_z(in.position.z);
     let depth_pass_depth = depth_ndc_to_view_z(prepass_depth(in.position, 0u));
     let diff_depth = frag_depth - depth_pass_depth;
-    let diff_depth_abs = abs(diff_depth);
 
     // Apply UV parallax
     let contact_on_decal = project_onto(V * diff_depth, in.world_normal);
@@ -45,7 +50,11 @@ fn get_forward_decal_info(in: VertexOutput) -> ForwardDecalInformation {
     let delta_uv = normal_depth * Vt.xy * vec2(1.0, -1.0) / view_steepness;
     let uv = in.uv + delta_uv;
 
-    let world_position = vec4(in.world_position.xyz + V * diff_depth_abs, in.world_position.w);
+    // `V` points toward the camera and view z grows more negative with distance,
+    // so a positive `diff_depth` means the prepass surface is behind the quad and
+    // the fragment has to move away from the camera. Taking the absolute value
+    // would move it toward the camera in both cases.
+    let world_position = vec4(in.world_position.xyz - V * diff_depth, in.world_position.w);
     let alpha = saturate(1.0 - (normal_depth * inv_depth_fade_factor));
 
     return ForwardDecalInformation(world_position, uv, alpha);

@@ -420,6 +420,24 @@ impl PrepassPipeline {
         // since that's the only time it gets called from a prepass pipeline.)
         shader_defs.push("PREPASS_PIPELINE".into());
 
+        // The deferred pipeline is a prepass pipeline, and it runs the same
+        // material code as the forward pass. These have to match what
+        // `MeshPipeline::specialize` pushes, or the g-buffer silently loses the
+        // textured material features, and the non-bindless clearcoat normal map
+        // binding fails to resolve at all.
+        if cfg!(feature = "pbr_transmission_textures") {
+            shader_defs.push("PBR_TRANSMISSION_TEXTURES_SUPPORTED".into());
+        }
+        if cfg!(feature = "pbr_multi_layer_material_textures") {
+            shader_defs.push("PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED".into());
+        }
+        if cfg!(feature = "pbr_anisotropy_texture") {
+            shader_defs.push("PBR_ANISOTROPY_TEXTURE_SUPPORTED".into());
+        }
+        if cfg!(feature = "pbr_specular_textures") {
+            shader_defs.push("PBR_SPECULAR_TEXTURES_SUPPORTED".into());
+        }
+
         shader_defs.push(ShaderDefVal::UInt(
             "MATERIAL_BIND_GROUP".into(),
             crate::MATERIAL_BIND_GROUP_INDEX as u32,

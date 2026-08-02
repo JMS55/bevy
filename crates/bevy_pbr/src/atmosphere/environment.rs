@@ -148,7 +148,10 @@ pub(super) fn prepare_probe_textures(
     mut commands: Commands,
 ) {
     for (probe, render_env_map) in &probes {
-        let environment = gpu_images.get(&render_env_map.environment_map).unwrap();
+        // The image may not have been uploaded yet on the first frames.
+        let Some(environment) = gpu_images.get(&render_env_map.environment_map) else {
+            continue;
+        };
         // create a cube view
         let environment_view = environment.texture.create_view(&TextureViewDescriptor {
             dimension: Some(TextureViewDimension::D2Array),
@@ -290,9 +293,11 @@ pub fn atmosphere_environment(
             ],
         );
 
+        // Rounded up so probes smaller than the workgroup size still dispatch.
+        // The shader bounds-checks the tail.
         pass.dispatch_workgroups(
-            env_map_light.size.x / 8,
-            env_map_light.size.y / 8,
+            env_map_light.size.x.div_ceil(8),
+            env_map_light.size.y.div_ceil(8),
             6, // 6 cubemap faces
         );
     }

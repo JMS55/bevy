@@ -61,11 +61,13 @@ fn specular_transmissive_light(world_position: vec4<f32>, frag_coord: vec3<f32>,
     // Compensate for exposure, since the background color is coming from an already exposure-adjusted texture
     background_color = vec4(background_color.rgb / view_bindings::view.exposure, background_color.a);
 
-    // Dot product of the refracted direction with the exit normal (Note: We assume the exit normal is the entry normal but inverted)
-    let MinusNdotT = dot(-N, T);
-
     // Calculate 1.0 - fresnel factor (how much light is _NOT_ reflected, i.e. how much is transmitted)
-    let F = vec3(1.0) - lighting::fresnel(F0, MinusNdotT);
+    //
+    // Schlick's approximation is parameterized by the angle in the less dense
+    // medium, so this uses the incident cosine at the entry surface. Using the
+    // refracted direction instead would report far too much transmission at
+    // grazing angles, where the refracted ray has been bent toward the normal.
+    let F = vec3(1.0) - lighting::fresnel(F0, saturate(-NdotI));
 
     // Calculate final color by applying fresnel multiplied specular transmissive color to a mix of background color and transmitted specular environment light
     return F * specular_transmissive_color * mix(transmitted_environment_light_specular, background_color.rgb, background_color.a);

@@ -363,10 +363,12 @@ fn load_mip_0_meshlet(st: vec2<f32>, shift: u32) -> vec4<f32> {
     let st0 = vec2<u32>(floor(st - 0.5));
     let st1 = st0 + 1u;
     return vec4<f32>(
-        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st0.x, st0.y)).r) >> shift),
-        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st0.x, st1.y)).r) >> shift),
-        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st1.x, st0.y)).r) >> shift),
-        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st1.x, st1.y)).r) >> shift)
+        // Shift before narrowing. Truncating to u32 first would keep the packed
+        // cluster IDs in the low half and discard the depth entirely.
+        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st0.x, st0.y)).r >> shift)),
+        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st0.x, st1.y)).r >> shift)),
+        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st1.x, st0.y)).r >> shift)),
+        bitcast<f32>(u32(textureLoad(mip_0, vec2<u32>(st1.x, st1.y)).r >> shift))
     );
 }
 #endif  // MESHLET

@@ -206,11 +206,12 @@ fn light_probe_iterator_next(iterator: ptr<function, LightProbeIterator>) -> Lig
     result.texture_index = -1;
     result.weight = 0.0;
 
-    while (true) {
+    while ((*iterator).current_index < (*iterator).end_index) {
         let light_probe_index = (*iterator).current_index;
+        (*iterator).current_index += 1;
 
         var light_probe: LightProbe;
-        if is_irradiance_volume {
+        if (*iterator).is_irradiance_volume {
             light_probe = light_probes.irradiance_volumes[light_probe_index];
         } else {
             light_probe = light_probes.reflection_probes[light_probe_index];

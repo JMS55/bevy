@@ -22,7 +22,7 @@ fn irradiance_volume_light(
     world_position: vec3<f32>,
     N: vec3<f32>,
     clusterable_object_index_ranges: ptr<function, ClusterableObjectIndexRanges>,
-) -> vec3<f32> {
+) -> vec4<f32> {
     // Find all irradiance volumes that contain the fragment. We're going to
     // accumulate all the irradiance from them in a weighted sum.
     var iterator = light_probe_iterator_new(
@@ -88,7 +88,9 @@ fn irradiance_volume_light(
         total_irradiance /= total_weight;
     }
 
-    return total_irradiance;
+    // The `w` component reports whether any volume actually covered this
+    // fragment, so the caller can tell "no irradiance" from "no volume here".
+    return vec4(total_irradiance, total_weight);
 }
 
 #endif  // IRRADIANCE_VOLUMES_ARE_USABLE

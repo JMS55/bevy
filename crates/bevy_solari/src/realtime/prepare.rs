@@ -12,19 +12,15 @@ use bevy_ecs::{
     entity::Entity,
     system::{Commands, Query, Res},
 };
-#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 use bevy_image::ToExtents;
 use bevy_math::UVec2;
 use bevy_render::{
     camera::ExtractedCamera,
-    render_resource::{Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages},
-    renderer::{RenderDevice, RenderQueue},
-};
-#[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-use bevy_render::{
     render_resource::{
-        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
+        Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, TextureDescriptor,
+        TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
     },
+    renderer::{RenderDevice, RenderQueue},
     texture::CachedTexture,
 };
 use bytemuck::{Pod, Zeroable};
@@ -54,6 +50,65 @@ pub const WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET: u64 =
 pub const WORLD_CACHE_BUFFER_SIZE: u64 =
     (WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET + size_of::<u32>() as u64).next_multiple_of(16);
 
+/// Names of the scene-wide tallies in the debug counter buffer, indexed by their
+/// slot in it. Keep in sync with the `DEBUG_COUNTER_*` constants in `debug.wgsl`.
+///
+/// Rates are read as a ratio against another counter rather than in isolation:
+/// most are per-pixel events to divide by `pixels_shaded`, while
+/// `world_cache_probe_exhausted` divides by `world_cache_queries` and
+/// `noise_specular_percent` divides by `specular_pixels`.
+///
+/// The two jacobian tallies per merge are separated because they fail
+/// differently. `discard_neighbor` means the neighbour's sample could not be
+/// selected at all, costing variance. `inflate_canonical` means only the
+/// neighbour's ability to have produced the canonical sample was zeroed, which
+/// snaps the canonical MIS weight to one and biases instead.
+pub const SOLARI_DEBUG_COUNTERS: [&str; 34] = [
+    "pixels_shaded",
+    "specular_pixels",
+    "temporal_reprojected_offscreen",
+    "temporal_rejected_dissimilar",
+    "temporal_rejected_light_despawned",
+    "temporal_no_history",
+    "x2_not_reusable",
+    "spatial_no_neighbor_found",
+    "spatial_candidates_rejected",
+    "jacobian_temporal_discard_neighbor",
+    "jacobian_temporal_inflate_canonical",
+    "jacobian_spatial_discard_neighbor",
+    "jacobian_spatial_inflate_canonical",
+    "world_cache_probe_exhausted",
+    "world_cache_queries",
+    "path_terminated_into_cache",
+    "path_killed_by_russian_roulette",
+    "non_resampled_energy_percent",
+    "noise_relative_std_dev_percent",
+    "noise_specular_percent",
+    "noise_diffuse_percent",
+    "noise_resampled_percent",
+    "noise_resampled_specular_percent",
+    "noise_non_resampled_share_percent",
+    // Perception tracks the worst regions, not the mean, so the noise tallies also
+    // come split by category and as a tail count. A mean over every pixel buries a
+    // small number of very bad pixels, which is what disocclusion and the specular
+    // bypass produce.
+    "history_rejected_pixels",
+    "noise_history_rejected_percent",
+    "noise_bypass_percent",
+    "noise_over_100pct_pixels",
+    "noise_over_200pct_pixels",
+    "confidence_weight_x10",
+    // Correlation, not variance. Reuse trades independence for variance reduction,
+    // and a denoiser can only remove noise that is roughly independent per pixel.
+    // Where valid samples are scarce, reuse concentrates a few samples across whole
+    // neighbourhoods and many frames, which reads as structure and survives
+    // denoising as blotches. These two make that cost visible.
+    "sample_age_frames",
+    "sample_duplication_percent",
+    "sample_duplication_specular_percent",
+    "sample_duplication_over_25pct_pixels",
+];
+
 /// GPU representation of the user-configurable [`SolariLighting`] settings, plus
 /// per-frame state.
 ///
@@ -63,6 +118,7 @@ pub const WORLD_CACHE_BUFFER_SIZE: u64 =
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SolariLightingUniforms {
     confidence_weight_cap: f32,
+    specular_confidence_weight_cap: f32,
     primary_di_samples: u32,
     secondary_di_samples: u32,
     max_bounces: u32,
@@ -74,12 +130,18 @@ struct SolariLightingUniforms {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
+    debug_view: u32,
+    debug_counters: u32,
+    /// Set for the frame the debug buffers were (re)allocated on, so the noise
+    /// estimator discards the uninitialized history instead of decaying it.
+    debug_reset: u32,
 }
 
 impl SolariLightingUniforms {
-    fn new(settings: &SolariLighting, frame_count: u32) -> Self {
+    fn new(settings: &SolariLighting, frame_count: u32, debug_reset: bool) -> Self {
         Self {
             confidence_weight_cap: settings.confidence_weight_cap,
+            specular_confidence_weight_cap: settings.specular_confidence_weight_cap,
             primary_di_samples: settings.primary_di_samples,
             secondary_di_samples: settings.secondary_di_samples,
             max_bounces: settings.max_bounces,
@@ -91,6 +153,9 @@ impl SolariLightingUniforms {
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
             reset: settings.reset as u32,
+            debug_view: settings.debug_view as u32,
+            debug_counters: settings.debug_counters as u32,
+            debug_reset: debug_reset as u32,
         }
     }
 }
@@ -105,6 +170,17 @@ pub struct SolariLightingResources {
     pub reservoirs_b: Buffer,
     pub world_cache: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    /// Scene-wide tallies, one `u32` per entry in [`SOLARI_DEBUG_COUNTERS`].
+    /// Cleared and read back every frame.
+    pub debug_counters: Buffer,
+    /// Per-pixel debug bitfield, carrying signals from the initial/temporal pass
+    /// through to the shading pass that emits the debug view.
+    pub debug_flags: Buffer,
+    /// Ping-ponged first and second moments of the shaded output, for the
+    /// per-pixel noise estimate.
+    pub noise_moments: [CachedTexture; 2],
+    /// Whether the debug resources above are allocated at full size.
+    pub debug_enabled: bool,
     pub view_size: UVec2,
 }
 
@@ -150,19 +226,28 @@ pub fn prepare_solari_lighting_resources(
             view_size = *resolution_override;
         }
 
-        let uniforms = SolariLightingUniforms::new(solari_lighting, frame_count.0);
+        let debug_enabled =
+            solari_lighting.debug_view.needs_debug_resources() || solari_lighting.debug_counters;
 
         if let Some(solari_lighting_resources) = solari_lighting_resources
             && solari_lighting_resources.view_size == view_size
+            && solari_lighting_resources.debug_enabled == debug_enabled
         {
             // The constants uniform can change every frame, so always upload it.
             render_queue.write_buffer(
                 &solari_lighting_resources.constants,
                 0,
-                bytemuck::bytes_of(&uniforms),
+                bytemuck::bytes_of(&SolariLightingUniforms::new(
+                    solari_lighting,
+                    frame_count.0,
+                    false,
+                )),
             );
             continue;
         }
+
+        // Everything below reallocates, so the noise history starts out garbage.
+        let uniforms = SolariLightingUniforms::new(solari_lighting, frame_count.0, true);
 
         let constants = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("solari_lighting_constants"),
@@ -211,6 +296,54 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let debug_counters = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_debug_counters"),
+            size: (SOLARI_DEBUG_COUNTERS.len() * size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // The per-pixel debug resources are only worth their memory while a debug
+        // view or the counters are on, but the bind group still needs something
+        // bound, so shrink them to the minimum instead of dropping them.
+        let debug_flags = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_debug_flags"),
+            size: if debug_enabled {
+                (view_size.x * view_size.y) as u64 * size_of::<u32>() as u64
+            } else {
+                size_of::<u32>() as u64
+            },
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let noise_moments_size = if debug_enabled { view_size } else { UVec2::ONE };
+        let noise_moments = [0, 1].map(|i| {
+            // Rgba32Float because the second moment of HDR luminance overflows f16.
+            let texture = render_device.create_texture(&TextureDescriptor {
+                label: Some("solari_lighting_noise_moments"),
+                size: noise_moments_size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba32Float,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
+            let default_view = texture.create_view(&TextureViewDescriptor {
+                label: Some(if i == 0 {
+                    "solari_lighting_noise_moments_0"
+                } else {
+                    "solari_lighting_noise_moments_1"
+                }),
+                ..Default::default()
+            });
+            CachedTexture {
+                texture,
+                default_view,
+            }
+        });
+
         commands.entity(entity).insert(SolariLightingResources {
             constants,
             light_tile_samples,
@@ -219,6 +352,10 @@ pub fn prepare_solari_lighting_resources(
             reservoirs_b,
             world_cache,
             world_cache_active_cells_dispatch,
+            debug_counters,
+            debug_flags,
+            noise_moments,
+            debug_enabled,
             view_size,
         });
 

@@ -4,6 +4,7 @@ doc-valid-idents = [
   "glTF",
   "NVidia",
   "OpenXR",
+  "ReSTIR",
   "VSync",
   "..",
 ]

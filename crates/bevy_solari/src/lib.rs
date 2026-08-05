@@ -17,7 +17,7 @@ pub mod scene;
 /// This includes the most common types in this crate, re-exported for your convenience.
 pub mod prelude {
     pub use super::SolariPlugins;
-    pub use crate::realtime::SolariLighting;
+    pub use crate::realtime::{SolariDebugView, SolariLighting};
     pub use crate::scene::RaytracingMesh3d;
 }
 

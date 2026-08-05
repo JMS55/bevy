@@ -4,6 +4,7 @@ use argh::FromArgs;
 use bevy::{
     camera::CameraMainTextureUsages,
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin},
+    core_pipeline::tonemapping::Tonemapping,
     diagnostic::{Diagnostic, DiagnosticPath, DiagnosticsStore},
     gltf::GltfMaterialName,
     image::{ImageAddressMode, ImageLoaderSettings},
@@ -13,7 +14,8 @@ use bevy::{
     render::{diagnostic::RenderDiagnosticsPlugin, render_resource::TextureUsages},
     solari::{
         pathtracer::{Pathtracer, PathtracingPlugin},
-        prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins},
+        prelude::{RaytracingMesh3d, SolariDebugView, SolariLighting, SolariPlugins},
+        realtime::SOLARI_DEBUG_COUNTERS,
     },
     world_serialization::WorldInstanceReady,
 };
@@ -30,7 +32,7 @@ use bevy::{
 };
 
 /// `bevy_solari` demo.
-#[derive(FromArgs, Resource, Clone, Copy)]
+#[derive(FromArgs, Resource, Clone)]
 struct Args {
     /// use the reference pathtracer instead of the realtime lighting system.
     #[argh(switch)]
@@ -38,6 +40,22 @@ struct Args {
     /// stress test a scene with many lights.
     #[argh(switch)]
     many_lights: Option<bool>,
+    /// drive a fixed camera path and write a per-frame noise trace to this CSV
+    /// path, then exit. Use to compare noise under camera motion between builds.
+    #[argh(option)]
+    noise_trace: Option<String>,
+    /// override `SolariLighting::specular_confidence_weight_cap`, to A/B how much
+    /// of the specular noise is stale temporal history.
+    #[argh(option)]
+    specular_confidence_cap: Option<f32>,
+}
+
+fn solari_lighting_from_args(args: &Args) -> SolariLighting {
+    let mut solari_lighting = SolariLighting::default();
+    if let Some(cap) = args.specular_confidence_cap {
+        solari_lighting.specular_confidence_weight_cap = cap;
+    }
+    solari_lighting
 }
 
 fn main() {
@@ -56,7 +74,7 @@ fn main() {
         FreeCameraPlugin,
         RenderDiagnosticsPlugin,
     ))
-    .insert_resource(args);
+    .insert_resource(args.clone());
 
     if args.many_lights == Some(true) {
         app.add_systems(Startup, setup_many_lights);
@@ -73,7 +91,22 @@ fn main() {
         if args.many_lights != Some(true) {
             app.add_systems(Update, (pause_scene, toggle_lights, patrol_path));
         }
-        app.add_systems(PostUpdate, (update_control_text, update_performance_text));
+        app.init_resource::<SavedPostProcessing>()
+            .add_systems(Startup, spawn_debug_text)
+            .add_systems(Update, select_debug_view)
+            .add_systems(
+                PostUpdate,
+                (
+                    update_control_text,
+                    update_performance_text,
+                    update_debug_text,
+                ),
+            );
+
+        if args.noise_trace.is_some() {
+            app.init_resource::<NoiseTrace>()
+                .add_systems(Update, drive_noise_trace);
+        }
     }
 
     app.run();
@@ -158,7 +191,7 @@ fn setup_pica_pica(
     if args.pathtracer == Some(true) {
         camera.insert(Pathtracer::default());
     } else {
-        camera.insert(SolariLighting::default());
+        camera.insert(solari_lighting_from_args(&args));
     }
 
     // Using DLSS Ray Reconstruction for denoising (and cheaper rendering via upscaling) is _highly_ recommended when using Solari
@@ -343,7 +376,7 @@ fn setup_many_lights(
     if args.pathtracer == Some(true) {
         camera.insert(Pathtracer::default());
     } else {
-        camera.insert(SolariLighting::default());
+        camera.insert(solari_lighting_from_args(&args));
     }
 
     // Using DLSS Ray Reconstruction for denoising (and cheaper rendering via upscaling) is _highly_ recommended when using Solari
@@ -487,6 +520,84 @@ fn toggle_dlss_rr(
 fn pause_scene(mut time: ResMut<Time<Virtual>>, key_input: Res<ButtonInput<KeyCode>>) {
     if key_input.just_pressed(KeyCode::Space) {
         time.toggle();
+    }
+}
+
+/// Post-processing removed while a debug view is up, so it can be put back
+/// afterwards.
+#[derive(Resource, Default)]
+struct SavedPostProcessing {
+    tonemapping: Option<Tonemapping>,
+    bloom: Option<Bloom>,
+}
+
+/// One key per debug view, so any of them is a single press. These avoid the keys
+/// the free camera (WASD/QE/M/shift/numpad) and the scene toggles (space, 1-3)
+/// already use, and function keys, which macOS eats by default.
+const DEBUG_VIEW_KEYS: [(KeyCode, &str, SolariDebugView); 18] = [
+    (KeyCode::KeyZ, "Z", SolariDebugView::None),
+    (KeyCode::KeyX, "X", SolariDebugView::NoiseRelativeStdDev),
+    (KeyCode::KeyY, "Y", SolariDebugView::NoiseResampledStdDev),
+    (KeyCode::KeyC, "C", SolariDebugView::NoiseNonResampledShare),
+    (KeyCode::KeyV, "V", SolariDebugView::NonResampledShare),
+    (KeyCode::KeyB, "B", SolariDebugView::NonResampledOnly),
+    (KeyCode::KeyN, "N", SolariDebugView::ResampledOnly),
+    (KeyCode::KeyF, "F", SolariDebugView::SampleProvenance),
+    (KeyCode::KeyR, "R", SolariDebugView::SampleAge),
+    (KeyCode::KeyT, "T", SolariDebugView::SampleDuplication),
+    (KeyCode::KeyG, "G", SolariDebugView::ConfidenceWeight),
+    (KeyCode::KeyH, "H", SolariDebugView::TemporalRejectReason),
+    (KeyCode::KeyJ, "J", SolariDebugView::SpatialReuseFailure),
+    (KeyCode::KeyK, "K", SolariDebugView::JacobianRejection),
+    (KeyCode::KeyL, "L", SolariDebugView::ContributionWeight),
+    (KeyCode::KeyO, "O", SolariDebugView::WorldCacheSampleCount),
+    (KeyCode::KeyP, "P", SolariDebugView::WorldCacheProbeFailure),
+    (KeyCode::KeyI, "I", SolariDebugView::WorldCache),
+];
+
+fn select_debug_view(
+    key_input: Res<ButtonInput<KeyCode>>,
+    camera: Single<(
+        Entity,
+        &mut SolariLighting,
+        Option<&Tonemapping>,
+        Option<&Bloom>,
+    )>,
+    mut saved: ResMut<SavedPostProcessing>,
+    mut commands: Commands,
+) {
+    let (entity, mut solari_lighting, tonemapping, bloom) = camera.into_inner();
+
+    if key_input.just_pressed(KeyCode::Digit4) {
+        solari_lighting.debug_counters = !solari_lighting.debug_counters;
+    }
+
+    let Some((_, _, selected)) = DEBUG_VIEW_KEYS
+        .iter()
+        .find(|(key, _, _)| key_input.just_pressed(*key))
+    else {
+        return;
+    };
+
+    let was_active = solari_lighting.debug_view != SolariDebugView::None;
+    solari_lighting.debug_view = *selected;
+    let is_active = solari_lighting.debug_view != SolariDebugView::None;
+
+    // Debug views write display-ready colour straight to the view target, so the
+    // post-processing chain has to get out of the way or it will remap the
+    // heatmaps and smear the categorical ones.
+    if is_active && !was_active {
+        saved.tonemapping = tonemapping.copied();
+        saved.bloom = bloom.cloned();
+        commands.entity(entity).insert(Tonemapping::None);
+        commands.entity(entity).remove::<Bloom>();
+    } else if !is_active && was_active {
+        commands
+            .entity(entity)
+            .insert(saved.tonemapping.take().unwrap_or_default());
+        if let Some(bloom) = saved.bloom.take() {
+            commands.entity(entity).insert(bloom);
+        }
     }
 }
 
@@ -671,5 +782,383 @@ fn update_performance_text(
             world_cache_active_cells_count as u32,
             (world_cache_active_cells_count * 100.0) / (2u64.pow(20) as f64)
         ));
+    }
+}
+
+#[derive(Component)]
+struct DebugText;
+
+fn spawn_debug_text(mut commands: Commands) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(0.0),
+            left: px(0.0),
+            padding: px(4.0).all(),
+            border_radius: BorderRadius::bottom_right(Val2::all(px(4.0))),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.10, 0.10, 0.10, 0.8)),
+        children![(
+            DebugText,
+            Text::default(),
+            TextFont {
+                font_size: FontSize::Px(8.0),
+                ..default()
+            },
+        )],
+    ));
+}
+
+fn update_debug_text(
+    mut text: Single<&mut Text, With<DebugText>>,
+    solari_lighting: Single<&SolariLighting>,
+    diagnostics: Res<DiagnosticsStore>,
+) {
+    text.0.clear();
+
+    for (_, key, view) in DEBUG_VIEW_KEYS {
+        let marker = if view == solari_lighting.debug_view {
+            ">"
+        } else {
+            " "
+        };
+        text.push_str(&format!("{marker} ({key}) {}\n", view.name()));
+    }
+
+    text.push_str(&format!(
+        "\n(4): Debug counters: {}\n",
+        if solari_lighting.debug_counters {
+            "on (slow)"
+        } else {
+            "off"
+        },
+    ));
+
+    if let Some(legend) = debug_view_legend(solari_lighting.debug_view) {
+        text.push_str(&format!("\n{legend}\n"));
+    }
+
+    if !solari_lighting.debug_counters {
+        return;
+    }
+
+    let counter = |name: &str| {
+        diagnostics
+            .get(&DiagnosticPath::new(format!(
+                "render/solari_lighting/debug/{name}"
+            )))
+            .and_then(Diagnostic::smoothed)
+    };
+
+    let Some(pixels) = counter("pixels_shaded").filter(|p| *p > 0.0) else {
+        return;
+    };
+    let queries = counter("world_cache_queries").unwrap_or(0.0);
+
+    text.push_str("\nPer-frame rates\n");
+    for name in SOLARI_DEBUG_COUNTERS.iter().skip(1) {
+        let Some(value) = counter(name) else { continue };
+
+        // Each counter is a ratio against whichever total makes it meaningful.
+        let line = match *name {
+            "world_cache_queries" => format!("{:31}  {:.2} /px", name, value / pixels),
+            "world_cache_probe_exhausted" => {
+                if queries > 0.0 {
+                    format!("{:31}  {:.1}% of queries", name, value * 100.0 / queries)
+                } else {
+                    continue;
+                }
+            }
+            // Accumulated per-pixel percent, so this is a mean share.
+            "non_resampled_energy_percent" | "noise_relative_std_dev_percent" => {
+                format!("{:31}  {:.1}% mean", name, value / pixels)
+            }
+            "spatial_candidates_rejected" => {
+                format!("{:31}  {:.2} /px", name, value / pixels)
+            }
+            _ => format!("{:31}  {:.1}%", name, value * 100.0 / pixels),
+        };
+        text.push_str(&line);
+        text.push('\n');
+    }
+}
+
+/// How the camera moves during one segment of the noise trace.
+enum TraceMotion {
+    /// Hold still. Following a motion segment, this measures how fast the
+    /// estimator recovers.
+    Hold,
+    /// Yaw in place. Large motion vectors with no parallax, so almost nothing
+    /// disoccludes but every specular lobe rotates and its history goes stale.
+    /// This is the segment that isolates specular temporal reuse.
+    Yaw { degrees_per_frame: f32 },
+    /// Translate sideways. Parallax, so geometry genuinely disoccludes and
+    /// `temporal_rejected_dissimilar` should climb.
+    Strafe { units_per_frame: f32 },
+}
+
+struct TraceSegment {
+    label: &'static str,
+    frames: u32,
+    motion: TraceMotion,
+}
+
+/// Fixed camera path for the noise trace. Everything is indexed by frame number
+/// rather than elapsed time, so the same run happens regardless of framerate.
+///
+/// Pan and strafe are separated deliberately: pan isolates stale specular history
+/// with no disocclusion, strafe isolates disocclusion. Each is followed by a hold
+/// so the recovery rate is measurable too.
+///
+/// The yaw segments alternate direction and keep cumulative yaw inside roughly
+/// +/- 15 degrees. Panning far enough to leave the diorama would point the camera
+/// at empty space, where nothing is shaded and every tally reads zero.
+const NOISE_TRACE_PATH: &[TraceSegment] = &[
+    TraceSegment {
+        label: "settle",
+        frames: 90,
+        motion: TraceMotion::Hold,
+    },
+    TraceSegment {
+        label: "pan_slow_right",
+        frames: 90,
+        motion: TraceMotion::Yaw {
+            degrees_per_frame: 0.15,
+        },
+    },
+    TraceSegment {
+        label: "hold_after_pan_slow",
+        frames: 60,
+        motion: TraceMotion::Hold,
+    },
+    TraceSegment {
+        label: "pan_fast_left",
+        frames: 30,
+        motion: TraceMotion::Yaw {
+            degrees_per_frame: -0.9,
+        },
+    },
+    TraceSegment {
+        label: "hold_after_pan_fast",
+        frames: 60,
+        motion: TraceMotion::Hold,
+    },
+    TraceSegment {
+        label: "strafe",
+        frames: 90,
+        motion: TraceMotion::Strafe {
+            units_per_frame: 0.02,
+        },
+    },
+    TraceSegment {
+        label: "hold_after_strafe",
+        frames: 60,
+        motion: TraceMotion::Hold,
+    },
+    // Three times the speed of the segment above, and back the way it came. The
+    // gentle strafe only disoccludes ~3% of pixels per frame, which is not
+    // representative of how fast a camera actually moves.
+    TraceSegment {
+        label: "strafe_fast_back",
+        frames: 60,
+        motion: TraceMotion::Strafe {
+            units_per_frame: -0.06,
+        },
+    },
+    TraceSegment {
+        label: "hold_after_strafe_fast",
+        frames: 60,
+        motion: TraceMotion::Hold,
+    },
+];
+
+#[derive(Resource, Default)]
+struct NoiseTrace {
+    started: bool,
+    frame: u32,
+    rows: Vec<String>,
+    /// Consecutive ticks that reported nothing shaded, so the path is holding
+    /// rather than advancing.
+    stalled: u32,
+}
+
+/// How long to wait for a measurable frame before giving up. Generous because
+/// ticks run fast while there is no geometry yet, so this has to cover the scene
+/// download and BLAS build as well as readback warmup and any stretch where the
+/// window is not being rendered. Exceeding it means the camera path is pointing
+/// off the scene.
+const NOISE_TRACE_STALL_LIMIT: u32 = 5000;
+
+fn noise_trace_total_frames() -> u32 {
+    NOISE_TRACE_PATH.iter().map(|s| s.frames).sum()
+}
+
+/// The segment a frame falls in, and how far into it.
+fn noise_trace_segment(frame: u32) -> Option<(&'static TraceSegment, u32)> {
+    let mut start = 0;
+    for segment in NOISE_TRACE_PATH {
+        if frame < start + segment.frames {
+            return Some((segment, frame - start));
+        }
+        start += segment.frames;
+    }
+    None
+}
+
+/// Camera yaw and position at a frame, integrated from the path. Recomputed from
+/// scratch each frame so the pose is a pure function of the frame index and
+/// cannot drift between runs.
+fn noise_trace_pose(frame: u32, start_translation: Vec3) -> (Vec3, f32) {
+    let mut yaw = 0.0;
+    let mut translation = start_translation;
+    for f in 0..frame {
+        let Some((segment, _)) = noise_trace_segment(f) else {
+            break;
+        };
+        match segment.motion {
+            TraceMotion::Hold => {}
+            TraceMotion::Yaw { degrees_per_frame } => yaw += degrees_per_frame.to_radians(),
+            TraceMotion::Strafe { units_per_frame } => {
+                translation += Quat::from_rotation_y(yaw) * Vec3::X * units_per_frame;
+            }
+        }
+    }
+    (translation, yaw)
+}
+
+fn drive_noise_trace(
+    args: Res<Args>,
+    mut trace: ResMut<NoiseTrace>,
+    camera: Single<(Entity, &mut Transform, &mut SolariLighting)>,
+    diagnostics: Res<DiagnosticsStore>,
+    mut time: ResMut<Time<Virtual>>,
+    mut start_transform: Local<Option<Transform>>,
+    mut exit: MessageWriter<AppExit>,
+    mut commands: Commands,
+) {
+    let (entity, mut camera_transform, mut solari_lighting) = camera.into_inner();
+    let start = *start_transform.get_or_insert(*camera_transform);
+
+    if !trace.started {
+        trace.started = true;
+
+        // Setup lives here rather than in a Startup system so it cannot race the
+        // system that spawns the camera.
+        //
+        // Hand control of the camera to the path, and freeze the scene animation so
+        // camera motion is the only variable.
+        commands.entity(entity).remove::<FreeCamera>();
+        time.pause();
+        solari_lighting.debug_counters = true;
+        // Start every run from an empty temporal history.
+        solari_lighting.reset = true;
+
+        info!(
+            "Noise trace: driving {} frames over {} segments",
+            noise_trace_total_frames(),
+            NOISE_TRACE_PATH.len()
+        );
+
+        let mut header = String::from("frame,segment");
+        for name in SOLARI_DEBUG_COUNTERS {
+            header.push(',');
+            header.push_str(name);
+        }
+        trace.rows.push(header);
+    }
+
+    let path = args.noise_trace.as_deref().unwrap_or("noise_trace.csv");
+
+    let Some((segment, _)) = noise_trace_segment(trace.frame) else {
+        match std::fs::write(path, trace.rows.join("\n") + "\n") {
+            Ok(()) => info!("Wrote {} noise trace rows to {path}", trace.rows.len() - 1),
+            Err(error) => error!("Failed to write noise trace to {path}: {error}"),
+        }
+        exit.write(AppExit::Success);
+        return;
+    };
+
+    // Counter readback lags the GPU by a frame or two, so a row is attributed to
+    // the frame it was read on, not the frame it was recorded on. Segments are
+    // long enough that this does not matter.
+    let counter = |name: &str| {
+        diagnostics
+            .get(&DiagnosticPath::new(format!(
+                "render/solari_lighting/debug/{name}"
+            )))
+            .and_then(Diagnostic::value)
+            .unwrap_or(0.0)
+    };
+
+    // Hold the path in place until a frame actually gets measured, so a stretch of
+    // unrendered frames cannot silently consume the trace. Without this the camera
+    // walks the whole path while every row reads zero.
+    if counter("pixels_shaded") == 0.0 {
+        camera_transform.translation = start.translation;
+        trace.stalled += 1;
+        if trace.stalled > NOISE_TRACE_STALL_LIMIT {
+            error!(
+                "Noise trace stalled at frame {} of {}: nothing was shaded for {} ticks. \
+                 Either the window is not rendering, or the camera path points off the scene.",
+                trace.frame,
+                noise_trace_total_frames(),
+                trace.stalled
+            );
+            exit.write(AppExit::Success);
+        }
+        return;
+    }
+    if trace.frame == 0 {
+        info!("Noise trace: scene is up, starting the path");
+    }
+    trace.stalled = 0;
+
+    let mut row = format!("{},{}", trace.frame, segment.label);
+    for name in SOLARI_DEBUG_COUNTERS {
+        row.push_str(&format!(",{}", counter(name) as u64));
+    }
+    trace.rows.push(row);
+
+    // Flush periodically so a run cut short (window closed, display change) still
+    // leaves usable rows behind.
+    if trace.frame.is_multiple_of(60) {
+        let _ = std::fs::write(path, trace.rows.join("\n") + "\n");
+    }
+
+    let (translation, yaw) = noise_trace_pose(trace.frame, start.translation);
+    camera_transform.translation = translation;
+    camera_transform.rotation = Quat::from_rotation_y(yaw) * start.rotation;
+
+    trace.frame += 1;
+}
+
+/// What the colours in each debug view mean.
+fn debug_view_legend(view: SolariDebugView) -> Option<&'static str> {
+    match view {
+        SolariDebugView::None => None,
+        SolariDebugView::SampleProvenance => Some(
+            "grey none   yellow NEE direct   pink emissive direct\n\
+             green reconnected NEE   orange reconnected emissive\n\
+             blue world cache",
+        ),
+        SolariDebugView::TemporalRejectReason => Some(
+            "black accepted   blue off-screen   red surface mismatch\n\
+             magenta light despawned   grey no history",
+        ),
+        SolariDebugView::JacobianRejection => Some(
+            "sample discarded: green temporal  blue spatial  red both\n\
+             grey: MIS partner dropped only",
+        ),
+        SolariDebugView::NonResampledOnly
+        | SolariDebugView::ResampledOnly
+        | SolariDebugView::WorldCache => Some("tonemapped radiance"),
+        SolariDebugView::WorldCacheProbeFailure => Some("red probe steps exhausted"),
+        SolariDebugView::SampleAge => Some("blue independent  ->  red stale, correlated in time"),
+        SolariDebugView::SampleDuplication => {
+            Some("blue unique sample  ->  red neighbours share it")
+        }
+        // Everything else is the shared heatmap ramp.
+        _ => Some("blue low  ->  green  ->  yellow  ->  red high"),
     }
 }

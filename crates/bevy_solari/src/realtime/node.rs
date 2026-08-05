@@ -1,6 +1,6 @@
 use super::prepare::{
-    SolariLightingResources, LIGHT_TILE_BLOCKS, WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET,
-    WORLD_CACHE_SIZE,
+    SolariLightingResources, LIGHT_TILE_BLOCKS, SOLARI_DEBUG_COUNTERS,
+    WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET, WORLD_CACHE_SIZE,
 };
 use crate::scene::RaytracingSceneBindings;
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -9,6 +9,7 @@ use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_core_pipeline::prepass::{
     PreviousViewData, PreviousViewUniformOffset, PreviousViewUniforms, ViewPrepassTextures,
 };
+use bevy_diagnostic::FrameCount;
 use bevy_ecs::{prelude::*, resource::Resource, system::Commands};
 use bevy_render::{
     diagnostic::RecordDiagnostics as _,
@@ -78,6 +79,7 @@ pub fn solari_lighting(
     view_uniforms: Res<ViewUniforms>,
     previous_view_uniforms: Res<PreviousViewUniforms>,
     render_device: Res<RenderDevice>,
+    frame_count: Res<FrameCount>,
     mut ctx: RenderContext,
 ) {
     #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
@@ -169,6 +171,12 @@ pub fn solari_lighting(
     let view_target_attachment = view_target.get_unsampled_color_attachment();
 
     let s = solari_lighting_resources;
+    // Ping-pong the noise moments so this frame can read last frame's history.
+    let (noise_moments_previous, noise_moments) = if frame_count.0.is_multiple_of(2) {
+        (&s.noise_moments[0], &s.noise_moments[1])
+    } else {
+        (&s.noise_moments[1], &s.noise_moments[0])
+    };
     let bind_group = render_device.create_bind_group(
         "solari_lighting_bind_group",
         &pipeline_cache.get_bind_group_layout(&pipelines.bind_group_layout),
@@ -187,6 +195,10 @@ pub fn solari_lighting(
             previous_view_uniforms_binding,
             s.world_cache.as_entire_binding(),
             s.constants.as_entire_binding(),
+            s.debug_counters.as_entire_binding(),
+            s.debug_flags.as_entire_binding(),
+            &noise_moments_previous.default_view,
+            &noise_moments.default_view,
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -215,6 +227,11 @@ pub fn solari_lighting(
     let diagnostics = diagnostics.as_deref();
 
     let command_encoder = ctx.command_encoder();
+
+    // Debug counters tally a single frame, so they start from zero every frame.
+    if s.debug_enabled {
+        command_encoder.clear_buffer(&s.debug_counters, 0, None);
+    }
 
     // Clear the view target if we're the first node to write to it
     if matches!(view_target_attachment.ops.load, LoadOp::Clear(_)) {
@@ -321,6 +338,21 @@ pub fn solari_lighting(
         ),
         "solari_lighting/world_cache_active_cells_count",
     );
+
+    // Debug counter readback. Each one costs a staging buffer and a copy, so skip
+    // it entirely unless the debug resources are live.
+    if s.debug_enabled {
+        let command_encoder = ctx.command_encoder();
+        for (i, name) in SOLARI_DEBUG_COUNTERS.iter().enumerate() {
+            let offset = (i * size_of::<u32>()) as u64;
+            diagnostics.record_u32(
+                command_encoder,
+                &s.debug_counters
+                    .slice(offset..offset + size_of::<u32>() as u64),
+                format!("solari_lighting/debug/{name}"),
+            );
+        }
+    }
 }
 
 /// Initializes the Solari lighting pipelines at render startup.
@@ -349,6 +381,11 @@ pub fn init_solari_lighting_pipelines(
                 uniform_buffer::<PreviousViewData>(true),
                 storage_buffer_sized(false, None),
                 uniform_buffer_sized(false, None),
+                // Debug counters, debug flags, and the ping-ponged noise moments.
+                storage_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
             ),
         ),
     );
@@ -385,10 +422,13 @@ pub fn init_solari_lighting_pipelines(
             layout.push(extra_bind_group_layout.clone());
         }
 
-        let mut shader_defs = vec![ShaderDefVal::UInt(
-            "WORLD_CACHE_SIZE".into(),
-            WORLD_CACHE_SIZE as u32,
-        )];
+        let mut shader_defs = vec![
+            ShaderDefVal::UInt("WORLD_CACHE_SIZE".into(), WORLD_CACHE_SIZE as u32),
+            ShaderDefVal::UInt(
+                "DEBUG_COUNTER_COUNT".into(),
+                SOLARI_DEBUG_COUNTERS.len() as u32,
+            ),
+        ];
         shader_defs.extend_from_slice(&extra_shader_defs);
 
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {

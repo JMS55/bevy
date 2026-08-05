@@ -5,10 +5,10 @@ enable wgpu_ray_query;
 #import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance
 #import bevy_pbr::utils::{rand_f, rand_range_u}
 #import bevy_render::maths::PI
-#import bevy_render::utils::octahedral_encode
 #import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
+#import bevy_solari::debug::{debug_count, debug_mark_x2_not_reusable, DEBUG_COUNTER_PATH_KILLED_BY_RUSSIAN_ROULETTE, DEBUG_COUNTER_PATH_TERMINATED_INTO_CACHE, PROVENANCE_EMISSIVE_DIRECT, PROVENANCE_NEE_DIRECT, PROVENANCE_RECONNECTED_EMISSIVE, PROVENANCE_RECONNECTED_NEE, PROVENANCE_WORLD_CACHE}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
-#import bevy_solari::realtime_bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view}
+#import bevy_solari::realtime_bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, pack_sample_normal, Reservoir, constants, view}
 #import bevy_solari::sampling::{calculate_resolved_light_contribution, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility}
 #import bevy_solari::scene_bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
 #import bevy_solari::world_cache::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME}
@@ -153,7 +153,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             // throughput, which is the correct quantity for the RR survival probability.
             let full_throughput = path.throughput_past_first_hit * max(path.x1_brdf, vec3(0.0001));
             let rr = saturate(luminance(full_throughput));
-            if rand_f(rng) >= rr { break; }
+            if rand_f(rng) >= rr {
+                debug_count(DEBUG_COUNTER_PATH_KILLED_BY_RUSSIAN_ROULETTE, 1u);
+                break;
+            }
             path.throughput_past_first_hit /= rr;
         }
     }
@@ -202,6 +205,7 @@ fn generate_nee_candidate(
         *weight_sum += resampling_weight;
         if rand_f(rng) * (*weight_sum) < resampling_weight {
             (*reservoir).light_sample = di.light_sample;
+            (*reservoir).flags = PROVENANCE_NEE_DIRECT;
             *selected_target_function = target_function;
         }
     } else {
@@ -210,6 +214,7 @@ fn generate_nee_candidate(
         if !path.x2_reusable {
             // x1 -> x2 not reuse-safe: shade directly at this pixel instead of publishing.
             *non_resampled_radiance += path.x1_brdf * L_at_reconnection;
+            debug_mark_x2_not_reusable();
         } else {
             let target_function = luminance(path.x1_brdf * L_at_reconnection);
             let resampling_weight = target_function;
@@ -218,8 +223,9 @@ fn generate_nee_candidate(
             if rand_f(rng) * (*weight_sum) < resampling_weight {
                 (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, 0u);
                 (*reservoir).sample_point_world_position = path.x2_position;
-                (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
+                (*reservoir).sample_point_world_normal = pack_sample_normal(path.x2_normal);
                 (*reservoir).radiance = L_at_reconnection;
+                (*reservoir).flags = PROVENANCE_RECONNECTED_NEE;
                 *selected_target_function = target_function;
             }
         }
@@ -306,6 +312,7 @@ fn generate_emissive_candidate(
         // instead of publishing, since a reuse shift would waste it or make a firefly. Mirror lobes
         // always land here (p_brdf = INF, footprint 0), where emissive_mis_weight is 1.
         *non_resampled_radiance += path.x1_brdf * path.throughput_past_first_hit * ray_hit.material.emissive * emissive_mis_weight;
+        debug_mark_x2_not_reusable();
         return;
     }
 
@@ -318,8 +325,9 @@ fn generate_emissive_candidate(
         if rand_f(rng) * (*weight_sum) < resampling_weight {
             (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, bitcast<u32>(area_pdf));
             (*reservoir).sample_point_world_position = path.x2_position;
-            (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
+            (*reservoir).sample_point_world_normal = pack_sample_normal(path.x2_normal);
             (*reservoir).radiance = ray_hit.material.emissive;
+            (*reservoir).flags = PROVENANCE_EMISSIVE_DIRECT;
             *selected_target_function = target_function;
         }
     } else {
@@ -332,8 +340,9 @@ fn generate_emissive_candidate(
         if rand_f(rng) * (*weight_sum) < resampling_weight {
             (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, 0u);
             (*reservoir).sample_point_world_position = path.x2_position;
-            (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
+            (*reservoir).sample_point_world_normal = pack_sample_normal(path.x2_normal);
             (*reservoir).radiance = emissive_L_at_reconnection;
+            (*reservoir).flags = PROVENANCE_RECONNECTED_EMISSIVE;
             *selected_target_function = target_function;
         }
     }
@@ -367,10 +376,13 @@ fn terminate_into_cache(
 
     let cached_radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray_t, WORLD_CACHE_CELL_LIFETIME, rng);
 
+    debug_count(DEBUG_COUNTER_PATH_TERMINATED_INTO_CACHE, 1u);
+
     let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
     let cache_L_at_reconnection = path.throughput_past_first_hit * cache_outgoing;
     if !path.x2_reusable {
         *non_resampled_radiance += path.x1_brdf * cache_L_at_reconnection;
+        debug_mark_x2_not_reusable();
         return true;
     }
 
@@ -380,8 +392,9 @@ fn terminate_into_cache(
     if rand_f(rng) * (*weight_sum) < resampling_weight {
         (*reservoir).light_sample = LightSample(NULL_LIGHT_ID, 0u);
         (*reservoir).sample_point_world_position = path.x2_position;
-        (*reservoir).sample_point_world_normal = octahedral_encode(path.x2_normal);
+        (*reservoir).sample_point_world_normal = pack_sample_normal(path.x2_normal);
         (*reservoir).radiance = cache_L_at_reconnection;
+        (*reservoir).flags = PROVENANCE_WORLD_CACHE;
         *selected_target_function = target_function;
     }
 

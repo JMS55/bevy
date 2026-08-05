@@ -4,6 +4,7 @@ enable wgpu_ray_query;
 
 #import bevy_pbr::utils::{rand_f, rand_vec2f}
 #import bevy_render::maths::orthonormalize
+#import bevy_solari::debug::{debug_count, debug_mark_world_cache_probe_exhausted, debug_note_world_cache_sample_count, DEBUG_COUNTER_WORLD_CACHE_PROBE_EXHAUSTED, DEBUG_COUNTER_WORLD_CACHE_QUERIES}
 #import bevy_solari::realtime_bindings::{world_cache, constants}
 
 /// Maximum amount of frames a cell can live for without being queried
@@ -33,6 +34,8 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
     var key = compute_key(world_position_quantized, world_normal_quantized);
     let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
 
+    debug_count(DEBUG_COUNTER_WORLD_CACHE_QUERIES, 1u);
+
     for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
         let cas = atomicCompareExchangeWeak(&world_cache.checksums[key], WORLD_CACHE_EMPTY_CELL, checksum);
         let existing_checksum = cas.old_value;
@@ -48,11 +51,14 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
 
         if existing_checksum == checksum {
             // Cache entry already exists - get radiance
-            return world_cache.radiance[key].rgb;
+            let cell = world_cache.radiance[key];
+            debug_note_world_cache_sample_count(cell.a);
+            return cell.rgb;
         } else if existing_checksum == WORLD_CACHE_EMPTY_CELL && cas.exchanged {
             // Cell is empty - initialize it
             world_cache.geometry_data[key].world_position = world_position;
             world_cache.geometry_data[key].world_normal = world_normal;
+            debug_note_world_cache_sample_count(0.0);
             return vec3(0.0);
         } else {
             // Collision - linear probe to next entry
@@ -60,6 +66,9 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
         }
     }
 
+    // Ran out of probe steps, so this query silently loses its energy
+    debug_count(DEBUG_COUNTER_WORLD_CACHE_PROBE_EXHAUSTED, 1u);
+    debug_mark_world_cache_probe_exhausted();
     return vec3(0.0);
 }
 #endif

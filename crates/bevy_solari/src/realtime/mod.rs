@@ -190,6 +190,23 @@ pub struct SolariLighting {
     /// prefer the old behaviour.
     pub psr_virtual_depth: bool,
 
+    /// Feed the reflection's motion into DLSS Ray Reconstruction's *main* motion vector input, not
+    /// just the specular one.
+    ///
+    /// Normally moves together with [`Self::psr_virtual_depth`], because the integration guide's one
+    /// requirement of the depth input is that it describe the same surface the motion vectors do.
+    /// Separated so the two can be measured apart, since they appear to pull in opposite directions:
+    /// the virtual depth places the reflection at its true distance, which helps across a mirror's
+    /// interior, but it also manufactures a large depth step at the mirror's silhouette — where the
+    /// real mirror and the wall behind it are nearly coplanar, and the denoiser could previously carry
+    /// history straight across the boundary.
+    ///
+    /// Running this on with the depth off, or the reverse, is a diagnostic and not a configuration to
+    /// ship.
+    ///
+    /// Only affects DLSS Ray Reconstruction.
+    pub psr_virtual_main_motion_vector: bool,
+
     /// Place a mirror's virtual image by unfolding the reflection chain along the camera ray, rather
     /// than by reflecting the hit position about the first mirror's plane.
     ///
@@ -246,6 +263,21 @@ pub struct SolariLighting {
     /// Only affects DLSS Ray Reconstruction.
     pub psr_glossy: bool,
 
+    /// Split the primary hit's BRDF into its two lobes and evaluate the specular half from the mirror
+    /// chain instead of sampling it.
+    ///
+    /// A delta specular lobe is a single direction, not an integral, and the chain has already traced
+    /// it. Taking it from there is exact, so the specular half of a polished surface stops being
+    /// estimated by a rare, heavily amplified BRDF draw — the usual source of fireflies on polished
+    /// floors. The other half is then sampled with the diffuse lobe forced, at the primary vertex only.
+    ///
+    /// Applies where the lobe is genuinely delta. A glossy surface's chain ray is its lobe *centre*,
+    /// which is one sample of an integral rather than the whole of it, so it is left alone.
+    ///
+    /// Costs a second path start on surfaces that have meaningful diffuse reflectance. Pure mirrors get
+    /// cheaper instead, since their diffuse half is zero and is skipped.
+    pub psr_lobe_split: bool,
+
     /// Replace the image with a false-colour map of how each pixel was classified for primary surface
     /// replacement.
     ///
@@ -279,11 +311,13 @@ impl Default for SolariLighting {
             world_cache_position_lod_scale: 15.0,
             reset: true, // No temporal history on the first frame
             psr_virtual_depth: true,
+            psr_virtual_main_motion_vector: true,
             psr_unfold_along_camera_ray: true,
             psr_skip_curved_reflectors: true,
             psr_dielectric: true,
             psr_tint_albedo: true,
             psr_glossy: true,
+            psr_lobe_split: false,
             psr_debug_overlay: false,
         }
     }

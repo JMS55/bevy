@@ -46,7 +46,7 @@ pub struct SolariLightingPipelines {
     initial_and_temporal_pipeline: CachedComputePipelineId,
     spatial_and_shade_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
+    initial_and_temporal_dlss_rr_pipeline: CachedComputePipelineId,
 }
 
 #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
@@ -101,7 +101,16 @@ pub fn solari_lighting(
         return;
     };
 
+    // Two variants of the same entry point. The DLSS Ray Reconstruction one also carries the guide
+    // texture bind group and writes it, since the chain walk that fills it now lives inside this pass.
+    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
     let initial_and_temporal_pipeline = pipelines.initial_and_temporal_pipeline;
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    let initial_and_temporal_pipeline = if view_dlss_rr_textures.is_some() {
+        pipelines.initial_and_temporal_dlss_rr_pipeline
+    } else {
+        pipelines.initial_and_temporal_pipeline
+    };
 
     let (
         Some(decay_world_cache_pipeline),
@@ -147,12 +156,6 @@ pub fn solari_lighting(
         return;
     };
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    let Some(resolve_dlss_rr_textures_pipeline) =
-        pipeline_cache.get_compute_pipeline(pipelines.resolve_dlss_rr_textures_pipeline)
-    else {
-        return;
-    };
 
     let view_target_attachment = view_target.get_unsampled_color_attachment();
 
@@ -236,13 +239,6 @@ pub fn solari_lighting(
         ],
     );
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
-        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
-        pass.set_pipeline(resolve_dlss_rr_textures_pipeline);
-        pass.dispatch_workgroups(dx, dy, 1);
-    }
-
     let d = diagnostics.time_span(&mut pass, "solari_lighting/presample_light_tiles");
     pass.set_pipeline(presample_light_tiles_pipeline);
     pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
@@ -288,8 +284,17 @@ pub fn solari_lighting(
 
     let d = diagnostics.time_span(&mut pass, "solari_lighting/lighting");
 
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
+        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
+    }
+
     pass.set_pipeline(initial_and_temporal_pipeline);
     pass.dispatch_workgroups(dx, dy, 1);
+
+    // `spatial_and_shade` has no group 2, so drop the guide textures before it binds.
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    pass.set_bind_group(2, None, &[]);
 
     pass.set_pipeline(spatial_and_shade_pipeline);
     pass.dispatch_workgroups(dx, dy, 1);
@@ -467,10 +472,10 @@ pub fn init_solari_lighting_pipelines(
             vec!["SPATIAL_MERGE".into()],
         ),
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-        resolve_dlss_rr_textures_pipeline: create_pipeline(
-            "solari_lighting_resolve_dlss_rr_textures_pipeline",
-            "resolve_dlss_rr_textures",
-            load_embedded_asset!(asset_server.as_ref(), "resolve_dlss_rr_textures.wgsl"),
+        initial_and_temporal_dlss_rr_pipeline: create_pipeline(
+            "solari_lighting_initial_and_temporal_dlss_rr_pipeline",
+            "initial_and_temporal",
+            load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
             Some(&bind_group_layout_resolve_dlss_rr_textures),
             vec!["DLSS_RR_GUIDE_BUFFERS".into()],
         ),

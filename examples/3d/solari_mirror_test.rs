@@ -570,7 +570,7 @@ fn handle_input(
         changed = true;
     }
     if keys.just_pressed(KeyCode::Digit8) {
-        solari.psr_restir_handoff = !solari.psr_restir_handoff;
+        solari.psr_lobe_split = !solari.psr_lobe_split;
         changed = true;
     }
     if keys.just_pressed(KeyCode::Digit7) {
@@ -661,7 +661,7 @@ fn update_hud(
 
     hud.0 = format!(
         "1 {} virtual depth   0 {} virtual main MV   7 {} overlay
-         8 {} ReSTIR handoff
+         8 {} lobe split
          3 DLSS-RR    Space camera {}    M objects {}    [ ] dolly {:.2}x
          1 and 0 are the two halves of what used to be a single switch. Run
          them apart to see which destabilises a mirror's edges under camera
@@ -669,7 +669,7 @@ fn update_hud(
         on_off(solari.psr_virtual_depth),
         on_off(solari.psr_virtual_main_motion_vector),
         on_off(solari.psr_debug_overlay),
-        on_off(solari.psr_restir_handoff),
+        on_off(solari.psr_lobe_split),
         if state.camera_paused { "paused" } else { "swaying" },
         if state.object_paused { "paused" } else { "moving" },
         state.camera_distance,

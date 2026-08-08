@@ -5,31 +5,82 @@ enable wgpu_ray_query;
 #import bevy_pbr::pbr_deferred_types::unpack_24bit_normal
 #import bevy_pbr::pbr_functions::{calculate_diffuse_color, calculate_F0, calculate_F0_dielectric}
 #import bevy_render::utils::octahedral_decode
-#import bevy_solari::brdf::{F_AB, lobe_reflectances}
+#import bevy_solari::brdf::{evaluate_specular_brdf, F_AB, lobe_reflectances}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, ResolvedGPixel}
-#import bevy_solari::realtime_bindings::{gbuffer, depth_buffer, motion_vectors, view, previous_view, constants, view_output, diffuse_albedo, specular_albedo, normal_roughness, specular_motion_vectors, dlss_rr_depth, dlss_rr_motion_vectors}
+#import bevy_solari::realtime_bindings::{gbuffer, depth_buffer, motion_vectors, view, previous_view, constants, view_output}
 #import bevy_solari::scene_bindings::{trace_ray, resolve_ray_hit_full, MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MIN, RAY_T_MAX, ResolvedMaterial, ResolvedRayHitFull}
+#ifdef DLSS_RR_GUIDE_BUFFERS
+#import bevy_solari::realtime_bindings::{diffuse_albedo, specular_albedo, normal_roughness, specular_motion_vectors, dlss_rr_depth, dlss_rr_motion_vectors}
+#endif
 
-@compute @workgroup_size(8, 8, 1)
-fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let pixel_id = global_id.xy;
-    if any(pixel_id >= vec2u(view.main_pass_viewport.zw)) { return; }
+// The guide textures exist only while DLSS Ray Reconstruction is running, but everything else in this
+// file — the chain walk, the classification, the curvature test — is useful without it, and has to
+// work without it once the primary specular lobe is taken from the chain rather than sampled.
+//
+// So the writes funnel through these six wrappers. Six `#ifdef`s instead of sixteen, and the chain
+// logic below reads as if the textures were always there.
+fn write_diffuse_albedo(pixel_id: vec2<u32>, albedo: vec3<f32>) {
+#ifdef DLSS_RR_GUIDE_BUFFERS
+    textureStore(diffuse_albedo, pixel_id, vec4(albedo, 0.0));
+#endif
+}
 
+fn write_specular_albedo(pixel_id: vec2<u32>, albedo: vec3<f32>) {
+#ifdef DLSS_RR_GUIDE_BUFFERS
+    textureStore(specular_albedo, pixel_id, vec4(albedo, 0.0));
+#endif
+}
+
+fn write_normal_roughness(pixel_id: vec2<u32>, normal: vec3<f32>, perceptual_roughness: f32) {
+#ifdef DLSS_RR_GUIDE_BUFFERS
+    textureStore(normal_roughness, pixel_id, vec4(normal, perceptual_roughness));
+#endif
+}
+
+fn write_specular_motion_vector(pixel_id: vec2<u32>, motion_vector: vec2<f32>) {
+#ifdef DLSS_RR_GUIDE_BUFFERS
+    textureStore(specular_motion_vectors, pixel_id, vec4(motion_vector, vec2(0.0)));
+#endif
+}
+
+fn write_dlss_rr_motion_vector(pixel_id: vec2<u32>, motion_vector: vec2<f32>) {
+#ifdef DLSS_RR_GUIDE_BUFFERS
+    textureStore(dlss_rr_motion_vectors, pixel_id, vec4(motion_vector, vec2(0.0)));
+#endif
+}
+
+fn write_dlss_rr_depth(pixel_id: vec2<u32>, depth: f32) {
+#ifdef DLSS_RR_GUIDE_BUFFERS
+    textureStore(dlss_rr_depth, pixel_id, vec4(depth));
+#endif
+}
+
+// Writes every DLSS Ray Reconstruction guide buffer for one pixel, following the mirror chain where
+// there is one.
+//
+// Called from `initial_and_temporal` rather than dispatched on its own. It used to be its own pass,
+// which forced it to run before the light tiles and the world cache existed — so it could find a
+// reflection but never shade one, and ReSTIR had to walk the same chain again a few dispatches later.
+// Living inside the lighting pass is what makes one traversal able to serve both.
+//
+// The caller has already bounds-checked the pixel.
+fn resolve_dlss_rr_textures_for_pixel(pixel_id: vec2<u32>) -> MirrorChainResult {
+    var result: MirrorChainResult;
     let depth = textureLoad(depth_buffer, pixel_id, 0);
     let surface_motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
 
     // Defaults describe this pixel's own surface, which is the right answer for everything that
     // isn't a mirror. `follow_mirror_chain` overwrites all of them when it replaces the surface.
-    textureStore(specular_motion_vectors, pixel_id, vec4(surface_motion_vector, vec2(0.0)));
-    textureStore(dlss_rr_motion_vectors, pixel_id, vec4(surface_motion_vector, vec2(0.0)));
-    textureStore(dlss_rr_depth, pixel_id, vec4(depth));
+    write_specular_motion_vector(pixel_id, surface_motion_vector);
+    write_dlss_rr_motion_vector(pixel_id, surface_motion_vector);
+    write_dlss_rr_depth(pixel_id, depth);
 
     if depth == 0.0 {
         psr_debug_write(pixel_id, vec3(0.0));
-        textureStore(diffuse_albedo, pixel_id, vec4(0.0));
-        textureStore(specular_albedo, pixel_id, vec4(0.5));
-        textureStore(normal_roughness, pixel_id, vec4(0.0, 0.0, 1.0, 0.0));
-        return;
+        write_diffuse_albedo(pixel_id, vec3(0.0));
+        write_specular_albedo(pixel_id, vec3(0.5));
+        write_normal_roughness(pixel_id, vec3(0.0, 0.0, 1.0), 0.0);
+        return result;
     }
 
     let surface = gpixel_resolve(textureLoad(gbuffer, pixel_id, 0), depth, pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
@@ -41,10 +92,12 @@ fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>)
     // Anything with a delta lobe gets the chain followed. A near-pure mirror has its surface replaced
     // outright; a merely polished one keeps its own depth and motion and only mixes the reflected
     // surface into the guide buffers, because the pixel really is mostly still itself.
-    if split.fraction > 0.0
-        && follow_mirror_chain(pixel_id, surface, split, wo)
-    {
-        return;
+    if split.fraction > 0.0 {
+        result = follow_mirror_chain(pixel_id, surface, split, wo);
+        result.primary_diffuse = split.diffuse;
+        if result.wrote_guides {
+            return result;
+        }
     }
     if split.fraction == 0.0 {
         psr_debug_write(pixel_id, PSR_DEBUG_NOT_DELTA);
@@ -52,9 +105,33 @@ fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>)
 
     let F0 = calculate_F0(surface.material.base_color, surface.material.metallic, vec3(surface.material.reflectance));
 
-    textureStore(diffuse_albedo, pixel_id, vec4(calculate_diffuse_color(surface.material.base_color, surface.material.metallic, 0.0, 0.0), 0.0));
-    textureStore(specular_albedo, pixel_id, vec4(env_brdf_approx2(F0, surface.material.roughness, surface.world_normal, wo), 0.0));
-    textureStore(normal_roughness, pixel_id, vec4(surface.world_normal, surface.material.perceptual_roughness));
+    write_diffuse_albedo(pixel_id, calculate_diffuse_color(surface.material.base_color, surface.material.metallic, 0.0, 0.0));
+    write_specular_albedo(pixel_id, env_brdf_approx2(F0, surface.material.roughness, surface.world_normal, wo));
+    write_normal_roughness(pixel_id, surface.world_normal, surface.material.perceptual_roughness);
+    return result;
+}
+
+// What the chain found, handed back to the lighting pass so the primary specular lobe can be taken
+// from it rather than sampled again.
+//
+// `wrote_guides` and `split_valid` are not the same question. The guides get written for anything the
+// chain terminated on, including a glossy or blended surface. Only a genuine delta lobe may stand in
+// for the specular half of the BRDF, because only a delta lobe is a single direction rather than an
+// integral the chain's one ray cannot represent.
+struct MirrorChainResult {
+    wrote_guides: bool,
+    split_valid: bool,
+    hit: ResolvedRayHitFull,
+    // Direction the chain's last ray was travelling.
+    wi: vec3<f32>,
+    // Fresnel accumulated along the chain: what the reflected radiance is multiplied by on its way
+    // back to the eye.
+    transport: vec3<f32>,
+    // Non-delta reflectance of the primary surface, so the caller knows whether a diffuse path is
+    // worth starting at all.
+    primary_diffuse: vec3<f32>,
+    // Chain bounces consumed, subtracted from the reflected path's bounce budget.
+    bounces: u32,
 }
 
 // False-colour classification, written when `psr_debug_overlay` is set. ReSTIR skips its own writes
@@ -114,8 +191,11 @@ fn delta_split(material: ResolvedMaterial, NdotV: f32) -> DeltaSplit {
         return DeltaSplit(vec3(0.0), vec3(0.0), 0.0);
     }
     if constants.psr_dielectric == 0u {
-        // Legacy behaviour, kept for A/B: metals only, and all-or-nothing when they qualify. A unit
-        // specular reflectance makes the chain tint an identity, so this really is the old path.
+        // Legacy behaviour, kept for A/B: metals only, and all-or-nothing when they qualify.
+        //
+        // No longer a byte-exact reproduction of the old path. The chain's throughput is overridden with
+        // the Fresnel at the mirror direction whenever the lobe is a delta, which is the physically
+        // correct transport factor and is not something this toggle should be able to switch off.
         if material.metallic <= 0.9999 {
             return DeltaSplit(vec3(0.0), vec3(0.0), 0.0);
         }
@@ -210,7 +290,8 @@ fn reflector_curvature(pixel_id: vec2<u32>, normal: vec3<f32>) -> f32 {
 // Returns true if the guide buffers were written and the caller should stop. The one case that writes
 // something and still returns false is a glossy reflection that found nothing: it has a specular motion
 // vector to record, but no reflected surface, so its own albedo and normal are left to the caller.
-fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_split: DeltaSplit, primary_wo: vec3<f32>) -> bool {
+fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_split: DeltaSplit, primary_wo: vec3<f32>) -> MirrorChainResult {
+    var result: MirrorChainResult;
     let primary_position = surface.world_position;
     let primary_normal = surface.world_normal;
     // Decided once, from the surface alone. Everything that separates the glossy path from the mirror
@@ -236,7 +317,17 @@ fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_spl
     // Product of each bounce's specular reflectance. This is what the reflected surface's colour gets
     // multiplied by before it reaches the eye, so it is both the chain tint and, for a dielectric,
     // the reason a reflection contributes only a few percent of the pixel.
+    // One accumulator, not two. The albedo guide wants a reflectance and light transport wants the
+    // Fresnel at the mirror direction; they differ only by the multi-scatter compensation in `F_ab`,
+    // which is negligible at the roughnesses that get here — and the guide was measured to have no
+    // observable effect anyway. So the physically correct one wins and the guide borrows it.
+    //
+    // `evaluate_specular_brdf` returns exactly the Fresnel term for a delta lobe, which also
+    // guarantees this matches what the path tracer would have computed had it sampled the lobe.
     var chain_throughput = primary_split.specular;
+    if surface.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD {
+        chain_throughput = evaluate_specular_brdf(primary_wo, reflect(-primary_wo, primary_normal), primary_normal, surface.material, F_AB(surface.material.perceptual_roughness, max(dot(primary_normal, primary_wo), 0.0001)));
+    }
 
     // TODO: This wants an independent cap rather than borrowing the lighting bounce count, but
     // matching it keeps this pass byte-identical to the previous in-ReSTIR implementation.
@@ -255,12 +346,12 @@ fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_spl
             // shattered depth field the curvature gate exists to avoid.
             if glossy {
                 let far_position = view.world_position + (primary_direction * ENVIRONMENT_VIRTUAL_DISTANCE);
-                textureStore(specular_motion_vectors, pixel_id, vec4(calculate_motion_vector(far_position, far_position), vec2(0.0)));
+                write_specular_motion_vector(pixel_id, calculate_motion_vector(far_position, far_position));
                 psr_debug_write(pixel_id, PSR_DEBUG_ENVIRONMENT);
-                return false;
+                return result;
             }
             psr_debug_write(pixel_id, PSR_DEBUG_CHAIN_FAILED);
-            return false;
+            return result;
         }
         let ray_hit = resolve_ray_hit_full(ray);
         path_length += ray.t;
@@ -291,7 +382,7 @@ fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_spl
                 && 2.0 * curvature * reflection_length > MAX_VIRTUAL_DEPTH_JITTER * path_length
             {
                 psr_debug_write(pixel_id, PSR_DEBUG_TOO_CURVED);
-                return false;
+                return result;
             }
 
             // Unfolding a specular path about a chain of planes straightens it into a single
@@ -309,7 +400,16 @@ fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_spl
                 virtual_position = (mirror_rotations * (ray_hit.world_position - primary_position)) + primary_position;
             }
             replace_primary_surface(pixel_id, surface, primary_split, primary_wo, ray_hit, mirror_rotations, virtual_position, chain_throughput, primary_is_mirror);
-            return true;
+
+            result.wrote_guides = true;
+            // Only a delta lobe may stand in for the specular half. A glossy surface's chain ray is the
+            // lobe centre, which is one sample of an integral, not the whole of it.
+            result.split_valid = surface.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD;
+            result.hit = ray_hit;
+            result.wi = wi;
+            result.transport = chain_throughput;
+            result.bounces = step + 1u;
+            return result;
         }
 
         // Still in the mirror chain, so fold this mirror in and keep going. Accumulating by
@@ -320,12 +420,12 @@ fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_spl
         ray_origin = ray_hit.world_position + (ray_hit.geometric_world_normal * RAY_T_MIN);
         wo = -wi;
         normal = ray_hit.world_normal;
-        chain_throughput *= delta_split(ray_hit.material, max(dot(normal, wo), 0.0001)).specular;
+        chain_throughput *= evaluate_specular_brdf(wo, reflect(-wo, normal), normal, ray_hit.material, F_AB(ray_hit.material.perceptual_roughness, max(dot(normal, wo), 0.0001)));
     }
 
     // Ran out of bounces still inside the mirror chain.
     psr_debug_write(pixel_id, PSR_DEBUG_CHAIN_FAILED);
-    return false;
+    return result;
 }
 
 // https://en.wikipedia.org/wiki/Householder_transformation
@@ -374,13 +474,24 @@ fn replace_primary_surface(
     // guide's one statement about depth is that it must be the same data the motion vectors describe.
     // Jittered `clip_from_world` to match the prepass depth we copy for every other pixel, while the
     // motion vectors use the unjittered matrices, also matching the prepass convention.
+    //
+    // Split from the main motion vector purely to find out which of the two is responsible for what.
+    // Running them apart contradicts the guidance above and is not a shipping configuration: the
+    // denoiser would reproject along a vector describing the reflection while reading a depth
+    // describing the mirror. It is a diagnostic, and the thing it diagnoses is that these two have
+    // opposite-signed effects — the virtual depth places the reflection at its true distance, which
+    // helps wherever a mirror's interior is uniform, and manufactures a large depth cliff at the
+    // silhouette, where the real mirror and the wall behind it are nearly coplanar and the denoiser
+    // was previously able to share history straight across the boundary.
     if replace_fully && constants.psr_virtual_depth != 0u {
         let virtual_clip_position = view.clip_from_world * vec4(virtual_position, 1.0);
-        textureStore(dlss_rr_depth, pixel_id, vec4(virtual_clip_position.z / virtual_clip_position.w));
-        textureStore(dlss_rr_motion_vectors, pixel_id, vec4(specular_motion_vector, vec2(0.0)));
+        write_dlss_rr_depth(pixel_id, virtual_clip_position.z / virtual_clip_position.w);
+    }
+    if replace_fully && constants.psr_virtual_main_motion_vector != 0u {
+        write_dlss_rr_motion_vector(pixel_id, specular_motion_vector);
     }
 
-    textureStore(specular_motion_vectors, pixel_id, vec4(specular_motion_vector, vec2(0.0)));
+    write_specular_motion_vector(pixel_id, specular_motion_vector);
 
     // The albedo guides are documented as this pixel's reflectance, and that is exactly what this
     // is: the chain's tint times what the chain found, plus whatever the surface reflects on its own
@@ -401,20 +512,20 @@ fn replace_primary_surface(
     var tint = chain_throughput;
     if constants.psr_tint_albedo == 0u { tint = vec3(1.0); }
 
-    textureStore(diffuse_albedo, pixel_id, vec4(tint * reflected_diffuse + own_diffuse, 0.0));
+    write_diffuse_albedo(pixel_id, tint * reflected_diffuse + own_diffuse);
     // The surface's own specular reflectance is already the chain's first factor, so adding it back
     // would count it twice — only the reflected surface's own specular term is new here.
-    textureStore(specular_albedo, pixel_id, vec4(mix(own_specular, tint * reflected_specular, primary_split.fraction), 0.0));
+    write_specular_albedo(pixel_id, mix(own_specular, tint * reflected_specular, primary_split.fraction));
 
     // Normals cannot be summed the way reflectance can, and averaging a floor's normal with a
     // reflected object's produces one that describes neither — RTXPT blends theirs across planes and
     // it is the one part of their approach worth not copying. Hand over the reflected surface only
     // when it genuinely dominates, and otherwise leave this pixel's own normal alone.
     if replace_fully {
-        textureStore(normal_roughness, pixel_id, vec4(virtual_normal, ray_hit.material.perceptual_roughness));
+        write_normal_roughness(pixel_id, virtual_normal, ray_hit.material.perceptual_roughness);
         psr_debug_write(pixel_id, PSR_DEBUG_REPLACED);
     } else {
-        textureStore(normal_roughness, pixel_id, vec4(surface.world_normal, surface.material.perceptual_roughness));
+        write_normal_roughness(pixel_id, surface.world_normal, surface.material.perceptual_roughness);
         psr_debug_write(pixel_id, PSR_DEBUG_BLENDED);
     }
 }

@@ -7,6 +7,7 @@ enable wgpu_ray_query;
 #import bevy_solari::brdf::{brdf_pdf, evaluate_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::initial_path::{generate_initial_reservoir, InitialSamplingResult}
+#import bevy_solari::resolve_dlss_rr_textures::resolve_dlss_rr_textures_for_pixel
 #import bevy_solari::realtime_bindings::{depth_buffer, empty_reservoir, gbuffer, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output}
 #import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_visibility, trace_visibility_previous_frame}
 #import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial}
@@ -21,6 +22,12 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
     var rng = pixel_index + constants.frame_rng;
 
+    // Before the early-out below, because the guide buffers have to be written for every pixel
+    // including the sky. Runs whether or not DLSS Ray Reconstruction is active: the guide writes inside
+    // are individually compiled out, but the chain it walks is what the specular lobe below is taken
+    // from, and that is useful to any denoiser or none.
+    let chain = resolve_dlss_rr_textures_for_pixel(global_id.xy);
+
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
         reservoirs_b[pixel_index] = empty_reservoir();
@@ -28,7 +35,37 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.material, workgroup_id.xy, &rng);
+    let wo = normalize(view.world_position - surface.world_position);
+
+    // Lobe splitting at the primary vertex, and only there.
+    //
+    // A delta specular lobe is not an integral — it is one direction, and the chain has already traced
+    // it. Evaluating that half exactly and forcing the other half diffuse beats the usual weighted coin
+    // flip on both counts: no ray is duplicated, and the specular estimate stops being `F / weight` on
+    // a rare draw, which on a dielectric with a few percent specular weight is a firefly generator.
+    //
+    // It also stops such a pixel starving its own history. On a specular draw the old path failed
+    // `reconnection_reusable` and published nothing to the reservoir; the forced-diffuse path is at the
+    // pixel's real surface with a wide lobe, so it publishes every frame.
+    var initial: InitialSamplingResult;
+    if constants.psr_lobe_split != 0u && chain.split_valid {
+        let specular = generate_initial_reservoir(chain.hit.world_position, chain.hit.world_normal, chain.hit.geometric_world_normal, chain.hit.material,
+            -chain.wi, chain.transport, false, false, chain.bounces, workgroup_id.xy, &rng);
+        // Epsilon rather than zero: a metal's diffuse reflectance is computed rather than declared, so
+        // it lands just above zero and would otherwise buy a whole second path to return black.
+        if luminance(chain.primary_diffuse) > 1e-4 {
+            initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.world_normal, surface.material,
+                wo, vec3(1.0), true, true, 0u, workgroup_id.xy, &rng);
+            initial.non_resampled_radiance += specular.non_resampled_radiance;
+        } else {
+            // A pure metal reflects nothing diffusely, so the second path would return zero. This is
+            // where mirrors get cheaper than before rather than merely no worse.
+            initial = specular;
+        }
+    } else {
+        initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.world_normal, surface.material,
+            wo, vec3(1.0), true, false, 0u, workgroup_id.xy, &rng);
+    }
     // The PSR debug overlay paints into view_output from the guide pass, so leave it be.
     if constants.psr_debug_overlay == 0u {
         textureStore(view_output, global_id.xy, vec4(initial.non_resampled_radiance, 0.0));

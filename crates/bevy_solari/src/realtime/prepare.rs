@@ -74,20 +74,10 @@ struct SolariLightingUniforms {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
-    psr_virtual_depth: u32,
-    psr_virtual_main_motion_vector: u32,
-    psr_unfold_along_camera_ray: u32,
-    psr_skip_curved_reflectors: u32,
-    psr_dielectric: u32,
-    psr_tint_albedo: u32,
-    psr_glossy: u32,
-    psr_lobe_split: u32,
-    psr_debug_overlay: u32,
     // A uniform-address-space struct is sized up to a multiple of 16 bytes by WGSL, but this is
     // uploaded as raw `Pod` bytes, so any padding has to be spelled out or the binding comes up short
-    // of what the shader declares. The fields above happen to land on 80 bytes exactly, so there is
-    // `prepare_solari_lighting_resources` is what catches it.
-    _padding: [u32; 3],
+    // of what the shader declares. The fields above land on 48 bytes exactly, so none is needed --
+    // adding a field that breaks that must add padding back.
 }
 
 impl SolariLightingUniforms {
@@ -105,16 +95,6 @@ impl SolariLightingUniforms {
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
             reset: settings.reset as u32,
-            psr_virtual_depth: settings.psr_virtual_depth as u32,
-            psr_virtual_main_motion_vector: settings.psr_virtual_main_motion_vector as u32,
-            psr_unfold_along_camera_ray: settings.psr_unfold_along_camera_ray as u32,
-            psr_skip_curved_reflectors: settings.psr_skip_curved_reflectors as u32,
-            psr_dielectric: settings.psr_dielectric as u32,
-            psr_tint_albedo: settings.psr_tint_albedo as u32,
-            psr_glossy: settings.psr_glossy as u32,
-            psr_lobe_split: settings.psr_lobe_split as u32,
-            psr_debug_overlay: settings.psr_debug_overlay as u32,
-            _padding: [0; 3],
         }
     }
 }

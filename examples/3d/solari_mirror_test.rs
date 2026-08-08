@@ -553,30 +553,7 @@ fn setup(
     ));
 }
 
-fn handle_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut state: ResMut<DemoState>,
-    solari: Single<&mut SolariLighting>,
-) {
-    let mut solari = solari.into_inner();
-    let mut changed = false;
-
-    if keys.just_pressed(KeyCode::Digit1) {
-        solari.psr_virtual_depth = !solari.psr_virtual_depth;
-        changed = true;
-    }
-    if keys.just_pressed(KeyCode::Digit0) {
-        solari.psr_virtual_main_motion_vector = !solari.psr_virtual_main_motion_vector;
-        changed = true;
-    }
-    if keys.just_pressed(KeyCode::Digit8) {
-        solari.psr_lobe_split = !solari.psr_lobe_split;
-        changed = true;
-    }
-    if keys.just_pressed(KeyCode::Digit7) {
-        solari.psr_debug_overlay = !solari.psr_debug_overlay;
-        changed = true;
-    }
+fn handle_input(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<DemoState>) {
     if keys.pressed(KeyCode::BracketLeft) {
         state.camera_distance = (state.camera_distance - 0.01).max(0.12);
     }
@@ -589,12 +566,6 @@ fn handle_input(
     }
     if keys.just_pressed(KeyCode::KeyM) {
         state.object_paused = !state.object_paused;
-    }
-
-    // Both toggles change what the denoiser is told, so stale temporal history would keep showing
-    // the previous answer — indefinitely with the camera paused, where nothing rolls it over.
-    if changed {
-        solari.reset = true;
     }
 }
 
@@ -646,30 +617,15 @@ fn move_mirrors(
     }
 }
 
-fn update_hud(
-    state: Res<DemoState>,
-    solari: Single<&SolariLighting>,
-    mut hud: Single<&mut Text, With<Hud>>,
-) {
-    let on_off = |b: bool| if b { "on" } else { "off" };
-
+fn update_hud(state: Res<DemoState>, mut hud: Single<&mut Text, With<Hud>>) {
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     let denoiser_note = "";
     #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
     let denoiser_note =
-        "\n\nbuilt without `--features dlss`: 0 and 1 feed DLSS Ray Reconstruction only,\nso neither will change anything on screen right now";
+        "\n\nbuilt without `--features dlss`: primary surface replacement feeds DLSS Ray\nReconstruction only, so it will not change anything on screen right now";
 
     hud.0 = format!(
-        "1 {} virtual depth   0 {} virtual main MV   7 {} overlay
-         8 {} lobe split
-         3 DLSS-RR    Space camera {}    M objects {}    [ ] dolly {:.2}x
-         1 and 0 are the two halves of what used to be a single switch. Run
-         them apart to see which destabilises a mirror's edges under camera
-         motion and which steadies its interior.{}",
-        on_off(solari.psr_virtual_depth),
-        on_off(solari.psr_virtual_main_motion_vector),
-        on_off(solari.psr_debug_overlay),
-        on_off(solari.psr_lobe_split),
+        "3 DLSS-RR    Space camera {}    M objects {}    [ ] dolly {:.2}x{}",
         if state.camera_paused { "paused" } else { "swaying" },
         if state.object_paused { "paused" } else { "moving" },
         state.camera_distance,

@@ -178,122 +178,6 @@ pub struct SolariLighting {
     /// After setting this to true, it will automatically be toggled
     /// back to false at the end of the frame.
     pub reset: bool,
-
-    /// Give the denoiser the depth and motion of the surface seen *through* a mirror, rather than
-    /// of the mirror itself.
-    ///
-    /// This is what every NVIDIA reference integration does under primary surface replacement, and
-    /// it lets a reflection reproject at its true optical distance. Turning it off feeds the real
-    /// mirror surface's depth and motion instead, which is the older Bevy behaviour.
-    ///
-    /// Only affects DLSS Ray Reconstruction. Exposed for A/B comparison; there is no known reason to
-    /// prefer the old behaviour.
-    pub psr_virtual_depth: bool,
-
-    /// Feed the reflection's motion into DLSS Ray Reconstruction's *main* motion vector input, not
-    /// just the specular one.
-    ///
-    /// Normally moves together with [`Self::psr_virtual_depth`], because the integration guide's one
-    /// requirement of the depth input is that it describe the same surface the motion vectors do.
-    /// Separated so the two can be measured apart, since they appear to pull in opposite directions:
-    /// the virtual depth places the reflection at its true distance, which helps across a mirror's
-    /// interior, but it also manufactures a large depth step at the mirror's silhouette — where the
-    /// real mirror and the wall behind it are nearly coplanar, and the denoiser could previously carry
-    /// history straight across the boundary.
-    ///
-    /// Running this on with the depth off, or the reverse, is a diagnostic and not a configuration to
-    /// ship.
-    ///
-    /// Only affects DLSS Ray Reconstruction.
-    pub psr_virtual_main_motion_vector: bool,
-
-    /// Place a mirror's virtual image by unfolding the reflection chain along the camera ray, rather
-    /// than by reflecting the hit position about the first mirror's plane.
-    ///
-    /// The two are provably identical for a single planar mirror. They diverge once light bounces
-    /// between two mirrors, because later mirrors must reflect about their own plane -- the older
-    /// construction folds everything about the first one.
-    ///
-    /// Only affects DLSS Ray Reconstruction. Exposed for A/B comparison.
-    pub psr_unfold_along_camera_ray: bool,
-
-    /// Decline to replace the primary surface where it is visibly curving.
-    ///
-    /// Replacement assumes a flat reflector. On a curved one the virtual image is placed too far
-    /// away, and near a silhouette it swings hard between neighbouring pixels — the denoiser reads
-    /// that as a shattered depth field and blurs rather than reprojecting. Skipping those pixels
-    /// falls back to the mirror's own surface, which is merely unhelpful instead of harmful.
-    ///
-    /// This is containment, not a fix: the real answer is to correct the virtual distance for
-    /// curvature. Only affects DLSS Ray Reconstruction.
-    pub psr_skip_curved_reflectors: bool,
-
-    /// Decide what counts as a mirror by where the surface's energy goes, rather than by whether it
-    /// is a metal.
-    ///
-    /// A smooth surface acts as a mirror because its specular lobe carries the reflectance, which a
-    /// dielectric can do too — a black polished one almost entirely, a coloured one only a few
-    /// percent. Turning this off restores the old all-or-nothing `metallic` test, under which no
-    /// dielectric was ever replaced.
-    ///
-    /// Only affects DLSS Ray Reconstruction.
-    pub psr_dielectric: bool,
-
-    /// Multiply the albedo guides by the reflectance accumulated along the mirror chain.
-    ///
-    /// The guide buffers are meant to hold the pixel's reflectance, and a reflection seen in a gold
-    /// mirror really is gold. Without this the denoiser is told the reflected surface's own colour,
-    /// untinted, which biases it wherever a mirror is not neutral.
-    ///
-    /// Only affects DLSS Ray Reconstruction.
-    pub psr_tint_albedo: bool,
-
-    /// Describe how the reflection moves on surfaces that are polished but not mirrors.
-    ///
-    /// A glossy surface is never replaced — its own normal, roughness, albedo, depth and motion stay
-    /// exactly as they are. The only thing it gains is a specular motion vector saying that what it
-    /// reflects moves differently from the surface itself, which is otherwise the one thing the
-    /// denoiser is never told and the reason reflections smear across polished floors.
-    ///
-    /// Turning this on also stops such a surface from walking a mirror chain (one ray along the lobe
-    /// centre is all a widened lobe can support), exempts it from the curvature refusal (it writes no
-    /// virtual depth, so there is no depth field to shatter), and gives it a motion vector for a
-    /// reflection that hits nothing rather than dropping it.
-    ///
-    /// Only affects DLSS Ray Reconstruction.
-    pub psr_glossy: bool,
-
-    /// Split the primary hit's BRDF into its two lobes and evaluate the specular half from the mirror
-    /// chain instead of sampling it.
-    ///
-    /// A delta specular lobe is a single direction, not an integral, and the chain has already traced
-    /// it. Taking it from there is exact, so the specular half of a polished surface stops being
-    /// estimated by a rare, heavily amplified BRDF draw — the usual source of fireflies on polished
-    /// floors. The other half is then sampled with the diffuse lobe forced, at the primary vertex only.
-    ///
-    /// Applies where the lobe is genuinely delta. A glossy surface's chain ray is its lobe *centre*,
-    /// which is one sample of an integral rather than the whole of it, so it is left alone.
-    ///
-    /// Costs a second path start on surfaces that have meaningful diffuse reflectance. Pure mirrors get
-    /// cheaper instead, since their diffuse half is zero and is skipped.
-    pub psr_lobe_split: bool,
-
-    /// Replace the image with a false-colour map of how each pixel was classified for primary surface
-    /// replacement.
-    ///
-    /// - dark grey — no delta lobe, so replacement was never considered. A glossy or rough surface.
-    /// - green — replaced outright.
-    /// - blue — blended: it has a delta lobe but meaningful non-delta energy too.
-    /// - yellow — has a delta lobe, refused for being too curved.
-    /// - red — has a delta lobe, but the reflection chain never landed on a non-mirror surface.
-    /// - purple — glossy, and its reflection ray found nothing, so it was placed at infinity.
-    ///
-    /// Telling "not eligible" apart from "eligible but refused" is the point. Those look identical in
-    /// the final image and have completely different causes.
-    pub psr_debug_overlay: bool,
-
-
-
 }
 
 impl Default for SolariLighting {
@@ -310,15 +194,6 @@ impl Default for SolariLighting {
             world_cache_position_base_cell_size: 0.15,
             world_cache_position_lod_scale: 15.0,
             reset: true, // No temporal history on the first frame
-            psr_virtual_depth: true,
-            psr_virtual_main_motion_vector: true,
-            psr_unfold_along_camera_ray: true,
-            psr_skip_curved_reflectors: true,
-            psr_dielectric: true,
-            psr_tint_albedo: true,
-            psr_glossy: true,
-            psr_lobe_split: false,
-            psr_debug_overlay: false,
         }
     }
 }

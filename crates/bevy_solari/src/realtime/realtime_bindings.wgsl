@@ -47,18 +47,6 @@ struct SolariLightingSettings {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
-    // A/B toggles for the mirror handling in `resolve_dlss_rr_textures`. Live in the uniform rather
-    // than as shader defs so they can be flipped mid-frame without a pipeline rebuild, which is the
-    // only way to compare them on a moving camera.
-    psr_virtual_depth: u32,
-    psr_virtual_main_motion_vector: u32,
-    psr_unfold_along_camera_ray: u32,
-    psr_skip_curved_reflectors: u32,
-    psr_dielectric: u32,
-    psr_tint_albedo: u32,
-    psr_glossy: u32,
-    psr_lobe_split: u32,
-    psr_debug_overlay: u32,
 }
 
 // Don't adjust the size of this struct without also adjusting `prepare::RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE`.

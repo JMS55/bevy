@@ -28,8 +28,11 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.material, workgroup_id.xy, global_id.xy, &rng);
-    textureStore(view_output, global_id.xy, vec4(initial.non_resampled_radiance, 0.0));
+    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.material, workgroup_id.xy, &rng);
+    // The PSR debug overlay paints into view_output from the guide pass, so leave it be.
+    if constants.psr_debug_overlay == 0u {
+        textureStore(view_output, global_id.xy, vec4(initial.non_resampled_radiance, 0.0));
+    }
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let previous_camera_homogeneous = previous_view.world_from_clip * (previous_view.clip_from_view * vec4(0.0, 0.0, 0.0, 1.0));
@@ -65,11 +68,13 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     reservoirs_a[pixel_index] = merge_result.merged_reservoir;
 
-    var pixel_color = merge_result.selected_sample_brdf_radiance * merge_result.merged_reservoir.unbiased_contribution_weight;
-    pixel_color += surface.material.emissive;
-    pixel_color += textureLoad(view_output, global_id.xy).rgb;
-    pixel_color *= view.exposure;
-    textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+    if constants.psr_debug_overlay == 0u {
+        var pixel_color = merge_result.selected_sample_brdf_radiance * merge_result.merged_reservoir.unbiased_contribution_weight;
+        pixel_color += surface.material.emissive;
+        pixel_color += textureLoad(view_output, global_id.xy).rgb;
+        pixel_color *= view.exposure;
+        textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+    }
 
 #ifdef VISUALIZE_WORLD_CACHE
     textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, RAY_T_MAX, WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));

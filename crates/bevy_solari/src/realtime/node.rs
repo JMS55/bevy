@@ -44,8 +44,6 @@ pub struct SolariLightingPipelines {
     blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
     initial_and_temporal_pipeline: CachedComputePipelineId,
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    initial_and_temporal_with_psr_pipeline: CachedComputePipelineId,
     spatial_and_shade_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
@@ -103,14 +101,7 @@ pub fn solari_lighting(
         return;
     };
 
-    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
     let initial_and_temporal_pipeline = pipelines.initial_and_temporal_pipeline;
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    let initial_and_temporal_pipeline = if view_dlss_rr_textures.is_some() {
-        pipelines.initial_and_temporal_with_psr_pipeline
-    } else {
-        pipelines.initial_and_temporal_pipeline
-    };
 
     let (
         Some(decay_world_cache_pipeline),
@@ -204,6 +195,8 @@ pub fn solari_lighting(
                 &d.specular_albedo.default_view,
                 &d.normal_roughness.default_view,
                 &d.specular_motion_vectors.default_view,
+                &d.depth.default_view,
+                &d.motion_vectors.default_view,
             )),
         )
     });
@@ -295,10 +288,6 @@ pub fn solari_lighting(
 
     let d = diagnostics.time_span(&mut pass, "solari_lighting/lighting");
 
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
-        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
-    }
     pass.set_pipeline(initial_and_temporal_pipeline);
     pass.dispatch_workgroups(dx, dy, 1);
 
@@ -364,6 +353,8 @@ pub fn init_solari_lighting_pipelines(
                 texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(TextureFormat::Rg16Float, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(TextureFormat::Rg16Float, StorageTextureAccess::WriteOnly),
             ),
         ),
@@ -467,14 +458,6 @@ pub fn init_solari_lighting_pipelines(
             load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
             None,
             vec![],
-        ),
-        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-        initial_and_temporal_with_psr_pipeline: create_pipeline(
-            "solari_lighting_initial_and_temporal_with_psr_pipeline",
-            "initial_and_temporal",
-            load_embedded_asset!(asset_server.as_ref(), "restir.wgsl"),
-            Some(&bind_group_layout_resolve_dlss_rr_textures),
-            vec!["DLSS_RR_GUIDE_BUFFERS".into()],
         ),
         spatial_and_shade_pipeline: create_pipeline(
             "solari_lighting_spatial_and_shade_pipeline",

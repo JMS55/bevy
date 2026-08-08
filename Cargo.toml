@@ -1552,6 +1552,19 @@ category = "3D Rendering"
 wasm = false                                                                        # Raytracing is not supported on the web
 
 [[example]]
+name = "solari_mirror_test"
+path = "examples/3d/solari_mirror_test.rs"
+doc-scrape-examples = true
+required-features = ["bevy_solari"]
+
+[package.metadata.example.solari_mirror_test]
+name = "Solari Mirror Test"
+description = "Test scene for Solari's mirror handling and primary surface replacement."
+category = "3D Rendering"
+wasm = false                                                                             # Raytracing is not supported on the web
+hidden = true
+
+[[example]]
 name = "spherical_area_lights"
 path = "examples/3d/spherical_area_lights.rs"
 doc-scrape-examples = true

@@ -74,6 +74,17 @@ struct SolariLightingUniforms {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
+    psr_virtual_depth: u32,
+    psr_unfold_along_camera_ray: u32,
+    psr_skip_curved_reflectors: u32,
+    psr_dielectric: u32,
+    psr_tint_albedo: u32,
+    psr_glossy: u32,
+    psr_debug_overlay: u32,
+    /// A uniform-address-space struct is sized up to a multiple of 16 bytes by WGSL, but this is
+    /// uploaded as raw `Pod` bytes, so the padding has to be spelled out or the binding comes up
+    /// short of what the shader declares. Grow or shrink this whenever a field is added or removed.
+    _padding: [u32; 1],
 }
 
 impl SolariLightingUniforms {
@@ -91,6 +102,14 @@ impl SolariLightingUniforms {
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
             reset: settings.reset as u32,
+            psr_virtual_depth: settings.psr_virtual_depth as u32,
+            psr_unfold_along_camera_ray: settings.psr_unfold_along_camera_ray as u32,
+            psr_skip_curved_reflectors: settings.psr_skip_curved_reflectors as u32,
+            psr_dielectric: settings.psr_dielectric as u32,
+            psr_tint_albedo: settings.psr_tint_albedo as u32,
+            psr_glossy: settings.psr_glossy as u32,
+            psr_debug_overlay: settings.psr_debug_overlay as u32,
+            _padding: [0; 1],
         }
     }
 }
@@ -275,6 +294,35 @@ pub fn prepare_solari_lighting_resources(
             let specular_motion_vectors_view =
                 specular_motion_vectors.create_view(&TextureViewDescriptor::default());
 
+            // Depth and motion vectors as seen through mirrors. These shadow the prepass pair for
+            // DLSS Ray Reconstruction only -- the prepass originals stay authoritative for ReSTIR
+            // reprojection, super resolution, and everything else that wants the real surface.
+            // R32Float rather than a depth format because a depth texture cannot be storage-written.
+            let dlss_rr_depth = render_device.create_texture(&TextureDescriptor {
+                label: Some("solari_lighting_dlss_rr_depth"),
+                size: view_size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::R32Float,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
+            let dlss_rr_depth_view = dlss_rr_depth.create_view(&TextureViewDescriptor::default());
+
+            let dlss_rr_motion_vectors = render_device.create_texture(&TextureDescriptor {
+                label: Some("solari_lighting_dlss_rr_motion_vectors"),
+                size: view_size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rg16Float,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
+            let dlss_rr_motion_vectors_view =
+                dlss_rr_motion_vectors.create_view(&TextureViewDescriptor::default());
+
             commands
                 .entity(entity)
                 .insert(ViewDlssRayReconstructionTextures {
@@ -294,7 +342,28 @@ pub fn prepare_solari_lighting_resources(
                         texture: specular_motion_vectors,
                         default_view: specular_motion_vectors_view,
                     },
+                    depth: CachedTexture {
+                        texture: dlss_rr_depth,
+                        default_view: dlss_rr_depth_view,
+                    },
+                    motion_vectors: CachedTexture {
+                        texture: dlss_rr_motion_vectors,
+                        default_view: dlss_rr_motion_vectors_view,
+                    },
                 });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SolariLightingUniforms;
+
+    /// WGSL rounds a uniform-address-space struct up to a multiple of 16 bytes. This one is uploaded
+    /// as raw bytes, so if it stops being a multiple of 16 the binding is smaller than the shader
+    /// declares and wgpu rejects it at bind group creation -- far from the field that caused it.
+    #[test]
+    fn uniforms_are_16_byte_aligned() {
+        assert_eq!(size_of::<SolariLightingUniforms>() % 16, 0);
     }
 }

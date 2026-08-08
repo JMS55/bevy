@@ -26,6 +26,10 @@ enable wgpu_ray_query;
 @group(2) @binding(1) var specular_albedo: texture_storage_2d<rgba8unorm, write>;
 @group(2) @binding(2) var normal_roughness: texture_storage_2d<rgba16float, write>;
 @group(2) @binding(3) var specular_motion_vectors: texture_storage_2d<rg16float, write>;
+// Depth and motion vectors as seen through mirrors. These shadow the prepass pair for DLSS Ray
+// Reconstruction only; the prepass originals stay authoritative for everything else.
+@group(2) @binding(4) var dlss_rr_depth: texture_storage_2d<r32float, write>;
+@group(2) @binding(5) var dlss_rr_motion_vectors: texture_storage_2d<rg16float, write>;
 #endif
 
 // User-configurable settings from the `SolariLighting` component, plus per-frame
@@ -43,6 +47,16 @@ struct SolariLightingSettings {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
+    // A/B toggles for the mirror handling in `resolve_dlss_rr_textures`. Live in the uniform rather
+    // than as shader defs so they can be flipped mid-frame without a pipeline rebuild, which is the
+    // only way to compare them on a moving camera.
+    psr_virtual_depth: u32,
+    psr_unfold_along_camera_ray: u32,
+    psr_skip_curved_reflectors: u32,
+    psr_dielectric: u32,
+    psr_tint_albedo: u32,
+    psr_glossy: u32,
+    psr_debug_overlay: u32,
 }
 
 // Don't adjust the size of this struct without also adjusting `prepare::RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE`.

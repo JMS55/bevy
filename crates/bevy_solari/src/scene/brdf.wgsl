@@ -146,34 +146,6 @@ fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>,
                material.metallic) * NdotL;
 }
 
-// The pdf that goes with the above. Must be used in place of `brdf_pdf` wherever next-event estimation
-// is MIS-weighted against a forced-diffuse vertex: the BRDF strategy there picks diffuse with
-// probability one, not with the lobe-reflectance weight `brdf_pdf` assumes. Getting this wrong is an
-// energy error rather than noise, so it will not look like a bug.
-fn diffuse_brdf_pdf(wi: vec3<f32>, world_normal: vec3<f32>) -> f32 {
-    return max(dot(world_normal, wi), 0.0) / PI;
-}
-
-// Sample the diffuse lobe alone, skipping the usual weighted coin flip between lobes.
-//
-// Used at the primary hit of a surface whose specular lobe is a delta. There the specular half is not
-// an integral at all — it is one direction, already traced by the mirror chain — so sampling for it
-// wastes the ray and, worse, estimates it as `F / specular_weight` on a rare draw. On a dielectric
-// with a few percent specular weight that is a thirty-fold amplification of a rare event, which is a
-// firefly generator. Splitting the lobes deterministically removes the variance instead of fighting it.
-//
-// Returns diffuse-only throughput on purpose: the caller adds the specular half from the chain, and
-// evaluating the full BRDF here would count it twice.
-fn evaluate_and_sample_diffuse_brdf(wo: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, rng: ptr<function, u32>) -> EvaluateAndSampleBrdfResult {
-    let wi = sample_cosine_hemisphere(world_normal, rng);
-    let pdf = diffuse_brdf_pdf(wi, world_normal);
-    if pdf <= 0.0 {
-        return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, true);
-    }
-    let throughput = evaluate_diffuse_brdf(wo, wi, world_normal, material, F_ab) / pdf;
-    return EvaluateAndSampleBrdfResult(wi, throughput, pdf, true);
-}
-
 fn brdf_pdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> f32 {
     let NdotV = max(dot(world_normal, wo), 0.0001);
     let F0_metal = material.base_color;

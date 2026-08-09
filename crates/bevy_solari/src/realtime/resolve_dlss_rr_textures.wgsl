@@ -52,13 +52,20 @@ fn write_dlss_rr_depth(pixel_id: vec2<u32>, depth: f32) {
 #endif
 }
 
+// Its own dispatch rather than a call from `initial_and_temporal`, which is what lets it be
+// deterministic. ReSTIR reaches a mirror only when its lobe coin flip comes up specular — always on a
+// pure metal, a few percent of the time on a polished dielectric — so guide buffers filled from its
+// bounces would be filled a few frames in a hundred and stale in between. That is why the chain is
+// walked here for every eligible pixel, at the cost of the rays.
+@compute @workgroup_size(8, 8, 1)
+fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
+
+    resolve_dlss_rr_textures_for_pixel(global_id.xy);
+}
+
 // Writes every DLSS Ray Reconstruction guide buffer for one pixel, following the mirror chain where
 // there is one.
-//
-// Called from `initial_and_temporal` rather than dispatched on its own. It used to be its own pass,
-// which forced it to run before the light tiles and the world cache existed — so it could find a
-// reflection but never shade one, and ReSTIR had to walk the same chain again a few dispatches later.
-// Living inside the lighting pass is what makes one traversal able to serve both.
 //
 // The caller has already bounds-checked the pixel.
 fn resolve_dlss_rr_textures_for_pixel(pixel_id: vec2<u32>) {
@@ -240,8 +247,6 @@ fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_spl
     let primary_distance = length(camera_to_primary);
     let primary_direction = camera_to_primary / primary_distance;
 
-    let curvature = reflector_curvature(pixel_id, primary_normal);
-
     var mirror_rotations = reflection_matrix(primary_normal);
     var ray_origin = primary_position + (primary_normal * RAY_T_MIN);
     var normal = primary_normal;
@@ -301,14 +306,26 @@ fn follow_mirror_chain(pixel_id: vec2<u32>, surface: ResolvedGPixel, primary_spl
             // tell those apart. Containment only; correcting the distance for curvature is the
             // actual fix, and would keep these pixels rather than discarding them.
             //
-            // Glossy pixels are exempt, because the gate is about *depth*. They write no virtual
-            // depth — only a specular motion vector, which the denoiser applies to a signal that is
-            // already blurry and which has no neighbour-to-neighbour continuity requirement. Refusing
-            // them cost every curved polished surface its motion vector to protect a buffer those
-            // pixels never touch.
-            let reflection_length = path_length - primary_distance;
-            if !glossy && 2.0 * curvature * reflection_length > MAX_VIRTUAL_DEPTH_JITTER * path_length {
-                return false;
+            // Exempt unless this pixel is actually being replaced, because the gate is about *depth*.
+            // Anything else writes no virtual depth — only a specular motion vector, which the denoiser
+            // applies to a signal that is already blurry and which has no neighbour-to-neighbour
+            // continuity requirement. Refusing them cost every curved polished surface its motion
+            // vector to protect a buffer those pixels never touch.
+            //
+            // Keyed on `primary_is_mirror`, not on roughness: writing a virtual depth is an energy
+            // decision, so a polished dielectric is razor-sharp yet still keeps its own depth. Gating
+            // it on `glossy` refused every curved varnished or painted surface for a buffer it was
+            // never going to write either.
+            //
+            // Sampled here rather than before the walk, because it costs two G-buffer taps and only a
+            // pixel being replaced outright ever consults it — which glossy and dielectric pixels,
+            // the majority of everything that gets this far, are not.
+            if primary_is_mirror {
+                let reflection_length = path_length - primary_distance;
+                let curvature = reflector_curvature(pixel_id, primary_normal);
+                if 2.0 * curvature * reflection_length > MAX_VIRTUAL_DEPTH_JITTER * path_length {
+                    return false;
+                }
             }
 
             // Unfolding a specular path about a chain of planes straightens it into a single

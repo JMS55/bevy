@@ -6,9 +6,8 @@ enable wgpu_ray_query;
 #import bevy_pbr::utils::{rand_f, rand_range_u}
 #import bevy_render::maths::PI
 #import bevy_render::utils::octahedral_encode
-#import bevy_solari::brdf::{brdf_pdf, diffuse_brdf_pdf, evaluate_and_sample_brdf, evaluate_and_sample_diffuse_brdf, evaluate_brdf, evaluate_diffuse_brdf, F_AB}
+#import bevy_solari::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB}
 #import bevy_solari::presample_light_tiles::unpack_resolved_light_sample
-#import bevy_solari::brdf::EvaluateAndSampleBrdfResult
 #import bevy_solari::realtime_bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view}
 #import bevy_solari::sampling::{calculate_resolved_light_contribution, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility}
 #import bevy_solari::scene_bindings::{light_sources, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray}
@@ -42,28 +41,9 @@ struct PathState {
     x2_reusable: bool,
     // brdf*cos at x1 for the direction toward x2
     x1_brdf: vec3<f32>,
-    // False when this path's x1 is not the pixel's own G-buffer surface, so nothing about it may be
-    // published to the reservoir. See `generate_initial_reservoir`.
-    resampling_allowed: bool,
-    // Sample only the diffuse lobe at x1. A property of the primary vertex alone — every deeper vertex
-    // samples normally, or the path would lose all specular global illumination.
-    force_diffuse_at_x1: bool,
 }
 
-// `wo` is passed in rather than derived from the camera, and `path_throughput` scales everything this
-// path produces.
-//
-// Both exist for the mirror handoff. When the guide pass has already walked a pixel's reflection chain,
-// ReSTIR starts here at the chain's end instead of tracing the same bounces again — so x1 is a surface
-// somewhere else in the world, looked at from the last mirror rather than from the camera, and
-// everything it contributes has to be multiplied by the chain's reflectance on the way back to the eye.
-//
-// `resampling_allowed` must be false in that case. A reservoir is keyed to the pixel's G-buffer surface
-// — temporal reprojection, the spatial neighbour's similarity test and the shading in
-// `spatial_and_shade` all assume it — and a sample generated at a surface metres away would be
-// resampled as though it belonged to the mirror. Costing nothing today: a delta lobe at x1 already
-// fails `reconnection_reusable`, so mirror pixels have always shaded directly instead of publishing.
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, geometric_normal: vec3<f32>, material: ResolvedMaterial, wo: vec3<f32>, path_throughput: vec3<f32>, resampling_allowed: bool, force_diffuse_at_x1: bool, bounce_offset: u32, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> InitialSamplingResult {
     var reservoir = empty_reservoir();
     reservoir.confidence_weight = 1.0;
 
@@ -71,16 +51,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var weight_sum = 0.0;
     var selected_target_function = 0.0;
 
+    let wo = normalize(view.world_position - world_position);
     let primary_NdotV = max(dot(world_normal, wo), 0.0001);
     let primary_F_ab = F_AB(material.perceptual_roughness, primary_NdotV);
 
     var path: PathState;
-    // Offset along the *geometric* normal, not the shading one. They are the same for a G-buffer
-    // surface, which has only one normal, but the chain's terminus is a traced hit where a normal map
-    // can tilt the shading normal far enough off the triangle to push the origin below it — and a
-    // self-intersecting shadow ray reads as a black speckle that looks like noise rather than a bug.
-    // Every deeper vertex already offsets this way.
-    path.ray_origin = world_position + (geometric_normal * RAY_T_MIN);
+    path.ray_origin = world_position + (world_normal * RAY_T_MIN);
     path.normal = world_normal;
     path.wo = wo;
     path.material = material;
@@ -89,38 +65,21 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     path.x2_normal = vec3(0.0);
     path.x2_reusable = false;
     path.x1_brdf = vec3(0.0);
-    path.resampling_allowed = resampling_allowed;
-    path.force_diffuse_at_x1 = force_diffuse_at_x1;
 
-    // Indexed from zero so that `bounce == 0u` keeps meaning "this path's own first vertex", which is
-    // what the reconnection bookkeeping is built around. `bounce_offset` shortens the path instead:
-    // a reflected path picks up where the chain left off, so the chain's bounces come out of the same
-    // budget rather than being free.
-    let max_bounces = max(constants.max_bounces, 1u);
-    let bounce_budget = max_bounces - min(bounce_offset, max_bounces - 1u);
-    for (var bounce = 0u; bounce < bounce_budget; bounce++) {
+    for (var bounce = 0u; bounce < constants.max_bounces; bounce++) {
         let NdotV = max(dot(path.normal, path.wo), 0.0001);
         let F_ab = F_AB(path.material.perceptual_roughness, NdotV);
 
         // Stochastic NEE, with probability proportional to how diffuse the vertex is. Mirror-like
         // metals have too narrow a lobe for NEE to help, so mostly skip it there and let
         // BRDF-sampled emissive do the work. Pure dielectrics always run NEE.
-        // A forced-diffuse vertex always wants next-event estimation: the lobe being sampled is the
-        // diffuse one, whatever the surface's metalness would otherwise imply about its specular.
-        var p_nee = mix(1.0, path.material.perceptual_roughness, path.material.metallic);
-        if bounce == 0u && force_diffuse_at_x1 { p_nee = 1.0; }
-        // Only a path that actually starts at the camera's surface gets the primary sample count.
-        let di_samples = select(constants.secondary_di_samples, constants.primary_di_samples, bounce == 0u && bounce_offset == 0u);
+        let p_nee = mix(1.0, path.material.perceptual_roughness, path.material.metallic);
+        let di_samples = select(constants.secondary_di_samples, constants.primary_di_samples, bounce == 0u);
         generate_nee_candidate(&reservoir, &weight_sum, &selected_target_function, &non_resampled_radiance,
             path, F_ab, p_nee, di_samples, workgroup_id, bounce, rng);
 
         // Sample the BRDF and trace the next ray
-        var next_bounce: EvaluateAndSampleBrdfResult;
-        if bounce == 0u && force_diffuse_at_x1 {
-            next_bounce = evaluate_and_sample_diffuse_brdf(path.wo, path.normal, path.material, F_ab, rng);
-        } else {
-            next_bounce = evaluate_and_sample_brdf(path.wo, path.normal, path.material, F_ab, rng);
-        }
+        let next_bounce = evaluate_and_sample_brdf(path.wo, path.normal, path.material, F_ab, rng);
         if next_bounce.pdf == 0.0 { break; }
         let ray = trace_ray(path.ray_origin, next_bounce.wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
         if ray.kind == RAY_QUERY_INTERSECTION_NONE { break; }
@@ -132,15 +91,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             path.x2_position = ray_hit.world_position;
             path.x2_normal = ray_hit.world_normal;
 
-            // Diffuse-only when the lobe was forced, or the specular half would be counted once here
-            // and again in the chain's contribution.
-            if force_diffuse_at_x1 {
-                path.x1_brdf = evaluate_diffuse_brdf(wo, next_bounce.wi, world_normal, material, primary_F_ab);
-            } else {
-                path.x1_brdf = evaluate_brdf(wo, next_bounce.wi, world_normal, material, primary_F_ab);
-            }
+            path.x1_brdf = evaluate_brdf(wo, next_bounce.wi, world_normal, material, primary_F_ab);
 
-            path.x2_reusable = resampling_allowed && reconnection_reusable(ray.t, p_brdf, next_bounce.wi, next_bounce.diffuse_selected, ray_hit, world_position, material.perceptual_roughness, primary_NdotV);
+            path.x2_reusable = reconnection_reusable(ray.t, p_brdf, next_bounce.wi, next_bounce.diffuse_selected, ray_hit, world_position, material.perceptual_roughness, primary_NdotV);
 
             // The primary brdf*cos is applied at shade time, so divide it out of next_bounce.throughput
             // to leave 1/pdf (or 1/specular_weight for mirrors, avoiding the 1/INF = 0 that would kill
@@ -158,7 +111,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         }
 
         // Try terminating into the world cache
-        if terminate_into_cache(&reservoir, &weight_sum, &selected_target_function, &non_resampled_radiance, path, ray_hit, ray.t, p_brdf, bounce, bounce_budget, rng) {
+        if terminate_into_cache(&reservoir, &weight_sum, &selected_target_function, &non_resampled_radiance, path, ray_hit, ray.t, p_brdf, bounce, rng) {
             break;
         }
 
@@ -184,17 +137,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         reservoir.unbiased_contribution_weight = weight_sum / selected_target_function;
     }
 
-    // x1's own emissive. Normally `spatial_and_shade` adds it, reading it from the G-buffer — but under
-    // the handoff x1 is not the G-buffer surface, so a mirror pointed at a light would otherwise show
-    // everything about that light except the light. It goes into the non-resampled radiance, which is
-    // inside the exposure multiply where emissive belongs.
-    if !resampling_allowed {
-        non_resampled_radiance += material.emissive;
-    }
-
-    // Everything above was computed at the chain's end, where the light actually is. This is the walk
-    // back to the eye: one factor per mirror the chain bounced off.
-    return InitialSamplingResult(reservoir, non_resampled_radiance * path_throughput);
+    return InitialSamplingResult(reservoir, non_resampled_radiance);
 }
 
 fn generate_nee_candidate(
@@ -221,22 +164,11 @@ fn generate_nee_candidate(
     var nee_mis_weight = 1.0;
     if di.brdf_rays_can_hit && di.inverse_solid_angle_pdf > 0.0 {
         let p_nee_strategy = f32(di_samples) * (1.0 / di.inverse_solid_angle_pdf) * p_nee;
-        // The BRDF strategy this is weighed against picks diffuse with probability one at a forced
-        // vertex, so the mixture pdf `brdf_pdf` returns would be the wrong denominator.
-        var p_brdf_at_nee = brdf_pdf(path.wo, di.wi, path.normal, path.material, F_ab);
-        if bounce == 0u && path.force_diffuse_at_x1 {
-            p_brdf_at_nee = diffuse_brdf_pdf(di.wi, path.normal);
-        }
+        let p_brdf_at_nee = brdf_pdf(path.wo, di.wi, path.normal, path.material, F_ab);
         nee_mis_weight = power_heuristic(p_nee_strategy, p_brdf_at_nee);
     }
 
-    if bounce == 0u && !path.resampling_allowed {
-        // The one candidate that publishes regardless of `x2_reusable`, because at bounce 0 the sample
-        // lives at x1 rather than at x2. Under the handoff x1 is not this pixel's surface, so the
-        // reservoir is the wrong home for it and it is shaded straight in instead. `brdf_radiance`
-        // already carries brdf*cos at x1.
-        *non_resampled_radiance += di.brdf_radiance * di.unbiased_contribution_weight * nee_mis_weight / p_nee;
-    } else if bounce == 0u {
+    if bounce == 0u {
         // Bounce 0: Candidate is the light sample, stored by reference and re-resolved each frame
         // nee_mis_weight goes into the target function since it gets recomputed per-pixel during reuse
         let target_function = di_target_function * nee_mis_weight;
@@ -392,7 +324,6 @@ fn terminate_into_cache(
     ray_t: f32,
     p_brdf: f32,
     bounce: u32,
-    bounce_budget: u32,
     rng: ptr<function, u32>,
 ) -> bool {
     // Only terminate into the world cache when the bounce was from a wide-enough BRDF sample
@@ -400,10 +331,7 @@ fn terminate_into_cache(
     // but less accurate for smooth surfaces
     let lobe_solid_angle = 1.0 / p_brdf;
     let broad_enough_to_terminate = lobe_solid_angle >= CACHE_TERMINATION_MIN_SOLID_ANGLE;
-    // This path's own budget, not the global cap. A reflected path starts partway through the bounce
-    // allowance, so its last vertex is not `max_bounces - 1`; comparing against the cap meant such a
-    // path never force-terminated and silently dropped the cached indirect light it should collect.
-    let forced_terminate = bounce == bounce_budget - 1u;
+    let forced_terminate = bounce == constants.max_bounces - 1u;
     if !(broad_enough_to_terminate || forced_terminate) { return false; }
 
     // Only use the cache when the ray cleared the cache cell (diagonal = sqrt(3) * cell_size). Short

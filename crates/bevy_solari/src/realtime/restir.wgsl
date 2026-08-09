@@ -7,7 +7,6 @@ enable wgpu_ray_query;
 #import bevy_solari::brdf::{brdf_pdf, evaluate_brdf, F_AB}
 #import bevy_solari::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar}
 #import bevy_solari::initial_path::generate_initial_reservoir
-#import bevy_solari::resolve_dlss_rr_textures::resolve_dlss_rr_textures_for_pixel
 #import bevy_solari::realtime_bindings::{depth_buffer, empty_reservoir, gbuffer, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output}
 #import bevy_solari::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_visibility, trace_visibility_previous_frame}
 #import bevy_solari::scene_bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial}
@@ -22,10 +21,6 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
     var rng = pixel_index + constants.frame_rng;
 
-    // Before the early-out below, because the guide buffers have to be written for every pixel
-    // including the sky.
-    resolve_dlss_rr_textures_for_pixel(global_id.xy);
-
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
         reservoirs_b[pixel_index] = empty_reservoir();
@@ -33,10 +28,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    let wo = normalize(view.world_position - surface.world_position);
-
-    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.world_normal, surface.material,
-        wo, vec3(1.0), true, false, 0u, workgroup_id.xy, &rng);
+    let initial = generate_initial_reservoir(surface.world_position, surface.world_normal, surface.material, workgroup_id.xy, &rng);
     textureStore(view_output, global_id.xy, vec4(initial.non_resampled_radiance, 0.0));
 
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);

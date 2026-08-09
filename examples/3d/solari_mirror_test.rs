@@ -7,8 +7,9 @@
 //!
 //! The scene isolates the four cases that behave differently:
 //!
-//! - **A single flat mirror.** The two virtual-image constructions are provably identical here, so
-//!   this one is the control: it must look the same with `2` on or off.
+//! - **A single flat mirror.** The control case. Unfolding along the camera ray and reflecting the
+//!   hit about the mirror plane are provably identical for one flat reflector, so anything wrong
+//!   here is the path-length accumulation rather than the geometry.
 //! - **Two mirrors with skew normals.** Where the constructions actually diverge, and where the
 //!   order the reflections compose in matters. Deliberately *not* parallel — parallel mirrors
 //!   commute, so a corridor of facing mirrors would pass either way and prove nothing.
@@ -24,22 +25,19 @@
 //!   most easily drop.
 //! - **Two polished-but-not-mirror surfaces**, a brushed floor strip and a satin sphere. Neither is
 //!   ever replaced; both only gain a specular motion vector saying their reflection moves differently
-//!   from the surface carrying it. The sphere is the one that shows the curvature refusal being
-//!   over-applied, since a glossy pixel writes no virtual depth for curvature to shatter.
+//!   from the surface carrying it. The sphere is the curved-and-glossy case the curvature refusal
+//!   used to take a motion vector away from, despite it writing no virtual depth to shatter.
 //!
 //! The camera sways sideways on its own, because lateral parallax is what makes a wrong virtual
 //! image obvious — a still frame looks fine even when the motion vectors are badly wrong.
 //!
-//! Controls: `1` virtual depth, `0` virtual main motion vector, `7` the classification overlay, `3`
-//! DLSS Ray Reconstruction, `Space` pauses the camera, `M` pauses the moving objects, `[` and `]`
-//! dolly in and out.
+//! Controls: `3` DLSS Ray Reconstruction, `Space` pauses the camera, `M` pauses the moving objects,
+//! `[` and `]` dolly in and out.
 //!
-//! `1` and `0` were one switch until the edge instability under camera motion needed them apart. The
-//! other PSR settings still exist on [`SolariLighting`] and are still exercised by the geometry here;
-//! they are simply not bound to keys any more, because comparing two things at a time is hard enough.
-//!
-//! Note that these only feed DLSS Ray Reconstruction, so they do nothing visible without
-//! `--features dlss` on a supported GPU. The overlay says so when that is the case.
+//! PSR behaviour is not runtime-switchable — the individual pieces are exercised by the geometry
+//! above rather than by keys. Since it exists to feed DLSS Ray Reconstruction, none of it changes
+//! anything visible without `--features dlss` on a supported GPU; the overlay says so when that is
+//! the case.
 
 use bevy::{
     camera::{CameraMainTextureUsages, Exposure},
@@ -234,9 +232,8 @@ fn setup(
         Transform::from_xyz(-3.0, 12.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Control case: one flat mirror. Both virtual-image constructions agree exactly here, so any
-    // difference between `2` on and off in this half of the frame is a bug in the path-length
-    // accumulation rather than in the geometry.
+    // Control case: one flat mirror. Both virtual-image constructions agree exactly here, so anything
+    // wrong in this half of the frame is the path-length accumulation rather than the geometry.
     let panel = meshes.add(raytraced(Plane3d::new(
         Vec3::new(0.45, 0.0, 1.0).normalize(),
         Vec2::new(2.0, 1.75),

@@ -187,6 +187,9 @@ pub fn solari_lighting(
             previous_view_uniforms_binding,
             s.world_cache.as_entire_binding(),
             s.constants.as_entire_binding(),
+            s.decorrelation_a.as_entire_binding(),
+            s.decorrelation_b.as_entire_binding(),
+            s.unresampled_radiance.as_entire_binding(),
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -350,6 +353,9 @@ pub fn init_solari_lighting_pipelines(
                 uniform_buffer::<PreviousViewData>(true),
                 storage_buffer_sized(false, None),
                 uniform_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
+                storage_buffer_sized(false, None),
             ),
         ),
     );

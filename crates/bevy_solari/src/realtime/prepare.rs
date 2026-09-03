@@ -72,8 +72,15 @@ struct SolariLightingUniforms {
     world_cache_cell_updates_soft_target: u32,
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
+    decorrelation_mode: u32,
+    decorrelation_strength: f32,
+    decorrelation_stagnancy_curve: f32,
+    decorrelation_stagnancy_smoothing: f32,
+    firefly_replacement_strength: f32,
     frame_rng: u32,
     reset: u32,
+    /// Uniform buffers are sized to a multiple of 16 bytes.
+    _padding: [u32; 3],
 }
 
 impl SolariLightingUniforms {
@@ -89,8 +96,14 @@ impl SolariLightingUniforms {
             world_cache_cell_updates_soft_target: settings.world_cache_cell_updates_soft_target,
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
+            decorrelation_mode: settings.decorrelation_mode as u32,
+            decorrelation_strength: settings.decorrelation_strength,
+            decorrelation_stagnancy_curve: settings.decorrelation_stagnancy_curve,
+            decorrelation_stagnancy_smoothing: settings.decorrelation_stagnancy_smoothing,
+            firefly_replacement_strength: settings.firefly_replacement_strength,
             frame_rng: frame_count.wrapping_mul(5782582),
             reset: settings.reset as u32,
+            _padding: [0; 3],
         }
     }
 }
@@ -103,9 +116,13 @@ pub struct SolariLightingResources {
     pub light_tile_resolved_samples: Buffer,
     pub reservoirs_a: Buffer,
     pub reservoirs_b: Buffer,
+    pub decorrelation_a: Buffer,
+    pub decorrelation_b: Buffer,
+    pub unresampled_radiance: Buffer,
     pub world_cache: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
     pub view_size: UVec2,
+    pub decorrelation_enabled: bool,
 }
 
 pub fn prepare_solari_lighting_resources(
@@ -151,9 +168,11 @@ pub fn prepare_solari_lighting_resources(
         }
 
         let uniforms = SolariLightingUniforms::new(solari_lighting, frame_count.0);
+        let decorrelation_enabled = solari_lighting.decorrelation_enabled();
 
         if let Some(solari_lighting_resources) = solari_lighting_resources
             && solari_lighting_resources.view_size == view_size
+            && solari_lighting_resources.decorrelation_enabled == decorrelation_enabled
         {
             // The constants uniform can change every frame, so always upload it.
             render_queue.write_buffer(
@@ -197,6 +216,25 @@ pub fn prepare_solari_lighting_resources(
         let reservoirs_a = reservoirs_buffer("solari_lighting_reservoirs_a");
         let reservoirs_b = reservoirs_buffer("solari_lighting_reservoirs_b");
 
+        // Decorrelation is off by default, so allocate a placeholder to bind instead of a
+        // screen-sized buffer until something actually needs it.
+        let decorrelation_buffer = |name| {
+            let size = if decorrelation_enabled {
+                (view_size.x * view_size.y) as u64 * size_of::<u32>() as u64
+            } else {
+                size_of::<u32>() as u64
+            };
+            render_device.create_buffer(&BufferDescriptor {
+                label: Some(name),
+                size,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let decorrelation_a = decorrelation_buffer("solari_lighting_decorrelation_a");
+        let decorrelation_b = decorrelation_buffer("solari_lighting_decorrelation_b");
+        let unresampled_radiance = decorrelation_buffer("solari_lighting_unresampled_radiance");
+
         let world_cache = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_world_cache"),
             size: WORLD_CACHE_BUFFER_SIZE,
@@ -217,9 +255,13 @@ pub fn prepare_solari_lighting_resources(
             light_tile_resolved_samples,
             reservoirs_a,
             reservoirs_b,
+            decorrelation_a,
+            decorrelation_b,
+            unresampled_radiance,
             world_cache,
             world_cache_active_cells_dispatch,
             view_size,
+            decorrelation_enabled,
         });
 
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]

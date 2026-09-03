@@ -17,7 +17,7 @@ pub mod scene;
 /// This includes the most common types in this crate, re-exported for your convenience.
 pub mod prelude {
     pub use super::SolariPlugins;
-    pub use crate::realtime::SolariLighting;
+    pub use crate::realtime::{DecorrelationMode, SolariLighting};
     pub use crate::scene::RaytracingMesh3d;
 }
 
@@ -50,6 +50,7 @@ impl SolariPlugins {
     /// [`WgpuFeatures`] required for these plugins to function.
     pub fn required_wgpu_features() -> WgpuFeatures {
         WgpuFeatures::EXPERIMENTAL_RAY_QUERY
+            | WgpuFeatures::SUBGROUP
             | WgpuFeatures::BUFFER_BINDING_ARRAY
             | WgpuFeatures::TEXTURE_BINDING_ARRAY
             | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING

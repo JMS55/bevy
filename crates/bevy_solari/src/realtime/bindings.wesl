@@ -18,6 +18,9 @@ enable wgpu_ray_query;
 @group(1) @binding(11) var<uniform> previous_view: PreviousViewUniforms;
 @group(1) @binding(12) var<storage, read_write> world_cache: WorldCache;
 @group(1) @binding(13) var<uniform> constants: SolariLightingSettings;
+@group(1) @binding(14) var<storage, read_write> decorrelation_a: array<u32>;
+@group(1) @binding(15) var<storage, read_write> decorrelation_b: array<u32>;
+@group(1) @binding(16) var<storage, read_write> unresampled_radiance: array<u32>;
 
 @if(DLSS_RR_GUIDE_BUFFERS) {
 @group(2) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;
@@ -40,8 +43,41 @@ struct SolariLightingSettings {
     world_cache_cell_updates_soft_target: u32,
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
+    decorrelation_mode: u32,
+    decorrelation_strength: f32,
+    decorrelation_stagnancy_curve: f32,
+    decorrelation_stagnancy_smoothing: f32,
+    firefly_replacement_strength: f32,
     frame_rng: u32,
     reset: u32,
+}
+
+const DECORRELATION_OFF = 0u;
+const DECORRELATION_UNIFORM = 1u;
+const DECORRELATION_STAGNANCY = 2u;
+
+// The decorrelation buffers are only allocated when one of the two features that needs them is
+// enabled, so nothing may touch them otherwise.
+fn decorrelation_enabled() -> bool {
+    return constants.decorrelation_mode != DECORRELATION_OFF || constants.firefly_replacement_strength > 0.0;
+}
+
+// Per-pixel tracking of how stale the currently selected sample is, packed into one u32.
+struct DecorrelationState {
+    // Frames the current sample has been carried forward, reset when a new sample is generated
+    sample_age: u32,
+    // Spatially and temporally smoothed 0..1 staleness that drives the fallback probability
+    smoothed_stagnancy: f32,
+}
+
+fn pack_decorrelation_state(state: DecorrelationState) -> u32 {
+    let age = min(state.sample_age, 0xFFFFu);
+    let stagnancy = u32(saturate(state.smoothed_stagnancy) * 65535.0 + 0.5);
+    return age | (stagnancy << 16u);
+}
+
+fn unpack_decorrelation_state(packed: u32) -> DecorrelationState {
+    return DecorrelationState(packed & 0xFFFFu, f32(packed >> 16u) / 65535.0);
 }
 
 // Don't adjust the size of this struct without also adjusting `prepare::RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE`.

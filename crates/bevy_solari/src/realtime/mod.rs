@@ -174,6 +174,66 @@ pub struct SolariLighting {
     /// camera.
     pub world_cache_position_lod_scale: f32,
 
+    /// How pixels are chosen to be shaded from an estimate that skipped temporal
+    /// and spatial reuse, in order to decorrelate the noise between frames.
+    ///
+    /// Reusing samples is what keeps the lighting quiet, but it also means
+    /// consecutive frames largely repeat the same estimate instead of being
+    /// independent estimates of the same lighting. ML denoisers, DLSS Ray
+    /// Reconstruction in particular, expect temporally independent samples: they
+    /// under-denoise correlated noise and smear lighting changes. Shading some
+    /// pixels from an unresampled estimate trades variance on those pixels for
+    /// that independence.
+    ///
+    /// Intended for use with DLSS Ray Reconstruction. Leave this off when
+    /// rendering without an ML denoiser, where it only adds noise.
+    pub decorrelation_mode: DecorrelationMode,
+
+    /// How large a fraction of pixels fall back to the unresampled estimate.
+    ///
+    /// Higher values feed the denoiser more temporally independent samples at the
+    /// cost of a noisier input. Lower values keep more of the variance reduction
+    /// that reuse buys, but leave the noise more correlated over time.
+    ///
+    /// Under [`DecorrelationMode::Stagnancy`] this is the fallback probability of a
+    /// maximally stale pixel, with fresher pixels scaled down from it. Under
+    /// [`DecorrelationMode::Uniform`] every pixel uses it directly.
+    pub decorrelation_strength: f32,
+
+    /// Exponent shaping how fast the fallback probability grows with staleness.
+    ///
+    /// Higher values confine the fallback to the stalest pixels, keeping variance
+    /// reduction elsewhere but leaving mildly correlated pixels as they are. Lower
+    /// values spread the fallback more evenly across the screen. The default is
+    /// below 1, so the probability ramps up early and most of the screen is already
+    /// contributing independent samples before any pixel saturates.
+    ///
+    /// Only used by [`DecorrelationMode::Stagnancy`].
+    pub decorrelation_stagnancy_curve: f32,
+
+    /// How much of the previous frame's staleness estimate is blended into the
+    /// current frame's.
+    ///
+    /// Higher values give a smoother, more stable fallback probability, but make it
+    /// slower to react as pixels start or stop reusing samples. Lower values react
+    /// immediately, at the cost of a noisy probability that shows up as visible
+    /// structure in the noise the denoiser is given.
+    ///
+    /// Only used by [`DecorrelationMode::Stagnancy`].
+    pub decorrelation_stagnancy_smoothing: f32,
+
+    /// How aggressively pixels that resampling made far brighter than their
+    /// neighborhood are replaced with an unresampled estimate.
+    ///
+    /// Resampling occasionally latches onto a very high weight sample, which a
+    /// denoiser will smear into a persistent blob. Higher values catch more of these
+    /// fireflies at the cost of also replacing legitimately bright pixels, such as
+    /// small highlights, with a noisier estimate. Set to 0 to disable the check.
+    ///
+    /// Independent of [`SolariLighting::decorrelation_mode`], and likewise intended
+    /// for use with DLSS Ray Reconstruction.
+    pub firefly_replacement_strength: f32,
+
     /// Set to true to delete the saved temporal history (past frames).
     ///
     /// Useful for preventing ghosting when the history is no longer
@@ -182,6 +242,13 @@ pub struct SolariLighting {
     /// After setting this to true, it will automatically be toggled
     /// back to false at the end of the frame.
     pub reset: bool,
+}
+
+impl SolariLighting {
+    /// Whether any feature that needs the per-pixel decorrelation buffers is enabled.
+    pub fn decorrelation_enabled(&self) -> bool {
+        self.decorrelation_mode != DecorrelationMode::Off || self.firefly_replacement_strength > 0.0
+    }
 }
 
 impl Default for SolariLighting {
@@ -197,7 +264,34 @@ impl Default for SolariLighting {
             world_cache_cell_updates_soft_target: 40000,
             world_cache_position_base_cell_size: 0.15,
             world_cache_position_lod_scale: 15.0,
+            decorrelation_mode: DecorrelationMode::Off,
+            decorrelation_strength: 1.0,
+            decorrelation_stagnancy_curve: 0.5,
+            decorrelation_stagnancy_smoothing: 0.9,
+            firefly_replacement_strength: 0.0,
             reset: true, // No temporal history on the first frame
         }
     }
+}
+
+/// How [`SolariLighting`] picks the pixels that get shaded from an estimate which
+/// skipped temporal and spatial reuse.
+#[derive(Clone, Copy, Reflect, Default, PartialEq, Eq, Hash, Debug)]
+#[reflect(Default, Clone, PartialEq, Hash)]
+pub enum DecorrelationMode {
+    /// Never fall back. Every pixel is shaded from its resampled reservoir.
+    #[default]
+    Off,
+    /// Fall back with the same probability on every pixel.
+    ///
+    /// Useful as a baseline when tuning, but spends as much variance on pixels that
+    /// just generated a fresh sample as on pixels that have been reusing the same
+    /// one for dozens of frames.
+    Uniform,
+    /// Fall back with a probability driven by how long the pixel has been reusing
+    /// its current sample.
+    ///
+    /// Puts the added noise where the correlation actually is, and leaves pixels
+    /// whose samples are already fresh alone.
+    Stagnancy,
 }

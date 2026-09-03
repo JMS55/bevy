@@ -1,19 +1,36 @@
 // https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf
 
 import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance;
+import bevy_pbr::render::rgb9e5::{rgb9e5_to_vec3_, vec3_to_rgb9e5_};
 import bevy_pbr::render::utils::{rand_f, rand_u, sample_disk};
 import bevy_render::utils::octahedral_decode;
 import package::scene::brdf::{brdf_pdf, evaluate_brdf, F_AB};
-import package::realtime::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar};
+import package::realtime::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar, ResolvedGPixel};
 import package::realtime::initial_path::{generate_initial_reservoir, InitialSamplingResult};
-import package::realtime::bindings::{depth_buffer, empty_reservoir, gbuffer, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output};
+import package::realtime::bindings::{decorrelation_a, decorrelation_b, decorrelation_enabled, DECORRELATION_STAGNANCY, DECORRELATION_UNIFORM, DecorrelationState, depth_buffer, empty_reservoir, gbuffer, motion_vectors, pack_decorrelation_state, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, unpack_decorrelation_state, unresampled_radiance, view, view_output};
 import package::scene::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_visibility, trace_visibility_previous_frame};
 import package::scene::bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial};
 import package::realtime::world_cache_query::{query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
 enable wgpu_ray_query;
+enable subgroups;
 
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
+
+// Frames of uninterrupted reuse after which a sample counts as maximally stale.
+const STAGNANCY_SATURATION_FRAMES = 32.0;
+
+// Range of the firefly test, as a multiple of the neighborhood's mean luminance. The user-facing
+// strength interpolates between them, so a higher strength catches more pixels.
+const FIREFLY_THRESHOLD_MAX = 64.0;
+const FIREFLY_THRESHOLD_MIN = 6.0;
+
+// How much brighter than the resampled estimate the fallback may be, on a pixel whose reservoir is
+// new this frame, before it gets scaled back.
+const FRESH_FALLBACK_MAX_RATIO = 15.0;
+
+// Spacing of the stagnancy smoothing taps. Widens the footprint without adding taps.
+const STAGNANCY_SMOOTHING_STEP: i32 = 2;
 
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -25,6 +42,10 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
         reservoirs_b[pixel_index] = empty_reservoir();
+        if decorrelation_enabled() {
+            decorrelation_b[pixel_index] = pack_decorrelation_state(DecorrelationState(0u, 0.0));
+            unresampled_radiance[pixel_index] = pack_radiance(vec3(0.0));
+        }
         return;
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
@@ -39,46 +60,225 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.material, previous_camera_world_position, &rng);
 
     reservoirs_b[pixel_index] = merge_result.merged_reservoir;
+
+    if decorrelation_enabled() {
+        // All the shading pass needs to skip reuse is this frame's estimate of the pixel, so store
+        // that single radiance rather than a second copy of the initial reservoir.
+        unresampled_radiance[pixel_index] = pack_radiance(merge_result.canonical_brdf_radiance * initial.reservoir.unbiased_contribution_weight);
+
+        // Keeping the temporal sample carries its age forward, taking the freshly generated one
+        // resets it. The previous frame's smoothed stagnancy rides along from the same reprojected
+        // pixel, for the shading pass to blend into this frame's.
+        var state = DecorrelationState(0u, temporal.decorrelation.smoothed_stagnancy);
+        if merge_result.selected_other {
+            state.sample_age = temporal.decorrelation.sample_age + 1u;
+        }
+        decorrelation_b[pixel_index] = pack_decorrelation_state(state);
+    }
 }
 
+// Per-subgroup (luminance sum, lit count) partials for the firefly test. Only pixels that actually
+// contributed light count, so a workgroup straddling a shadow boundary doesn't halve its own
+// threshold. Pixels with nothing to shade have zero luminance and drop out the same way.
+var<workgroup> subgroup_luminance_sum_count: array<vec2<f32>, 64>;
+
 @compute @workgroup_size(8, 8, 1)
-fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
+fn spatial_and_shade(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+    @builtin(subgroup_size) subgroup_size: u32,
+) {
+    var rng = global_id.x + global_id.y * u32(view.main_pass_viewport.z) + constants.frame_rng + 0x6A09E667u;
 
-    let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    var rng = pixel_index + constants.frame_rng + 0x6A09E667u;
+    var shading: ShadingInputs;
+    if all(global_id.xy < vec2u(view.main_pass_viewport.zw)) {
+        shading = spatial_resample(global_id.xy, &rng);
+    }
 
-    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    // Barriers have to be reached by every invocation, so the reduction runs before the pixels with
+    // nothing to shade drop out, and covers out-of-viewport invocations too. The gate reads a
+    // uniform, so control flow stays uniform through the barrier inside.
+    let resampled_luminance = luminance(shading.resampled_radiance);
+    var neighborhood_luminance = 0.0;
+    if constants.firefly_replacement_strength > 0.0 {
+        neighborhood_luminance = workgroup_mean_luminance(local_index, subgroup_size, resampled_luminance);
+    }
+
+    if !shading.shade { return; }
+
+    var resampled_radiance = shading.resampled_radiance;
+    if decorrelation_enabled() {
+        // Local outliers are replaced no matter how fresh they are, since a denoiser turns them into
+        // a persistent blob rather than averaging them away.
+        let firefly = constants.firefly_replacement_strength > 0.0
+            && resampled_luminance > neighborhood_luminance * firefly_threshold();
+
+        if firefly || rand_f(&rng) < shading.fallback_probability {
+            resampled_radiance = shading.unresampled_radiance;
+
+            // A reservoir generated this frame has had no reuse to average down its variance, so
+            // its estimate can itself be the outlier. Scale it back toward what resampling produced
+            // rather than trading one firefly for another. A resampled value of zero is left alone,
+            // since the fallback finding light where resampling found none is the independent
+            // estimate doing its job.
+            let bound = resampled_luminance * FRESH_FALLBACK_MAX_RATIO;
+            let fallback_luminance = luminance(resampled_radiance);
+            if shading.sample_age == 0u && resampled_luminance > 0.0 && fallback_luminance > bound {
+                resampled_radiance *= bound / fallback_luminance;
+            }
+        }
+    }
+
+    // Only the resampled term is swapped out. Emissive and the path's non-resampled radiance never
+    // went through reuse and are added either way.
+    var pixel_color = resampled_radiance;
+    pixel_color += shading.surface.material.emissive;
+    pixel_color += textureLoad(view_output, global_id.xy).rgb;
+    pixel_color *= view.exposure;
+    textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+
+    @if(VISUALIZE_WORLD_CACHE)
+    textureStore(view_output, global_id.xy, vec4(query_world_cache(shading.surface.world_position, shading.surface.world_normal, view.world_position, RAY_T_MAX, WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
+}
+
+struct ShadingInputs {
+    surface: ResolvedGPixel,
+    // Lighting from the resampled reservoir, and the estimate to fall back to instead of it
+    resampled_radiance: vec3<f32>,
+    unresampled_radiance: vec3<f32>,
+    fallback_probability: f32,
+    sample_age: u32,
+    // False for pixels with no surface, which write an empty reservoir and nothing else
+    shade: bool,
+}
+
+fn spatial_resample(pixel_id: vec2<u32>, rng: ptr<function, u32>) -> ShadingInputs {
+    var shading: ShadingInputs;
+    let pixel_index = pixel_id.x + pixel_id.y * u32(view.main_pass_viewport.z);
+
+    let depth = textureLoad(depth_buffer, pixel_id, 0);
     if depth == 0.0 {
         reservoirs_a[pixel_index] = empty_reservoir();
-        return;
+        if decorrelation_enabled() {
+            decorrelation_a[pixel_index] = pack_decorrelation_state(DecorrelationState(0u, 0.0));
+        }
+        return shading;
     }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    let surface = gpixel_resolve(textureLoad(gbuffer, pixel_id, 0), depth, pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
 
     let input_reservoir = reservoirs_b[pixel_index];
     let wo = normalize(view.world_position - surface.world_position);
     let NdotV = max(dot(surface.world_normal, wo), 0.0001);
     let F_ab = F_AB(surface.material.perceptual_roughness, NdotV);
 
-    let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+    let spatial = load_spatial_reservoir(pixel_id, depth, surface.world_position, surface.world_normal, rng);
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material,
-        spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, view.world_position, &rng);
+        spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.material, view.world_position, rng);
 
     reservoirs_a[pixel_index] = merge_result.merged_reservoir;
 
-    var pixel_color = merge_result.selected_sample_brdf_radiance * merge_result.merged_reservoir.unbiased_contribution_weight;
-    pixel_color += surface.material.emissive;
-    pixel_color += textureLoad(view_output, global_id.xy).rgb;
-    pixel_color *= view.exposure;
-    textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+    shading.surface = surface;
+    shading.shade = true;
+    shading.resampled_radiance = merge_result.selected_sample_brdf_radiance * merge_result.merged_reservoir.unbiased_contribution_weight;
 
-    @if(VISUALIZE_WORLD_CACHE)
-    textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, RAY_T_MAX, WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
+    if decorrelation_enabled() {
+        // Switching to the neighbor's sample changes what this pixel shows, which decorrelates it
+        // from its own history however old that sample is where it came from.
+        let own = unpack_decorrelation_state(decorrelation_b[pixel_index]);
+        var sample_age = own.sample_age;
+        if merge_result.selected_other {
+            sample_age = 0u;
+        }
+
+        // Gathering the neighborhood is the expensive part, and only the stagnancy mode reads it.
+        var smoothed_stagnancy = 0.0;
+        if constants.decorrelation_mode == DECORRELATION_STAGNANCY {
+            smoothed_stagnancy = smooth_stagnancy(pixel_id, sample_age, own.smoothed_stagnancy);
+        }
+        decorrelation_a[pixel_index] = pack_decorrelation_state(DecorrelationState(sample_age, smoothed_stagnancy));
+
+        shading.unresampled_radiance = unpack_radiance(unresampled_radiance[pixel_index]);
+        shading.fallback_probability = fallback_probability(smoothed_stagnancy);
+        shading.sample_age = sample_age;
+    }
+
+    return shading;
+}
+
+fn workgroup_mean_luminance(local_index: u32, subgroup_size: u32, value: f32) -> f32 {
+    let counted = value > 0.0;
+    let partial = subgroupAdd(vec2<f32>(select(0.0, value, counted), select(0.0, 1.0, counted)));
+
+    // One lane per subgroup publishes its partial, then every lane sums the handful of partials.
+    // Subgroups are taken to be contiguous runs of the linear invocation index, which is how every
+    // backend lays them out and what a 1D subgroup_id would compute.
+    let num_subgroups = (64u + subgroup_size - 1u) / subgroup_size;
+    if local_index % subgroup_size == 0u {
+        subgroup_luminance_sum_count[local_index / subgroup_size] = partial;
+    }
+    workgroupBarrier();
+
+    var total = vec2<f32>(0.0);
+    for (var i = 0u; i < num_subgroups; i++) {
+        total += subgroup_luminance_sum_count[i];
+    }
+    return total.x / max(total.y, 1.0);
+}
+
+fn firefly_threshold() -> f32 {
+    return mix(FIREFLY_THRESHOLD_MAX, FIREFLY_THRESHOLD_MIN, saturate(constants.firefly_replacement_strength));
+}
+
+// Per-pixel stagnancy is a noisy, high frequency signal, and driving a probability with it directly
+// would show up as structure in the noise. Average it over a dilated neighborhood, then blend in
+// the previous frame's value that the temporal pass reprojected to this pixel.
+fn smooth_stagnancy(pixel_id: vec2<u32>, sample_age: u32, previous_stagnancy: f32) -> f32 {
+    // Neighbor ages are this frame's, but from before the spatial merge, since that is the newest
+    // value they have all finished writing
+    var sum = stagnancy_from_age(sample_age);
+    var count = 1.0;
+    for (var y = -2; y <= 2; y++) {
+        for (var x = -2; x <= 2; x++) {
+            let neighbor_id = vec2<i32>(pixel_id) + vec2(x, y) * STAGNANCY_SMOOTHING_STEP;
+            if (x == 0 && y == 0) || any(neighbor_id < vec2<i32>(0)) || any(neighbor_id >= vec2<i32>(view.main_pass_viewport.zw)) {
+                continue;
+            }
+
+            let neighbor_index = u32(neighbor_id.x) + u32(neighbor_id.y) * u32(view.main_pass_viewport.z);
+            sum += stagnancy_from_age(unpack_decorrelation_state(decorrelation_b[neighbor_index]).sample_age);
+            count += 1.0;
+        }
+    }
+
+    return mix(sum / count, previous_stagnancy, saturate(constants.decorrelation_stagnancy_smoothing));
+}
+
+fn stagnancy_from_age(sample_age: u32) -> f32 {
+    return saturate(f32(sample_age) / STAGNANCY_SATURATION_FRAMES);
+}
+
+fn fallback_probability(smoothed_stagnancy: f32) -> f32 {
+    if constants.decorrelation_mode == DECORRELATION_STAGNANCY {
+        return saturate(constants.decorrelation_strength * pow(smoothed_stagnancy, max(constants.decorrelation_stagnancy_curve, 0.0)));
+    } else if constants.decorrelation_mode == DECORRELATION_UNIFORM {
+        return saturate(constants.decorrelation_strength);
+    }
+    return 0.0;
+}
+
+// Log encoded like the presampled light tiles, so a single u32 covers the range of an unbounded
+// resampling estimate.
+fn pack_radiance(radiance: vec3<f32>) -> u32 {
+    return vec3_to_rgb9e5_(log2(max(radiance, vec3(0.0)) * view.exposure + 1.0));
+}
+
+fn unpack_radiance(packed: u32) -> vec3<f32> {
+    return (exp2(rgb9e5_to_vec3_(packed)) - 1.0) / view.exposure;
 }
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
     if bool(constants.reset) {
-        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
+        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material(), DecorrelationState(0u, 0.0));
     }
 
     let motion_vector = textureLoad(motion_vectors, pixel_id).xy;
@@ -99,11 +299,15 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     let temporal_depth = textureLoad(previous_depth_buffer, permuted_temporal_pixel_id, 0);
     let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, permuted_temporal_pixel_id, 0), temporal_depth, permuted_temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
     if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
-        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
+        return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material(), DecorrelationState(0u, 0.0));
     }
 
     let temporal_pixel_index = permuted_temporal_pixel_id.x + permuted_temporal_pixel_id.y * u32(view.main_pass_viewport.z);
-    var temporal = NeighborInfo(reservoirs_a[temporal_pixel_index], temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material);
+    var temporal_decorrelation = DecorrelationState(0u, 0.0);
+    if decorrelation_enabled() {
+        temporal_decorrelation = unpack_decorrelation_state(decorrelation_a[temporal_pixel_index]);
+    }
+    var temporal = NeighborInfo(reservoirs_a[temporal_pixel_index], temporal_surface.world_position, temporal_surface.world_normal, temporal_surface.material, temporal_decorrelation);
 
     // Check if the light selected in the previous frame no longer exists in the current frame (e.g. entity despawned)
     if temporal.reservoir.light_sample.light_id != NULL_LIGHT_ID {
@@ -111,7 +315,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
         let triangle_id = temporal.reservoir.light_sample.light_id & 0xFFFFu;
         let light_id = previous_frame_light_id_translations[previous_light_id];
         if light_id == LIGHT_NOT_PRESENT_THIS_FRAME {
-            return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material());
+            return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), empty_material(), DecorrelationState(0u, 0.0));
         }
         temporal.reservoir.light_sample.light_id = (light_id << 16u) | triangle_id;
     }
@@ -136,10 +340,10 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
         }
 
         let spatial_pixel_index = spatial_pixel_id.x + spatial_pixel_id.y * u32(view.main_pass_viewport.z);
-        return NeighborInfo(reservoirs_b[spatial_pixel_index], spatial_surface.world_position, spatial_surface.world_normal, spatial_surface.material);
+        return NeighborInfo(reservoirs_b[spatial_pixel_index], spatial_surface.world_position, spatial_surface.world_normal, spatial_surface.material, DecorrelationState(0u, 0.0));
     }
 
-    return NeighborInfo(empty_reservoir(), world_position, world_normal, empty_material());
+    return NeighborInfo(empty_reservoir(), world_position, world_normal, empty_material(), DecorrelationState(0u, 0.0));
 }
 
 fn get_neighbor_pixel_id(center_pixel_id: vec2<u32>, search_radius: f32, rng: ptr<function, u32>) -> vec2<u32> {
@@ -153,6 +357,7 @@ struct NeighborInfo {
     world_position: vec3<f32>,
     world_normal: vec3<f32>,
     material: ResolvedMaterial,
+    decorrelation: DecorrelationState,
 }
 
 fn empty_material() -> ResolvedMaterial {
@@ -178,6 +383,10 @@ fn jacobian(
 struct ReservoirMergeResult {
     merged_reservoir: Reservoir,
     selected_sample_brdf_radiance: vec3<f32>,
+    // The canonical sample's radiance whether or not it won, for the unresampled estimate
+    canonical_brdf_radiance: vec3<f32>,
+    // Whether the other reservoir's sample was resampled in place of the canonical one
+    selected_other: bool,
 }
 
 fn merge_reservoirs(
@@ -204,7 +413,7 @@ fn merge_reservoirs(
 
     // Skip resampling empty reservoirs
     if other_reservoir.confidence_weight == 0.0 {
-        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance);
+        return ReservoirMergeResult(canonical_reservoir, canonical_sample_at_canonical.brdf_radiance, canonical_sample_at_canonical.brdf_radiance, false);
     }
 
     var other_resolved: ResolvedLightSample;
@@ -298,7 +507,7 @@ fn merge_reservoirs(
         let inverse_target_function = select(0.0, 1.0 / other_sample_at_canonical.target_function, other_sample_at_canonical.target_function > 0.0);
         combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
-        return ReservoirMergeResult(combined_reservoir, other_sample_at_canonical.brdf_radiance);
+        return ReservoirMergeResult(combined_reservoir, other_sample_at_canonical.brdf_radiance, canonical_sample_at_canonical.brdf_radiance, true);
     } else {
         combined_reservoir.sample_point_world_position = canonical_reservoir.sample_point_world_position;
         combined_reservoir.sample_point_world_normal = canonical_reservoir.sample_point_world_normal;
@@ -308,7 +517,7 @@ fn merge_reservoirs(
         let inverse_target_function = select(0.0, 1.0 / canonical_sample_at_canonical.target_function, canonical_sample_at_canonical.target_function > 0.0);
         combined_reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
 
-        return ReservoirMergeResult(combined_reservoir, canonical_sample_at_canonical.brdf_radiance);
+        return ReservoirMergeResult(combined_reservoir, canonical_sample_at_canonical.brdf_radiance, canonical_sample_at_canonical.brdf_radiance, false);
     }
 }
 

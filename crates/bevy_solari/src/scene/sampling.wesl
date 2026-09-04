@@ -1,7 +1,7 @@
 import bevy_pbr::render::pbr_lighting::D_GGX;
-import bevy_pbr::render::utils::{rand_vec2f, rand_u, rand_range_u};
+import bevy_pbr::render::utils::{rand_f, rand_vec2f, rand_u, rand_range_u};
 import bevy_render::maths::{PI_2, orthonormalize};
-import package::scene::bindings::{trace_ray, trace_ray_previous_frame, RAY_T_MIN, RAY_T_MAX, light_sources, directional_lights, LightSource, LIGHT_SOURCE_KIND_DIRECTIONAL, resolve_triangle_data_full, ResolvedRayHitFull, MIRROR_ROUGHNESS_THRESHOLD};
+import package::scene::bindings::{trace_ray, trace_ray_previous_frame, RAY_T_MIN, RAY_T_MAX, light_cdf, light_sources, light_weights, directional_lights, LightSource, LIGHT_SOURCE_KIND_DIRECTIONAL, resolve_triangle_data_full, ResolvedRayHitFull, MIRROR_ROUGHNESS_THRESHOLD};
 
 enable wgpu_ray_query;
 
@@ -126,15 +126,72 @@ fn sample_random_light(ray_origin: vec3<f32>, origin_world_normal: vec3<f32>, rn
     return light_contribution;
 }
 
-fn random_emissive_light_pdf(hit: ResolvedRayHitFull, ray_distance: f32, NdotV: f32) -> f32 {
+// Sum of every light's weight. The CDF is an inclusive prefix sum, so its last entry is the total.
+fn total_light_weight(light_count: u32) -> f32 {
+    return light_cdf[light_count - 1u];
+}
+
+// Probability that generate_random_light_sample() picks light_id.
+//
+// Zero for a light that cannot be picked, which covers both zero-weight lights and the
+// LIGHT_NOT_PRESENT_THIS_FRAME sentinel that non-emissive instances carry.
+fn light_selection_pdf(light_id: u32) -> f32 {
     let light_count = arrayLength(&light_sources);
-    let area_pdf = 1.0 / (f32(light_count) * f32(hit.triangle_count) * hit.triangle_area);
+    if light_id >= light_count { return 0.0; }
+
+    // Every light is black, so selection falls back to uniform
+    let total_weight = total_light_weight(light_count);
+    if total_weight == 0.0 { return 1.0 / f32(light_count); }
+
+    return light_weights[light_id] / total_weight;
+}
+
+// First index whose cumulative weight exceeds `target`, which must be less than the total weight.
+//
+// Lights of zero weight share a CDF entry with the light before them, so they are never returned.
+fn sample_light_cdf(target: f32, light_count: u32) -> u32 {
+    var low = 0u;
+    var high = light_count - 1u;
+    while low < high {
+        let mid = low + ((high - low) >> 1u);
+        if light_cdf[mid] > target {
+            high = mid;
+        } else {
+            low = mid + 1u;
+        }
+    }
+    return low;
+}
+
+fn random_emissive_light_pdf(hit: ResolvedRayHitFull, ray_distance: f32, NdotV: f32) -> f32 {
+    let selection_pdf = light_selection_pdf(hit.light_id);
+    if selection_pdf == 0.0 { return 0.0; }
+
+    let area_pdf = selection_pdf / (f32(hit.triangle_count) * hit.triangle_area);
     return area_pdf * (ray_distance * ray_distance) / NdotV;
 }
 
 fn generate_random_light_sample(rng: ptr<function, u32>) -> GenerateRandomLightSampleResult {
     let light_count = arrayLength(&light_sources);
-    let light_id = rand_range_u(light_count, rng);
+    let total_weight = total_light_weight(light_count);
+
+    // Pick a light with probability proportional to its estimated radiant power, by inverting the
+    // CDF (Pharr, Jakob & Humphreys, Physically Based Rendering, sampling a discrete distribution)
+    var light_id: u32;
+    var selection_inverse_pdf: f32;
+    if total_weight > 0.0 {
+        // rand_f() is inclusive of 1.0, which has no light above it in the CDF. Fold that draw
+        // back to the start of the distribution so the search always lands on a nonzero weight.
+        var u = rand_f(rng);
+        if u >= 1.0 { u = 0.0; }
+
+        light_id = sample_light_cdf(u * total_weight, light_count);
+        selection_inverse_pdf = total_weight / light_weights[light_id];
+    } else {
+        // Every light is black, so power weighting has nothing to go on. Pick uniformly.
+        light_id = rand_range_u(light_count, rng);
+        selection_inverse_pdf = f32(light_count);
+    }
 
     let light_source = light_sources[light_id];
 
@@ -148,7 +205,7 @@ fn generate_random_light_sample(rng: ptr<function, u32>) -> GenerateRandomLightS
     let light_sample = LightSample((light_id << 16u) | triangle_id, seed);
 
     var resolved_light_sample = resolve_light_sample(light_sample, light_source);
-    resolved_light_sample.inverse_pdf *= f32(light_count);
+    resolved_light_sample.inverse_pdf *= selection_inverse_pdf;
 
     return GenerateRandomLightSampleResult(light_sample, resolved_light_sample);
 }

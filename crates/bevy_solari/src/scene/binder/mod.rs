@@ -86,6 +86,8 @@ impl FromWorld for RaytracingSceneBindings {
                     storage_buffer_read_only_sized(false, None),
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
+                    storage_buffer_read_only_sized(false, None),
+                    storage_buffer_read_only_sized(false, None),
                 ),
             ),
         );
@@ -156,6 +158,12 @@ pub fn prepare_raytracing_scene_resources(
     // Update the light set, now that emissive instances are resolved
     bindings.lights.update(&directional_lights);
 
+    // Light removals shuffle indices, so repoint instances before anything reads them back
+    bindings.instances.sync_light_ids(&bindings.lights);
+
+    // Rebuild the light selection distribution, now that every light and transform is current
+    bindings.lights.refresh_weights(&bindings.instances);
+
     // Upload the above writes
     write_sparse_buffers(bindings, &render_device, &render_queue);
 
@@ -212,4 +220,5 @@ fn write_sparse_buffers(
     lights
         .previous_frame_id_translations
         .write_buffers(device, queue);
+    lights.write_weight_buffers(device, queue);
 }

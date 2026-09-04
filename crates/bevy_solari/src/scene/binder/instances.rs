@@ -1,7 +1,7 @@
 use super::{
     allocator::{IndexAllocator, RetainedBindingArray},
     assets::AssetState,
-    lights::{GpuLightSource, LightSourceId, LightState},
+    lights::{LightSourceId, LightState, LIGHT_NOT_PRESENT_THIS_FRAME},
     BlasManager, RaytracingMesh3d, RaytracingSceneBindings,
 };
 use bevy_asset::AssetId;
@@ -10,7 +10,7 @@ use bevy_ecs::{
     query::{Changed, Or, With},
     system::Query,
 };
-use bevy_math::{Affine3, Affine3Ext, Vec4};
+use bevy_math::{Affine3, Affine3Ext, Vec3, Vec4};
 use bevy_mesh::Mesh;
 use bevy_pbr::{MeshMaterial3d, PreviousGlobalTransform, StandardMaterial};
 use bevy_platform::collections::HashMap;
@@ -35,6 +35,11 @@ pub struct GpuInstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
+    /// Index of this instance's emissive mesh light, or [`LIGHT_NOT_PRESENT_THIS_FRAME`].
+    ///
+    /// Lets a ray hit report the pdf with which light sampling would have picked it, which the
+    /// weighted light selection needs for MIS.
+    light_id: u32,
 }
 
 /// A world-from-local affine transform, stored transposed as three rows.
@@ -328,6 +333,24 @@ impl InstanceState {
         self.release_buffers(previous_buffers);
 
         let triangle_count = (index_slice.range.len() / 3) as u32;
+
+        let is_emissive = inputs
+            .assets
+            .emissive_materials
+            .contains(&instance.material);
+        let light_id = if is_emissive {
+            lights.set_emissive_mesh_light(
+                entity,
+                slot,
+                triangle_count,
+                inputs.assets.emissive(material_slot),
+                inputs.blas_manager.mesh_half_extents(&instance.mesh),
+            )
+        } else {
+            lights.remove_light(LightSourceId::EmissiveMesh(entity));
+            LIGHT_NOT_PRESENT_THIS_FRAME
+        };
+
         self.geometry_ids.grow_and_set(
             slot,
             GpuInstanceGeometryIds {
@@ -336,24 +359,61 @@ impl InstanceState {
                 index_buffer_id,
                 index_buffer_offset: index_slice.range.start,
                 triangle_count,
+                light_id,
             },
         );
         self.material_ids.grow_and_set(slot, material_slot);
         self.set_blas_ref(slot, GpuBlasRef(blas_address));
 
-        let is_emissive = inputs
-            .assets
-            .emissive_materials
-            .contains(&instance.material);
-        if is_emissive {
-            lights.add_light(
-                LightSourceId::EmissiveMesh(entity),
-                GpuLightSource::new_emissive_mesh_light(slot, triangle_count),
-            );
-        } else {
-            lights.remove_light(LightSourceId::EmissiveMesh(entity));
-        }
         true
+    }
+
+    /// Repoints instances at their light's current index.
+    ///
+    /// Removing a light swaps another one down into its slot, so an instance can be left holding
+    /// an index that now belongs to a different light.
+    pub fn sync_light_ids(&self, lights: &LightState) {
+        let _span = info_span!("sync_light_ids").entered();
+
+        for id in lights.changed_ids() {
+            let LightSourceId::EmissiveMesh(entity) = id else {
+                continue;
+            };
+            let Some(instance) = self.records.get(&entity) else {
+                continue;
+            };
+            let slot = instance.slot;
+            if slot >= self.geometry_ids.len() {
+                continue;
+            }
+
+            let light_id = lights.light_id(&id);
+            let mut geometry_ids = self.geometry_ids.get(slot);
+            if geometry_ids.light_id != light_id {
+                geometry_ids.light_id = light_id;
+                self.geometry_ids.set(slot, geometry_ids);
+            }
+        }
+    }
+
+    /// Surface area of a slot's mesh-space AABB, transformed into world space.
+    ///
+    /// Stands in for the emissive surface area of a mesh light. It is only an estimate, but a
+    /// cheap and view-independent one.
+    pub fn world_aabb_surface_area(&self, slot: u32, local_half_extents: Vec3) -> f32 {
+        if slot >= self.transforms.len() {
+            return 0.0;
+        }
+
+        // Each row of the transposed 3x3 projects the mesh-space extents onto one world axis
+        let rows = self.transforms.get(slot).0;
+        let half = Vec3::new(
+            rows[0].truncate().abs().dot(local_half_extents),
+            rows[1].truncate().abs().dot(local_half_extents),
+            rows[2].truncate().abs().dot(local_half_extents),
+        );
+        let extents = 2.0 * half;
+        2.0 * (extents.x * extents.y + extents.y * extents.z + extents.z * extents.x)
     }
 
     fn write_transforms(

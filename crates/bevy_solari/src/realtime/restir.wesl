@@ -7,7 +7,7 @@ import package::scene::brdf::{brdf_pdf, evaluate_brdf, F_AB};
 import package::realtime::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar};
 import package::realtime::initial_path::{generate_initial_path, InitialSamplingResult};
 import package::realtime::bindings::{depth_buffer, empty_reservoir, gbuffer, motion_vectors, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output};
-import package::scene::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_visibility, trace_visibility_previous_frame};
+import package::scene::sampling::{balance_heuristic, calculate_resolved_light_contribution, isinf, isnan, light_selection_pdf, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_visibility, trace_visibility_previous_frame};
 import package::scene::bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial};
 import package::realtime::world_cache_query::{query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
@@ -322,11 +322,12 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         // brdf and material rather than baked into the unbiased contribution weight at generation. Mirrors the bounce-0
         // nee_mis_weight in generate_nee_candidate and generate_emissive_candidate, which puts the same factor in the target.
         var nee_mis_weight = 1.0;
-        if light_contribution.brdf_rays_can_hit && light_contribution.inverse_solid_angle_pdf > 0.0 {
-            let light_count = arrayLength(&light_sources);
-            let inverse_solid_angle_pdf = light_contribution.inverse_solid_angle_pdf * f32(light_count);
+        // resolve_light_sample leaves the light selection factor out of the pdf, so fold it back in
+        let selection_pdf = light_selection_pdf(reservoir.light_sample.light_id >> 16u);
+        if light_contribution.brdf_rays_can_hit && light_contribution.inverse_solid_angle_pdf > 0.0 && selection_pdf > 0.0 {
+            let solid_angle_pdf = selection_pdf / light_contribution.inverse_solid_angle_pdf;
             let p_nee = mix(1.0, material.perceptual_roughness, material.metallic);
-            let p_nee_strategy = f32(constants.primary_di_samples) * (1.0 / inverse_solid_angle_pdf) * p_nee;
+            let p_nee_strategy = f32(constants.primary_di_samples) * solid_angle_pdf * p_nee;
             let p_brdf_at_nee = brdf_pdf(wo, light_contribution.wi, world_normal, material, F_ab);
             nee_mis_weight = power_heuristic(p_nee_strategy, p_brdf_at_nee);
         }

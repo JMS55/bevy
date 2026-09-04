@@ -5,8 +5,8 @@ import bevy_render::utils::octahedral_encode;
 import package::scene::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, F_AB};
 import package::realtime::presample_light_tiles::unpack_resolved_light_sample;
 import package::realtime::bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view};
-import package::scene::sampling::{calculate_resolved_light_contribution, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility};
-import package::scene::bindings::{light_sources, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
+import package::scene::sampling::{calculate_resolved_light_contribution, isinf, light_selection_pdf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility};
+import package::scene::bindings::{RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
 import package::realtime::world_cache_query::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
 @if(DLSS_RR_GUIDE_BUFFERS)
@@ -336,8 +336,13 @@ fn generate_emissive_candidate(
     rng: ptr<function, u32>,
 ) {
     let NdotV_hit = max(dot(ray_hit.world_normal, -wi), 0.0001);
-    let light_count = arrayLength(&light_sources);
-    let area_pdf = 1.0 / (f32(light_count) * f32(ray_hit.triangle_count) * ray_hit.triangle_area);
+    // Mirrors random_emissive_light_pdf. A hit that light sampling could not have produced has a
+    // selection pdf of zero, which leaves the whole light strategy at pdf zero.
+    let selection_pdf = light_selection_pdf(ray_hit.light_id);
+    var area_pdf = 0.0;
+    if selection_pdf > 0.0 {
+        area_pdf = selection_pdf / (f32(ray_hit.triangle_count) * ray_hit.triangle_area);
+    }
     let p_light = area_pdf * ray_t * ray_t / NdotV_hit;
     let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(di_samples));
 

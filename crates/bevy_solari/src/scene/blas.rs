@@ -1,9 +1,11 @@
 use alloc::collections::VecDeque;
 use bevy_asset::AssetId;
+use bevy_camera::primitives::MeshAabb;
 use bevy_ecs::{
     resource::Resource,
     system::{Res, ResMut},
 };
+use bevy_math::Vec3;
 use bevy_mesh::{Indices, Mesh};
 use bevy_platform::collections::HashMap;
 use bevy_render::{
@@ -29,6 +31,8 @@ const TLAS_BUILDS_BEFORE_DELETION_ALLOWED: usize = 2;
 #[derive(Resource, Default)]
 pub struct BlasManager {
     blas: HashMap<AssetId<Mesh>, Blas>,
+    /// Mesh-space AABB half extents, for estimating the emissive area of mesh lights.
+    mesh_half_extents: HashMap<AssetId<Mesh>, Vec3>,
     compaction_queue: VecDeque<(AssetId<Mesh>, u32, bool)>,
     changed: Vec<AssetId<Mesh>>,
     /// BLAS that are pending deletion, one batch per TLAS build. The back batch collects
@@ -48,6 +52,10 @@ impl BlasManager {
 
     pub fn changed_meshes(&self) -> &[AssetId<Mesh>] {
         &self.changed
+    }
+
+    pub fn mesh_half_extents(&self, mesh: &AssetId<Mesh>) -> Option<Vec3> {
+        self.mesh_half_extents.get(mesh).copied()
     }
 
     pub fn note_tlas_build(&mut self) {
@@ -97,6 +105,17 @@ pub fn prepare_raytracing_blas(
         .chain(extracted_meshes.modified.iter())
     {
         blas_manager.remove(*asset_id);
+    }
+
+    for asset_id in &extracted_meshes.removed {
+        blas_manager.mesh_half_extents.remove(asset_id);
+    }
+    for (asset_id, mesh) in &extracted_meshes.extracted {
+        if let Some(aabb) = mesh.get_aabb() {
+            blas_manager
+                .mesh_half_extents
+                .insert(*asset_id, aabb.half_extents.into());
+        }
     }
 
     if extracted_meshes.extracted.is_empty() {

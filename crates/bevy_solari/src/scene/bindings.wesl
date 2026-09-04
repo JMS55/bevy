@@ -10,6 +10,9 @@ struct InstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
+    // Index into light_sources of this instance's emissive mesh light,
+    // or LIGHT_NOT_PRESENT_THIS_FRAME when the instance is not a light
+    light_id: u32,
 }
 
 struct VertexBuffer { vertices: array<PackedVertex> }
@@ -89,6 +92,10 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(13) var<storage> previous_frame_light_id_translations: array<u32>;
 @group(0) @binding(14) var brdf_dfg_lut: texture_2d<f32>;
 @group(0) @binding(15) var brdf_dfg_lut_sampler: sampler;
+// Estimated radiant power per light source, parallel to light_sources
+@group(0) @binding(16) var<storage> light_weights: array<f32>;
+// Inclusive prefix sum of light_weights, so the last entry is the total weight
+@group(0) @binding(17) var<storage> light_cdf: array<f32>;
 
 const RAY_T_MIN = 0.001f;
 const RAY_T_MAX = 100000.0f;
@@ -133,6 +140,7 @@ struct ResolvedRayHitFull {
     uv: vec2<f32>,
     triangle_area: f32,
     triangle_count: u32,
+    light_id: u32,
     material: ResolvedMaterial,
 }
 
@@ -243,6 +251,7 @@ fn resolve_triangle_data_full(instance_id: u32, triangle_id: u32, barycentrics: 
         uv,
         triangle_area,
         instance_geometry_ids.triangle_count,
+        instance_geometry_ids.light_id,
         resolved_material,
     );
 }

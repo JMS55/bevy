@@ -70,6 +70,13 @@ impl AssetState {
         }
     }
 
+    /// Emissive color of the material in `slot`, as uploaded to the GPU.
+    ///
+    /// Any emissive texture is left out, so this is the base emissive only.
+    pub fn emissive(&self, slot: u32) -> Vec3 {
+        self.materials.get(slot).emissive
+    }
+
     pub fn update_materials(
         &mut self,
         instances: &mut InstanceState,

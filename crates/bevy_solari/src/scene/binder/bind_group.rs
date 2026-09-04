@@ -21,7 +21,7 @@ use tracing::info_span;
 pub struct BindGroupCacheState {
     cached: [Option<BindGroup>; 2],
     pub invalid: bool,
-    last_buffer_ids: [Option<BufferId>; 9],
+    last_buffer_ids: [Option<BufferId>; 11],
     last_light_count: u32,
     last_dfg_ids: Option<(TextureViewId, SamplerId)>,
     pub dummy_buffer: Buffer,
@@ -40,7 +40,7 @@ impl BindGroupCacheState {
         Self {
             cached: [None, None],
             invalid: true,
-            last_buffer_ids: [None; 9],
+            last_buffer_ids: [None; 11],
             last_light_count: 0,
             last_dfg_ids: None,
             dummy_buffer,
@@ -60,7 +60,7 @@ fn buffer_bindings<'a>(
 
 impl RaytracingSceneBindings {
     /// Each sparse buffer's GPU buffer id, or `None` where it has not been created yet.
-    fn buffer_ids(&self) -> [Option<BufferId>; 9] {
+    fn buffer_ids(&self) -> [Option<BufferId>; 11] {
         [
             self.assets.materials.buffer().map(Buffer::id),
             self.instances.transforms.buffer().map(Buffer::id),
@@ -77,6 +77,8 @@ impl RaytracingSceneBindings {
                 .previous_frame_id_translations
                 .buffer()
                 .map(Buffer::id),
+            self.lights.weights.weights_buffer().map(Buffer::id),
+            self.lights.weights.cdf_buffer().map(Buffer::id),
         ]
     }
 
@@ -198,6 +200,18 @@ impl RaytracingSceneBindings {
             .buffer()
             .unwrap()
             .as_entire_buffer_binding();
+        let light_weights = self
+            .lights
+            .weights
+            .weights_buffer()
+            .unwrap()
+            .as_entire_buffer_binding();
+        let light_cdf = self
+            .lights
+            .weights
+            .cdf_buffer()
+            .unwrap()
+            .as_entire_buffer_binding();
 
         let current = self.tlas.structures[current_index].as_ref().unwrap();
         let previous = self.tlas.structures[current_index ^ 1]
@@ -225,6 +239,8 @@ impl RaytracingSceneBindings {
                 translations,
                 dfg_view,
                 dfg_sampler,
+                light_weights,
+                light_cdf,
             )),
         )
     }

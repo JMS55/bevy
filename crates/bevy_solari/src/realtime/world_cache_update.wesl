@@ -1,8 +1,9 @@
 import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance;
 import bevy_pbr::render::utils::{rand_f, rand_range_u, sample_cosine_hemisphere};
+import bevy_render::maths::PI;
 import package::realtime::presample_light_tiles::unpack_resolved_light_sample;
 import package::scene::sampling::{calculate_resolved_light_contribution, trace_visibility};
-import package::scene::bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN};
+import package::scene::bindings::{trace_ray, resolve_ray_hit_full, sample_environment_light, RAY_T_MIN, RAY_T_MAX};
 import package::realtime::world_cache_query::query_world_cache;
 import package::realtime::bindings::{
     light_tile_resolved_samples,
@@ -39,12 +40,27 @@ fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     if rand_f(&rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count) { return; }
 
     let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
-    let ray = trace_ray(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, constants.world_cache_max_gi_ray_distance, RAY_FLAG_NONE);
+    // Trace the full distance so that only a true miss reads as sky. Hits beyond
+    // world_cache_max_gi_ray_distance still contribute nothing, as before; the cost is a little
+    // extra traversal on rays that would otherwise have been cut short. Cutting the ray short
+    // instead would make every far wall leak sky into the cache.
+    let ray = trace_ray(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
     if ray.kind != RAY_QUERY_INTERSECTION_NONE {
+        if ray.t > constants.world_cache_max_gi_ray_distance { return; }
+
         let ray_hit = resolve_ray_hit_full(ray);
         let cell_life = atomicLoad(&world_cache.life[cell_index]);
         let radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, cell_life, &rng);
         world_cache.active_cells_new_radiance[active_cell_id.x] += ray_hit.material.base_color * radiance;
+    } else {
+        // Cells store irradiance (the integral of incoming radiance times cosine), which the cosine
+        // hemisphere estimator turns into L * cos / (cos / PI) = L * PI. For a hit, L is the hit's
+        // outgoing radiance (base_color / PI) * cached_irradiance, and the PI cancels into the
+        // base_color factor above. A miss has no surface, so the PI stays.
+        //
+        // BRDF (cosine) sampling is the only strategy that can reach the environment here, so its
+        // MIS weight is 1. Environment NEE is a follow-up.
+        world_cache.active_cells_new_radiance[active_cell_id.x] += PI * sample_environment_light(ray_direction);
     }
 }
 

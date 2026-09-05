@@ -3,7 +3,7 @@ import bevy_pbr::render::utils::{rand_f, rand_vec2f};
 import bevy_render::view::View;
 import package::scene::brdf::{evaluate_brdf, evaluate_and_sample_brdf, brdf_pdf, F_AB};
 import package::scene::sampling::{sample_random_light, random_emissive_light_pdf, power_heuristic};
-import package::scene::bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN, RAY_T_MAX, MIRROR_ROUGHNESS_THRESHOLD};
+import package::scene::bindings::{trace_ray, resolve_ray_hit_full, sample_environment_light, RAY_T_MIN, RAY_T_MAX, MIRROR_ROUGHNESS_THRESHOLD};
 
 enable wgpu_ray_query;
 
@@ -84,7 +84,14 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let rr = saturate(luminance(throughput));
             if rand_f(&rng) >= rr { break; }
             throughput /= rr;
-        } else { break; }
+        } else {
+            // BRDF sampling is the only strategy that can reach the environment (there is no
+            // environment NEE yet), so its MIS weight is 1. throughput already includes this
+            // segment's brdf*cos/pdf, and is 1 for a primary ray, so the environment also becomes
+            // the visible sky. Exposure is applied once to radiance below.
+            radiance += throughput * sample_environment_light(ray_direction);
+            break;
+        }
     }
 
     // Camera exposure

@@ -6,7 +6,7 @@ import package::scene::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf,
 import package::realtime::presample_light_tiles::unpack_resolved_light_sample;
 import package::realtime::bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view};
 import package::scene::sampling::{calculate_resolved_light_contribution, isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility};
-import package::scene::bindings::{light_sources, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
+import package::scene::bindings::{light_sources, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, sample_environment_light, trace_ray};
 import package::realtime::world_cache_query::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
 @if(DLSS_RR_GUIDE_BUFFERS)
@@ -106,6 +106,28 @@ fn generate_initial_path(world_position: vec3<f32>, world_normal: vec3<f32>, mat
             if !psr.finished && !next_bounce.diffuse_selected {
                 psr_environment_miss(pixel_id, wo);
             }
+
+            // BRDF sampling is the only strategy that can reach the environment (there is no
+            // environment NEE yet), so its MIS weight is 1. Shade it straight into radiance instead
+            // of making it a reservoir candidate; environment NEE and reservoir candidates are a
+            // follow-up.
+            //
+            // The throughput update below the hit test has not run yet, so next_bounce.throughput
+            // (the brdf*cos/pdf of this segment) still has to be applied by hand. That makes a
+            // bounce-0 miss exactly x1_brdf/pdf * env, which is what a bounce-0 emissive candidate
+            // resolves to at shade time (its target function is x1_brdf * emissive and its
+            // contribution weight is 1/pdf). radiance is added to the pixel unscaled by restir.wesl
+            // / no_restir.wesl, before the single exposure multiply they both apply.
+            var environment_throughput = path.throughput_past_first_hit * next_bounce.throughput;
+            @if(RESTIR) {
+                // Past bounce 0, throughput_past_first_hit has the primary brdf*cos divided out so
+                // that it can be re-applied at shade time. Multiply it back in, exactly like the
+                // russian roulette below does, since nothing re-applies it for radiance.
+                if bounce > 0u {
+                    environment_throughput *= max(path.x1_brdf, vec3(0.0001));
+                }
+            }
+            path.radiance += environment_throughput * sample_environment_light(next_bounce.wi);
 
             break;
         }

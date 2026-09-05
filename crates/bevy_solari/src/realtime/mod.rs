@@ -168,11 +168,15 @@ pub struct SolariLighting {
     /// per frame. Lower values are faster but noisier.
     pub world_cache_direct_light_sample_count: u32,
 
-    /// Maximum distance to trace GI rays between two world cache cells.
+    /// Maximum distance to gather indirect light from between two world cache cells.
     ///
     /// Higher values capture indirect light from farther away for more accurate
-    /// GI at the cost of longer (more expensive) ray traversal and increased noise.
-    /// Lower values are faster and less noisy but may miss distant lighting.
+    /// GI at the cost of increased noise. Lower values are less noisy but may miss
+    /// distant lighting.
+    ///
+    /// Surfaces hit beyond this distance contribute nothing. Rays are still traced
+    /// to their full length, so only rays that truly escape the scene pick up
+    /// environment lighting; distant walls never read as sky.
     pub world_cache_max_gi_ray_distance: f32,
 
     /// Soft upper limit on the number of world cache cells to update each frame.

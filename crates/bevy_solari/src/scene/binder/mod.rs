@@ -8,7 +8,7 @@ mod tlas_build;
 
 use self::assets::{AssetState, MAX_TEXTURE_COUNT};
 pub use self::bind_group::prepare_raytracing_scene_bind_group;
-use self::bind_group::BindGroupCacheState;
+use self::bind_group::{BindGroupCacheState, GpuEnvironmentLight};
 use self::instances::{
     ChangedInstanceFilter, InstanceInputs, InstanceQueryData, InstanceState, MAX_MESH_SLAB_COUNT,
 };
@@ -50,6 +50,9 @@ pub struct RaytracingSceneBindings {
     lights: LightState,
     tlas: TlasState,
     bind_groups: BindGroupCacheState,
+    /// Filtering, clamp-to-edge sampler for the environment light cubemap.
+    environment_light_sampler: Sampler,
+    environment_light_buffer: StorageBuffer<GpuEnvironmentLight>,
 }
 
 impl RaytracingSceneBindings {
@@ -86,9 +89,28 @@ impl FromWorld for RaytracingSceneBindings {
                     storage_buffer_read_only_sized(false, None),
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
+                    texture_cube(TextureSampleType::Float { filterable: true }),
+                    sampler(SamplerBindingType::Filtering),
+                    // A storage buffer rather than a uniform: wgpu forbids mixing uniform buffers
+                    // and binding arrays in one bind group
+                    storage_buffer_read_only_sized(false, None),
                 ),
             ),
         );
+
+        let environment_light_sampler = render_device.create_sampler(&SamplerDescriptor {
+            label: Some("solari_environment_light_sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
+        let mut environment_light_buffer = StorageBuffer::<GpuEnvironmentLight>::default();
+        environment_light_buffer.set_label(Some("solari_environment_light"));
 
         Self {
             bind_group: None,
@@ -98,6 +120,8 @@ impl FromWorld for RaytracingSceneBindings {
             lights: LightState::new(),
             tlas: TlasState::new(render_device),
             bind_groups: BindGroupCacheState::new(render_device),
+            environment_light_sampler,
+            environment_light_buffer,
         }
     }
 }

@@ -73,6 +73,17 @@ struct DirectionalLight {
 
 const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 
+/// The scene's environment (sky) light. Field order and types must match `GpuEnvironmentLight` in
+/// `binder/bind_group.rs`.
+struct EnvironmentLight {
+    /// Rotates a world space direction into the cubemap's space, before the cubemap Z flip
+    light_from_world: mat3x3<f32>,
+    /// Multiplier turning the cubemap's texels into cd/m^2
+    intensity: f32,
+    /// 0 when the scene has no environment light, in which case environment_map is a dummy texture
+    present: u32,
+}
+
 @group(0) @binding(0) var<storage> vertex_buffers: binding_array<VertexBuffer>;
 @group(0) @binding(1) var<storage> index_buffers: binding_array<IndexBuffer>;
 @group(0) @binding(2) var textures: binding_array<texture_2d<f32>>;
@@ -89,6 +100,10 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(13) var<storage> previous_frame_light_id_translations: array<u32>;
 @group(0) @binding(14) var brdf_dfg_lut: texture_2d<f32>;
 @group(0) @binding(15) var brdf_dfg_lut_sampler: sampler;
+@group(0) @binding(16) var environment_map: texture_cube<f32>;
+@group(0) @binding(17) var environment_map_sampler: sampler;
+// Storage rather than uniform: wgpu forbids uniform buffers in a bind group with binding arrays
+@group(0) @binding(18) var<storage> environment_light: EnvironmentLight;
 
 const RAY_T_MIN = 0.001f;
 const RAY_T_MAX = 100000.0f;
@@ -113,6 +128,23 @@ fn trace_ray_previous_frame(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray
 
 fn sample_texture(id: u32, uv: vec2<f32>) -> vec3<f32> {
     return textureSampleLevel(textures[id], samplers[id], uv, 0.0).rgb; // TODO: Mipmap
+}
+
+/// Radiance arriving from the environment (sky) along `world_direction`.
+///
+/// The result is in cd/m^2 before exposure, the same units as `ResolvedMaterial::emissive`.
+/// Returns zero when the scene has no environment light.
+fn sample_environment_light(world_direction: vec3<f32>) -> vec3<f32> {
+    if environment_light.present == 0u { return vec3(0.0); }
+
+    // Same convention as bevy_pbr's compute_cubemap_sample_dir: rotate the world space direction by
+    // the inverse of the environment light's rotation (baked into light_from_world), then negate Z
+    // because cubemaps are left-handed.
+    var sample_direction = environment_light.light_from_world * world_direction;
+    sample_direction.z = -sample_direction.z;
+
+    // Mip 0 of a GGX-prefiltered specular map is unfiltered radiance, so mip 0 is always correct
+    return textureSampleLevel(environment_map, environment_map_sampler, sample_direction, 0.0).rgb * environment_light.intensity;
 }
 
 struct ResolvedMaterial {

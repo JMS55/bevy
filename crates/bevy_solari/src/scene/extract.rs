@@ -1,5 +1,7 @@
 use super::{RaytracingMesh3d, RaytracingSceneBindings};
-use bevy_asset::{AssetEvent, AssetId, Assets};
+use crate::{pathtracer::Pathtracer, realtime::SolariLighting};
+use bevy_asset::{AssetEvent, AssetId, Assets, Handle};
+use bevy_camera::Camera;
 use bevy_ecs::{
     lifecycle::RemovedComponents,
     message::MessageReader,
@@ -7,10 +9,15 @@ use bevy_ecs::{
     resource::Resource,
     system::{Commands, Query, Res, ResMut},
 };
+use bevy_image::Image;
+use bevy_light::{EnvironmentMapLight, GeneratedEnvironmentMapLight};
+use bevy_math::Quat;
 use bevy_pbr::{MeshMaterial3d, PreviousGlobalTransform, StandardMaterial};
 use bevy_platform::collections::HashMap;
 use bevy_render::{sync_world::RenderEntity, Extract};
 use bevy_transform::components::GlobalTransform;
+use bevy_utils::once;
+use tracing::warn;
 
 /// Creates or removes components in the render world related to raytracing instances.
 pub fn extract_raytracing_scene_structural(
@@ -145,4 +152,70 @@ pub fn extract_raytracing_material_assets(
             AssetEvent::Unused { .. } | AssetEvent::LoadedWithDependencies { .. } => {}
         }
     }
+}
+
+/// The environment (sky) light for the raytraced scene, mirrored into the render world.
+///
+/// Solari's scene bindings are view-independent, so only a single environment light is supported
+/// for the whole scene. Only lights attached directly to a camera count; light probes are ignored.
+#[derive(Resource, Default, Clone, PartialEq)]
+pub struct ExtractedEnvironmentLight {
+    /// Radiance cubemap, or `None` when no camera has an environment light this frame.
+    pub cubemap: Option<Handle<Image>>,
+    /// Scale factor turning the cubemap's texels into cd/m^2.
+    pub intensity: f32,
+    /// World space rotation applied to the cubemap.
+    pub rotation: Quat,
+}
+
+/// Finds the environment light to use for the raytraced scene, if any.
+pub fn extract_raytracing_environment_light(
+    cameras: Extract<
+        Query<
+            (
+                &Camera,
+                Option<&GeneratedEnvironmentMapLight>,
+                Option<&EnvironmentMapLight>,
+            ),
+            Or<(With<SolariLighting>, With<Pathtracer>)>,
+        >,
+    >,
+    mut environment_light: ResMut<ExtractedEnvironmentLight>,
+) {
+    let mut found = ExtractedEnvironmentLight::default();
+
+    for (camera, generated, prefiltered) in &cameras {
+        if !camera.is_active {
+            continue;
+        }
+
+        // Prefer `GeneratedEnvironmentMapLight`, whose `environment_map` is the raw unfiltered
+        // source cubemap. `AtmosphereEnvironmentMapLight` inserts one of these, so the atmosphere
+        // works without any extra handling. Otherwise fall back to the GGX-prefiltered specular map
+        // of an `EnvironmentMapLight`, whose mip 0 is unfiltered radiance.
+        let camera_light = match (generated, prefiltered) {
+            (Some(generated), _) => ExtractedEnvironmentLight {
+                cubemap: Some(generated.environment_map.clone()),
+                intensity: generated.intensity,
+                rotation: generated.rotation,
+            },
+            (None, Some(prefiltered)) => ExtractedEnvironmentLight {
+                cubemap: Some(prefiltered.specular_map.clone()),
+                intensity: prefiltered.intensity,
+                rotation: prefiltered.rotation,
+            },
+            (None, None) => continue,
+        };
+
+        if found.cubemap.is_none() {
+            found = camera_light;
+        } else if found != camera_light {
+            once!(warn!(
+                "bevy_solari only supports a single environment light for the whole scene, but \
+                 multiple cameras have differing environment lights. Using the first one found."
+            ));
+        }
+    }
+
+    *environment_light = found;
 }

@@ -43,6 +43,7 @@ struct Material {
     base_color_texture_id: u32,
     emissive_texture_id: u32,
     metallic_roughness_texture_id: u32,
+
     base_color: vec3<f32>,
     perceptual_roughness: f32,
     emissive: vec3<f32>,

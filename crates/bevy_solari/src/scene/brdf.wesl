@@ -117,7 +117,6 @@ fn evaluate_diffuse_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>, 
 fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> vec3<f32> {
     let H = normalize(wi + wo);
     let NdotL = dot(world_normal, wi);
-    // Rounding can push NdotH above 1.0 when wi ~= wo, which makes 1 - NdotH^2 negative in D_GGX
     let NdotH = min(dot(world_normal, H), 1.0);
     let LdotH = dot(wi, H);
     let NdotV = dot(world_normal, wo);
@@ -127,7 +126,6 @@ fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>,
     let F0_dielectric = calculate_F0_dielectric(vec3(material.reflectance));
 
     if material.roughness <= MIRROR_ROUGHNESS_THRESHOLD {
-        // Must match the mirror test in ggx_vndf_pdf exactly, or NEE and BRDF sampling double count the delta lobe
         let mirror_wi = 2.0 * NdotV * world_normal - wo;
         if distance(mirror_wi, wi) < 0.0001 {
             let F_metal = fresnel(F0_metal, LdotH);
@@ -143,8 +141,8 @@ fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>,
     let F_metal = fresnel(F0_metal, LdotH);
     let F_dielectric = fresnel(F0_dielectric, LdotH);
     return mix(specular_multiscatter(D, Vs, F_dielectric, F0_dielectric, F_ab, 1.0),
-               specular_multiscatter(D, Vs, F_metal, F0_metal, F_ab, 1.0),
-               material.metallic) * NdotL;
+        specular_multiscatter(D, Vs, F_metal, F0_metal, F_ab, 1.0),
+        material.metallic) * NdotL;
 }
 
 fn brdf_pdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> f32 {
@@ -169,12 +167,10 @@ fn brdf_pdf(wo: vec3<f32>, wi: vec3<f32>, world_normal: vec3<f32>, material: Res
 }
 
 fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
-    // pow() of a negative base is NaN, and LdotH can round above 1.0
     return f0 + (1.0 - f0) * pow(saturate(1.0 - LdotH), 5.0);
 }
 
 // Scale/bias approximation
 fn F_AB(perceptual_roughness: f32, NdotV: f32) -> vec2<f32> {
-    // Keep F_ab positive: lobe_reflectances and specular_multiscatter divide by F_ab.x + F_ab.y
     return max(textureSampleLevel(brdf_dfg_lut, brdf_dfg_lut_sampler, vec2<f32>(NdotV, perceptual_roughness), 0.0).rg, vec2(0.00005));
 }

@@ -131,6 +131,8 @@ fn replace_primary_surface(
     let path_length = primary_distance + psr.reflection_length;
 
     if psr.replace_fully && 2.0 * reflector_curvature(pixel_id, primary_normal) * psr.reflection_length > MAX_VIRTUAL_DEPTH_JITTER * path_length {
+        // Too curved to track the reflection; fall back to the surface's own motion so the guide is not stale
+        textureStore(specular_motion_vectors, pixel_id, vec4(textureLoad(motion_vectors, pixel_id).xy, vec2(0.0)));
         return;
     }
 

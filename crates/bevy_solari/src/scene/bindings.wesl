@@ -51,12 +51,16 @@ struct Material {
     flags: u32,
     uv_translation: vec2<f32>,
     uv_transform: mat2x2<f32>,
+    alpha: f32,
+    alpha_cutoff: f32,
+    _padding: vec2<f32>,
 }
 
 const TEXTURE_MAP_NONE = 0xFFFFFFFFu;
 
 const MATERIAL_FLAG_DOUBLE_SIDED = 1u << 0u;
 const MATERIAL_FLAG_FLIP_NORMAL_MAP_Y = 1u << 1u;
+const MATERIAL_FLAG_ALPHA_MASK = 1u << 2u;
 
 const MIRROR_ROUGHNESS_THRESHOLD = 0.001f;
 
@@ -107,11 +111,18 @@ const RAY_T_MAX = 100000.0f;
 
 const RAY_NO_CULL = 0xFFu;
 
+// Opaque BLAS commit their hits during traversal. Non-opaque BLAS hand their triangles back as
+// candidates, which are alpha tested and committed here.
 fn trace_ray(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> RayIntersection {
     let ray = RayDesc(ray_flag, RAY_NO_CULL, ray_t_min, ray_t_max, ray_origin, ray_direction);
     var rq: ray_query;
     rayQueryInitialize(&rq, tlas, ray);
-    rayQueryProceed(&rq);
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind == RAY_QUERY_INTERSECTION_TRIANGLE && passes_alpha_test(candidate) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
     return rayQueryGetCommittedIntersection(&rq);
 }
 
@@ -119,12 +130,40 @@ fn trace_ray_previous_frame(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray
     let ray = RayDesc(ray_flag, RAY_NO_CULL, ray_t_min, ray_t_max, ray_origin, ray_direction);
     var rq: ray_query;
     rayQueryInitialize(&rq, previous_frame_tlas, ray);
-    rayQueryProceed(&rq);
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind == RAY_QUERY_INTERSECTION_TRIANGLE && passes_alpha_test(candidate) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
     return rayQueryGetCommittedIntersection(&rq);
 }
 
+fn passes_alpha_test(candidate: RayIntersection) -> bool {
+    let instance_id = candidate.instance_custom_data;
+    let material = &materials[material_ids[instance_id]];
+
+    // The previous frame's TLAS can still have an instance on its non-opaque BLAS after its
+    // material stops alpha masking
+    if ((*material).flags & MATERIAL_FLAG_ALPHA_MASK) == 0u { return true; }
+
+    var alpha = (*material).alpha;
+    if (*material).base_color_texture_id != TEXTURE_MAP_NONE {
+        let vertices = load_vertices(geometry_ids[instance_id], candidate.primitive_index);
+        let barycentrics = vec3(1.0 - candidate.barycentrics.x - candidate.barycentrics.y, candidate.barycentrics);
+        let mesh_uv = mat3x2(vertices[0].uv, vertices[1].uv, vertices[2].uv) * barycentrics;
+        let uv = (*material).uv_transform * mesh_uv + (*material).uv_translation;
+        alpha *= sample_texture_rgba((*material).base_color_texture_id, uv).a;
+    }
+    return alpha >= (*material).alpha_cutoff;
+}
+
 fn sample_texture(id: u32, uv: vec2<f32>) -> vec3<f32> {
-    return textureSampleLevel(textures[id], samplers[id], uv, 0.0).rgb; // TODO: Mipmap
+    return sample_texture_rgba(id, uv).rgb;
+}
+
+fn sample_texture_rgba(id: u32, uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(textures[id], samplers[id], uv, 0.0); // TODO: Mipmap
 }
 
 struct ResolvedMaterial {
@@ -153,13 +192,22 @@ fn resolve_material(material: Material, uv: vec2<f32>) -> ResolvedMaterial {
     var m: ResolvedMaterial;
 
     m.base_color = material.base_color.rgb;
+    var alpha = material.alpha;
     if material.base_color_texture_id != TEXTURE_MAP_NONE {
-        m.base_color *= sample_texture(material.base_color_texture_id, uv);
+        let base_color = sample_texture_rgba(material.base_color_texture_id, uv);
+        m.base_color *= base_color.rgb;
+        alpha *= base_color.a;
     }
 
     m.emissive = material.emissive.rgb;
     if material.emissive_texture_id != TEXTURE_MAP_NONE {
         m.emissive *= sample_texture(material.emissive_texture_id, uv);
+    }
+
+    // Ray hits have already passed the alpha test, so this only catches emissive mesh light samples
+    // landing in a cutout. Emitting nothing there keeps light sampling unbiased.
+    if (material.flags & MATERIAL_FLAG_ALPHA_MASK) != 0u && alpha < material.alpha_cutoff {
+        m.emissive = vec3(0.0);
     }
 
     m.reflectance = material.reflectance;

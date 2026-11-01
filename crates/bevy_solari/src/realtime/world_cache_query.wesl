@@ -10,61 +10,105 @@ enable wgpu_ray_query;
 
 /// Maximum amount of frames a cell can live for without being queried
 const WORLD_CACHE_CELL_LIFETIME: u32 = 10u;
-/// Maximum amount of attempts to find a cache entry after a hash collision
-const WORLD_CACHE_MAX_SEARCH_STEPS: u32 = 3u;
+/// How many slots past a cell's home slot it can end up in, after hash collisions
+const WORLD_CACHE_MAX_SEARCH_STEPS: u32 = 16u;
 
 /// Marker value for an empty cell
 const WORLD_CACHE_EMPTY_CELL: u32 = 0u;
 
+/// Marker for a cell that isn't in the cache
+const WORLD_CACHE_CELL_NOT_FOUND: u32 = 0xFFFFFFFFu;
+
 @if(!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER)
-fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, ray_t: f32, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
-    var world_position = world_position_in;
-    var cell_size = get_cell_size(world_position, view_position, ray_t, rng);
+fn query_world_cache(world_position: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
+    let cell_size = get_cell_size(world_position, view_position, rng);
+    let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));
 
 @if(!NO_JITTER_WORLD_CACHE) {
     // Jitter query point, which essentially blurs the cache a bit so it's not so grid-like
     // https://tomclabault.github.io/blog/2025/regir, jitter_world_position_tangent_plane
     let TBN = orthonormalize(world_normal);
     let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
-    world_position += offset.x * TBN[0] + offset.y * TBN[1];
-    cell_size = get_cell_size(world_position, view_position, ray_t, rng);
+    let jittered_world_position = world_position + offset.x * TBN[0] + offset.y * TBN[1];
+    let jittered_cell_size = get_cell_size(jittered_world_position, view_position, rng);
+
+    // Only look up cells at the jittered point. The jittered point can be off the surface, or behind
+    // it, so a cell inserted there would shoot its rays from the wrong place. Misses fall back to
+    // the cell at the real point below, which can be inserted.
+    let jittered_position_quantized = bitcast<vec3<u32>>(quantize_position(jittered_world_position, jittered_cell_size));
+    let jittered_key = find_world_cache_cell(jittered_position_quantized, world_normal_quantized);
+    if jittered_key != WORLD_CACHE_CELL_NOT_FOUND {
+        keep_world_cache_cell_alive(jittered_key, cell_lifetime);
+        return world_cache.radiance[jittered_key].rgb;
+    }
 }
 
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
-    let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));
-    var key = compute_key(world_position_quantized, world_normal_quantized);
+    let key = find_world_cache_cell(world_position_quantized, world_normal_quantized);
+    if key != WORLD_CACHE_CELL_NOT_FOUND {
+        // Cache entry already exists - get radiance
+        keep_world_cache_cell_alive(key, cell_lifetime);
+        return world_cache.radiance[key].rgb;
+    }
+
+    // Not found - insert into the first empty slot
+    let home_key = compute_key(world_position_quantized, world_normal_quantized);
     let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
-
     for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
+        let key = wrap_key(home_key + i);
+        if atomicLoad(&world_cache.checksums[key]) != WORLD_CACHE_EMPTY_CELL { continue; }
+
         let cas = atomicCompareExchangeWeak(&world_cache.checksums[key], WORLD_CACHE_EMPTY_CELL, checksum);
-        let existing_checksum = cas.old_value;
-
-        // Cell already exists or is empty - reset lifetime
-        if existing_checksum == checksum || existing_checksum == WORLD_CACHE_EMPTY_CELL {
-            @if(!WORLD_CACHE_QUERY_ATOMIC_MAX_LIFETIME)
-            atomicStore(&world_cache.life[key], cell_lifetime);
-            @else
-            atomicMax(&world_cache.life[key], cell_lifetime);
-        }
-
-        if existing_checksum == checksum {
-            // Cache entry already exists - get radiance
-            return world_cache.radiance[key].rgb;
-        } else if existing_checksum == WORLD_CACHE_EMPTY_CELL && cas.exchanged {
+        if cas.exchanged {
             // Cell is empty - initialize it
+            keep_world_cache_cell_alive(key, cell_lifetime);
             world_cache.geometry_data[key].world_position = world_position;
             world_cache.geometry_data[key].world_normal = world_normal;
             return vec3(0.0);
-        } else {
-            // Collision - linear probe to next entry
-            key += 1u;
+        }
+        if cas.old_value == checksum {
+            // Another thread inserted the same cell first
+            keep_world_cache_cell_alive(key, cell_lifetime);
+            return world_cache.radiance[key].rgb;
         }
     }
 
     return vec3(0.0);
 }
 
-fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>, ray_t: f32, rng: ptr<function, u32>) -> f32 {
+/// Finds a cell's slot, or returns `WORLD_CACHE_CELL_NOT_FOUND`.
+///
+/// Searches the whole probe window, rather than stopping at the first empty slot. Cells that decay
+/// leave empty slots in the middle of probe sequences, and stopping there would miss cells stored
+/// past them, which would then be inserted again as duplicates starting over from no radiance.
+@if(!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER)
+fn find_world_cache_cell(world_position_quantized: vec3<u32>, world_normal_quantized: vec3<u32>) -> u32 {
+    let home_key = compute_key(world_position_quantized, world_normal_quantized);
+    let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
+    for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
+        let key = wrap_key(home_key + i);
+        if atomicLoad(&world_cache.checksums[key]) == checksum {
+            return key;
+        }
+    }
+    return WORLD_CACHE_CELL_NOT_FOUND;
+}
+
+/// Resets a cell's lifetime, writing only when it changes.
+@if(!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER)
+fn keep_world_cache_cell_alive(key: u32, cell_lifetime: u32) {
+    @if(!WORLD_CACHE_QUERY_ATOMIC_MAX_LIFETIME) {
+        if atomicLoad(&world_cache.life[key]) != cell_lifetime {
+            atomicStore(&world_cache.life[key], cell_lifetime);
+        }
+    } @else {
+        if atomicLoad(&world_cache.life[key]) < cell_lifetime {
+            atomicMax(&world_cache.life[key], cell_lifetime);
+        }
+    }
+}
+
+fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>, rng: ptr<function, u32>) -> f32 {
     let camera_distance = distance(view_position, world_position) / constants.world_cache_position_lod_scale;
     let lod_f = log2(1.0 + camera_distance);
     let lod_fract = fract(lod_f);

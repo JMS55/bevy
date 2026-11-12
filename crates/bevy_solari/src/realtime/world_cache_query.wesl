@@ -56,7 +56,13 @@ fn query_world_cache(world_position: vec3<f32>, world_normal: vec3<f32>, view_po
     let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
     for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
         let key = wrap_key(home_key + i);
-        if atomicLoad(&world_cache.checksums[key]) != WORLD_CACHE_EMPTY_CELL { continue; }
+        let existing_checksum = atomicLoad(&world_cache.checksums[key]);
+        if existing_checksum == checksum {
+            // Another thread inserted the same cell since the lookup above
+            keep_world_cache_cell_alive(key, cell_lifetime);
+            return world_cache.radiance[key].rgb;
+        }
+        if existing_checksum != WORLD_CACHE_EMPTY_CELL { continue; }
 
         let cas = atomicCompareExchangeWeak(&world_cache.checksums[key], WORLD_CACHE_EMPTY_CELL, checksum);
         if cas.exchanged {

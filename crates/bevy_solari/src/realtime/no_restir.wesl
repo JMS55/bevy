@@ -1,7 +1,8 @@
 import package::realtime::gbuffer_utils::gpixel_resolve;
 import package::realtime::initial_path::generate_initial_path;
 import package::realtime::bindings::{constants, depth_buffer, gbuffer, view, view_output};
-import package::scene::bindings::RAY_T_MAX;
+import package::scene::bindings::{RAY_T_MAX, RAY_T_MIN};
+import package::realtime::light_grid::light_grid_visualization;
 import package::realtime::world_cache_query::{query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
 enable wgpu_ray_query;
@@ -24,6 +25,12 @@ fn initial_and_shade(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(gl
     pixel_color += surface.material.emissive;
     pixel_color *= view.exposure;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+
+    @if(LIGHT_GRID)
+    if constants.light_grid_visualization != 0u {
+        let visualization = light_grid_visualization(surface.world_position + surface.world_normal * RAY_T_MIN, surface.world_normal, constants.light_grid_visualization);
+        textureStore(view_output, global_id.xy, vec4(visualization, 1.0));
+    }
 
     @if(VISUALIZE_WORLD_CACHE)
     textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, RAY_T_MAX, WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));

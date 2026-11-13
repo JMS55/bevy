@@ -23,12 +23,17 @@ enable wgpu_ray_query;
 @group(1) @binding(10) var atmosphere_transmittance_lut: texture_2d<f32>;
 @group(1) @binding(11) var atmosphere_transmittance_sampler: sampler;
 @group(1) @binding(12) var<uniform> atmosphere: Atmosphere;
+@group(1) @binding(13) var<storage, read_write> light_grid: LightGrid;
+/// Every light grid cell's list of slots, see `weighted_cell_slot` in `light_grid.wesl`.
+@group(1) @binding(14) var<storage, read_write> light_grid_pool: array<u32>;
+@group(1) @binding(15) var<storage, read_write> light_bounds: array<LightBounds>;
+@group(1) @binding(16) var<storage, read_write> per_light_samples: PerLightSamples;
 
 @if(RESTIR) {
-@group(1) @binding(13) var previous_gbuffer: texture_2d<u32>;
-@group(1) @binding(14) var previous_depth_buffer: texture_depth_2d;
-@group(1) @binding(15) var<storage, read_write> reservoirs_a: array<Reservoir>;
-@group(1) @binding(16) var<storage, read_write> reservoirs_b: array<Reservoir>;
+@group(1) @binding(17) var previous_gbuffer: texture_2d<u32>;
+@group(1) @binding(18) var previous_depth_buffer: texture_depth_2d;
+@group(1) @binding(19) var<storage, read_write> reservoirs_a: array<Reservoir>;
+@group(1) @binding(20) var<storage, read_write> reservoirs_b: array<Reservoir>;
 }
 
 @if(DLSS_RR_GUIDE_BUFFERS) {
@@ -63,9 +68,14 @@ struct SolariLightingSettings {
     reset: u32,
     /// Light ids `0..directional_light_count` are directional lights, and the rest local lights.
     directional_light_count: u32,
-    _padding0: u32,
-    _padding1: u32,
-    _padding2: u32,
+    light_grid_base_cell_size: f32,
+    light_grid_position_lod_scale: f32,
+    light_grid_contribution_threshold: f32,
+    light_grid_global_candidate_fraction: f32,
+    /// 0 = none, 1 = cells, 2 = lights per cell. See `light_grid_visualization`.
+    light_grid_visualization: u32,
+    light_grid_weighted_slots: u32,
+    light_grid_weight_ratio_cap: f32,
 }
 
 /// Directional lights have light ids `0..directional_light_count()`.
@@ -129,3 +139,64 @@ struct WorldCache {
     active_cell_indices: array<u32, constants::WORLD_CACHE_SIZE>,
     active_cells_count: u32,
 }
+
+/// Keep in sync with the light grid layout constants in `prepare.rs`.
+struct LightGrid {
+    checksums: array<atomic<u32>, constants::LIGHT_GRID_SIZE>,
+    life: array<atomic<u32>, constants::LIGHT_GRID_SIZE>,
+    /// Offset into `light_grid_pool` and slot count of each cell's list. A count of 0 means the
+    /// cell has no list, and the offset then holds why, see `LIGHT_GRID_NO_LIST_*`.
+    lists: array<vec2<u32>, constants::LIGHT_GRID_SIZE>,
+    /// Each cell's minimum corner and size.
+    bounds: array<vec4<f32>, constants::LIGHT_GRID_SIZE>,
+    pool_used: atomic<u32>,
+    live_cells: atomic<u32>,
+    overflowed_cells: atomic<u32>,
+    failed_queries: atomic<u32>,
+}
+
+/// Marker value for an empty light grid cell.
+const LIGHT_GRID_EMPTY_CELL: u32 = 0u;
+
+/// Why a light grid cell has no list, stored in its list offset when its slot count is 0.
+/// The cell was inserted this frame, and gets built next frame.
+const LIGHT_GRID_NO_LIST_NOT_BUILT: u32 = 0u;
+/// No light's contribution bound reaches the threshold.
+const LIGHT_GRID_NO_LIST_NO_LIGHTS: u32 = 1u;
+/// The pool ran out of space this frame.
+const LIGHT_GRID_NO_LIST_OUT_OF_POOL: u32 = 2u;
+/// Not a stored reason: the lookup gave up after too many hash collisions.
+const LIGHT_GRID_NO_LIST_TABLE_FULL: u32 = 3u;
+
+/// A sphere bounding a local light, and what its contribution is bounded by,
+/// see `light_contribution_bound` in `light_grid_build.wesl`.
+struct LightBounds {
+    center: vec3<f32>,
+    radius: f32,
+    /// Lights emit only in front of this plane, or in every direction if zero.
+    normal: vec3<f32>,
+    /// 0 for point lights.
+    area: f32,
+    /// Peak radiance for area lights, or intensity for point lights.
+    intensity: f32,
+    _padding0: f32,
+    _padding1: f32,
+    _padding2: f32,
+}
+
+/// Points presampled on every light each frame, `light_samples_per_light()` per light, in light id
+/// order. Light grid cell candidates pick a light from the cell's list, then one of its points,
+/// rather than resolving the light themselves. The points are shared by the whole screen, like the
+/// light tiles, so unlike points presampled per cell they don't make noise line up with cells.
+struct PerLightSamples {
+    light_samples: array<LightSample, constants::PER_LIGHT_SAMPLES_CAPACITY>,
+    resolved_light_samples: array<ResolvedLightSamplePacked, constants::PER_LIGHT_SAMPLES_CAPACITY>,
+}
+
+/// How many points each light gets in `per_light_samples`. Every light gets the same amount, as many
+/// as fit, up to `MAX_SAMPLES_PER_LIGHT`.
+fn light_samples_per_light() -> u32 {
+    return min(MAX_SAMPLES_PER_LIGHT, constants::PER_LIGHT_SAMPLES_CAPACITY / arrayLength(&light_sources));
+}
+
+const MAX_SAMPLES_PER_LIGHT: u32 = 1024u;

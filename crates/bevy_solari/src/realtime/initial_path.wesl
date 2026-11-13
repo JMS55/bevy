@@ -3,11 +3,12 @@ import bevy_pbr::render::utils::{rand_f, rand_range_u};
 import bevy_render::maths::PI;
 import bevy_render::utils::octahedral_encode;
 import package::scene::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB};
-import package::realtime::light_candidates::{generate_light_candidate, light_candidate_count, light_candidate_split, LightCandidateSplit};
-import package::realtime::bindings::{empty_reservoir, local_light_count, Reservoir, constants, view};
+import package::realtime::light_candidates::{emissive_hit_light_sample, generate_light_candidate, light_candidate_count, light_candidate_split, local_light_selection_pdf_sum, LightCandidateSplit};
+import package::realtime::light_grid::{light_grid_cell_at, LightGridCell};
+import package::realtime::bindings::{empty_reservoir, Reservoir, constants, view};
 import package::realtime::atmosphere::calculate_light_contribution;
 import package::scene::sampling::{isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility, sample_environment_map_light};
-import package::scene::bindings::{MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
+import package::scene::bindings::{MIRROR_ROUGHNESS_THRESHOLD, NO_LIGHT_ID, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
 import package::realtime::world_cache_query::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
 @if(DLSS_RR_GUIDE_BUFFERS)
@@ -90,9 +91,12 @@ fn generate_initial_path(world_position: vec3<f32>, world_normal: vec3<f32>, mat
         let NdotV = max(dot(path.normal, path.wo), 0.0001);
         let F_ab = F_AB(path.material.perceptual_roughness, NdotV);
 
+        // Shared by NEE and the MIS weight of emissive hits, which have to agree on the cell
+        let light_grid_cell = light_grid_cell_at(path.ray_origin);
+
         // Sample lights via NEE
         let di_samples = select(constants.secondary_local_light_samples, constants.primary_local_light_samples, bounce == 0u);
-        generate_nee_candidate(&path, F_ab, di_samples, workgroup_id, bounce, rng);
+        generate_nee_candidate(&path, F_ab, di_samples, light_grid_cell, workgroup_id, bounce, rng);
 
         // Sample the BRDF and trace the next ray
         let next_bounce = evaluate_and_sample_brdf(path.wo, path.normal, path.material, F_ab, rng);
@@ -163,7 +167,7 @@ fn generate_initial_path(world_position: vec3<f32>, world_normal: vec3<f32>, mat
 
         // Resample emissive hits
         if any(ray_hit.material.emissive > vec3(0.0)) && dot(ray_hit.world_normal, -next_bounce.wi) > 0.0 {
-            generate_emissive_candidate(&path, ray_hit, next_bounce.wi, p_brdf, ray.t, di_samples, bounce, rng);
+            generate_emissive_candidate(&path, ray_hit, next_bounce.wi, p_brdf, ray.t, di_samples, light_grid_cell, bounce, rng);
         }
 
         // Try terminating into the world cache
@@ -216,6 +220,7 @@ fn generate_nee_candidate(
     path: ptr<function, PathState>,
     F_ab: vec2<f32>,
     di_samples: u32,
+    light_grid_cell: LightGridCell,
     workgroup_id: vec2<u32>,
     bounce: u32,
     rng: ptr<function, u32>,
@@ -228,13 +233,13 @@ fn generate_nee_candidate(
     // pick is an unbiased estimate of its own set, and the two add up.
     //
     // Both picks go through one call site, so the RIS loop and shadow ray are only inlined once.
-    let split = light_candidate_split(di_samples);
+    let split = light_candidate_split(di_samples, light_grid_cell);
     for (var pick = 0u; pick < 2u; pick++) {
         let candidate_start = select(split.directional, 0u, pick == 0u);
         let candidate_end = select(light_candidate_count(split), split.directional, pick == 0u);
         if candidate_start == candidate_end { continue; }
 
-        let di = sample_light_ris((*path).ray_origin, (*path).normal, (*path).wo, (*path).material, F_ab, split, candidate_start, candidate_end, workgroup_id, bounce, rng);
+        let di = sample_light_ris((*path).ray_origin, (*path).normal, (*path).wo, (*path).material, F_ab, split, light_grid_cell, candidate_start, candidate_end, workgroup_id, bounce, rng);
         add_nee_sample(path, di, F_ab, p_nee, bounce, rng);
     }
 }
@@ -309,7 +314,7 @@ struct DiSample {
 }
 
 /// RIS over candidates `[candidate_start, candidate_end)`, see `LightCandidateSplit`.
-fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, split: LightCandidateSplit, candidate_start: u32, candidate_end: u32, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
+fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, split: LightCandidateSplit, light_grid_cell: LightGridCell, candidate_start: u32, candidate_end: u32, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y + bounce;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -322,8 +327,8 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
     var selected_inverse_solid_angle_pdf = 0.0;
     var selected_brdf_rays_can_hit = false;
     for (var i = candidate_start; i < candidate_end; i++) {
-        // Each candidate's inverse_pdf already includes its strategy's 1 / candidate count
-        let candidate = generate_light_candidate(i, split, light_tile_start, rng);
+        // Each candidate's inverse_pdf already includes its balance heuristic MIS weight
+        let candidate = generate_light_candidate(i, split, light_grid_cell, light_tile_start, rng);
         let resolved_light_sample = candidate.resolved_light_sample;
         let light_contribution = calculate_light_contribution(resolved_light_sample, ray_origin, normal);
         let brdf_current = evaluate_brdf(wo, light_contribution.wi, normal, material, F_ab);
@@ -360,16 +365,23 @@ fn generate_emissive_candidate(
     p_brdf: f32,
     ray_t: f32,
     di_samples: u32,
+    light_grid_cell: LightGridCell,
     bounce: u32,
     rng: ptr<function, u32>,
 ) {
     let NdotV_hit = max(dot(ray_hit.world_normal, -wi), 0.0001);
-    // The pdf of a local light candidate picking this point. Emissive meshes are local lights.
-    let area_pdf = 1.0 / (f32(max(local_light_count(), 1u)) * f32(ray_hit.triangle_count) * ray_hit.triangle_area);
-    let p_light = area_pdf * ray_t * ray_t / NdotV_hit;
+    // The pdf of the point given the light, times the summed pdf of every NEE candidate picking
+    // the light. Emissive meshes are local lights. Meshes that aren't lights can't be found by NEE.
+    let area_pdf = 1.0 / (f32(ray_hit.triangle_count) * ray_hit.triangle_area);
+    var selection_pdf_sum = 0.0;
+    var emissive_hit = LightSample(NULL_LIGHT_ID, 0u);
+    if ray_hit.light_id != NO_LIGHT_ID {
+        selection_pdf_sum = local_light_selection_pdf_sum(ray_hit.light_id, light_grid_cell, light_candidate_split(di_samples, light_grid_cell));
+        emissive_hit = emissive_hit_light_sample(ray_hit.light_id, area_pdf);
+    }
+    let p_light = area_pdf * selection_pdf_sum * ray_t * ray_t / NdotV_hit;
     let p_nee = nee_probability((*path).material);
-    let local_candidates = light_candidate_split(di_samples).local;
-    let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee * f32(local_candidates));
+    let emissive_mis_weight = power_heuristic(p_brdf, p_light * p_nee);
 
     @if(RESTIR) {
         if !(*path).x2_reusable {
@@ -384,7 +396,7 @@ fn generate_emissive_candidate(
 
             (*path).weight_sum += resampling_weight;
             if rand_f(rng) * (*path).weight_sum < resampling_weight {
-                (*path).reservoir.light_sample = LightSample(NULL_LIGHT_ID, bitcast<u32>(area_pdf));
+                (*path).reservoir.light_sample = emissive_hit;
                 (*path).reservoir.sample_point_world_position = (*path).x2_position;
                 (*path).reservoir.sample_point_world_normal = octahedral_encode((*path).x2_normal);
                 (*path).reservoir.radiance = ray_hit.material.emissive;

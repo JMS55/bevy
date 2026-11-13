@@ -2,6 +2,7 @@ import bevy_render::view::View;
 import bevy_pbr::atmosphere::types::Atmosphere;
 import bevy_pbr::prepass::bindings::PreviousViewUniforms;
 import package::scene::sampling::{LightSample, NULL_LIGHT_ID};
+import package::scene::bindings::light_sources;
 
 enable wgpu_ray_query;
 
@@ -49,17 +50,33 @@ fn load_motion_vector(pixel_id: vec2<u32>) -> vec2<f32> {
 /// state. Field order and types must match `SolariLightingUniforms` in `prepare.rs`.
 struct SolariLightingSettings {
     confidence_weight_cap: f32,
-    primary_di_samples: u32,
-    secondary_di_samples: u32,
+    primary_local_light_samples: u32,
+    secondary_local_light_samples: u32,
     max_bounces: u32,
     world_cache_max_temporal_samples: f32,
-    world_cache_direct_light_sample_count: u32,
+    world_cache_local_light_sample_count: u32,
     world_cache_max_gi_ray_distance: f32,
     world_cache_cell_updates_soft_target: u32,
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
+    /// Light ids `0..directional_light_count` are directional lights, and the rest local lights.
+    directional_light_count: u32,
+    _padding0: u32,
+    _padding1: u32,
+    _padding2: u32,
+}
+
+/// Directional lights have light ids `0..directional_light_count()`.
+fn directional_light_count() -> u32 {
+    return constants.directional_light_count;
+}
+
+/// Local (point, spot, rect, and emissive mesh) lights have light ids
+/// `directional_light_count()..directional_light_count() + local_light_count()`.
+fn local_light_count() -> u32 {
+    return arrayLength(&light_sources) - constants.directional_light_count;
 }
 
 /// Don't adjust the size of this struct without also adjusting `prepare::RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE`.

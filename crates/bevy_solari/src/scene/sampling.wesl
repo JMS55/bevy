@@ -167,6 +167,24 @@ fn generate_random_light_sample(rng: ptr<function, u32>) -> GenerateRandomLightS
     let light_count = arrayLength(&light_sources);
     let light_id = rand_range_u(light_count, rng);
 
+    var sample = generate_light_sample(light_id, rng);
+    sample.resolved_light_sample.inverse_pdf *= f32(light_count);
+    return sample;
+}
+
+/// Picks a uniformly random local (point, spot, rect, or emissive mesh) light, and a point on it.
+/// Directional lights have light ids `0..directional_light_count`, and local lights the rest.
+///
+/// Unlike `generate_random_light_sample`, `inverse_pdf` leaves out the probability of picking the light,
+/// so that callers can combine it with other ways of picking lights.
+fn generate_random_local_light_sample(directional_light_count: u32, rng: ptr<function, u32>) -> GenerateRandomLightSampleResult {
+    let local_light_count = arrayLength(&light_sources) - directional_light_count;
+    let light_id = directional_light_count + rand_range_u(local_light_count, rng);
+    return generate_light_sample(light_id, rng);
+}
+
+/// Picks a point on the given light. `inverse_pdf` is for the point, given the light.
+fn generate_light_sample(light_id: u32, rng: ptr<function, u32>) -> GenerateRandomLightSampleResult {
     let light_source = light_sources[light_id];
 
     var triangle_id = 0u;
@@ -177,10 +195,7 @@ fn generate_random_light_sample(rng: ptr<function, u32>) -> GenerateRandomLightS
     let seed = rand_u(rng);
     let light_sample = LightSample((light_id << 16u) | triangle_id, seed);
 
-    var resolved_light_sample = resolve_light_sample(light_sample, light_source);
-    resolved_light_sample.inverse_pdf *= f32(light_count);
-
-    return GenerateRandomLightSampleResult(light_sample, resolved_light_sample);
+    return GenerateRandomLightSampleResult(light_sample, resolve_light_sample(light_sample, light_source));
 }
 
 fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) -> ResolvedLightSample {

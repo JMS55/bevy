@@ -38,11 +38,14 @@ pub enum LightSourceId {
     RectLight(Entity),
 }
 
+/// Light ids, kept gap-free with directional lights first, so that shaders can sample directional
+/// and local (point, spot, rect, and emissive mesh) lights apart knowing only the directional count.
 #[derive(Default)]
 pub struct LightIndex {
     indices: HashMap<LightSourceId, u32>,
     ids: Vec<LightSourceId>,
     changed: HashSet<LightSourceId>,
+    directional_count: u32,
 }
 
 impl LightIndex {
@@ -54,40 +57,75 @@ impl LightIndex {
         self.ids.is_empty()
     }
 
+    /// Directional lights have ids `0..directional_count`, and local lights the rest.
+    pub fn directional_count(&self) -> u32 {
+        self.directional_count
+    }
+
     fn get(&self, id: &LightSourceId) -> Option<u32> {
         self.indices.get(id).copied()
     }
 
-    fn insert(&mut self, id: LightSourceId) -> u32 {
+    /// Inserts `id` if it isn't present, and returns its index.
+    ///
+    /// A new directional light takes the first local light's index, moving that light to the end.
+    /// `move_light(from, to)` is called for each move, which the caller has to mirror in `sources`.
+    fn insert(&mut self, id: LightSourceId, mut move_light: impl FnMut(u32, u32)) -> u32 {
         if let Some(&index) = self.indices.get(&id) {
             return index;
         }
 
-        let index = self.ids.len() as u32;
+        let mut index = self.ids.len() as u32;
         self.ids.push(id);
+        if matches!(id, LightSourceId::DirectionalLight(_)) {
+            let first_local = self.directional_count;
+            self.directional_count += 1;
+            if first_local != index {
+                self.move_id(first_local, index);
+                move_light(first_local, index);
+                index = first_local;
+            }
+        }
+        self.ids[index as usize] = id;
         self.indices.insert(id, index);
         self.changed.insert(id);
         index
     }
 
-    /// Removes `id` and reports both its old index and the old final index.
+    /// Removes `id`, filling its hole so that ids stay gap-free with directional lights first.
     ///
-    /// Only the ids tracked here are swapped down. When the two indices differ, the caller has to
-    /// mirror that swap in `sources`, copying the element at the old final index into the hole.
-    fn remove(&mut self, id: LightSourceId) -> Option<(u32, u32)> {
-        let index = self.indices.remove(&id)?;
+    /// A directional light's hole is filled with the last directional light, and that light's with
+    /// the last light. `move_light(from, to)` is called for each move, in order, which the caller
+    /// has to mirror in `sources`.
+    fn remove(&mut self, id: LightSourceId, mut move_light: impl FnMut(u32, u32)) {
+        let Some(mut hole) = self.indices.remove(&id) else {
+            return;
+        };
         self.changed.insert(id);
 
-        let last = self.ids.len() as u32 - 1;
-        self.ids.swap_remove(index as usize);
-
-        if index != last {
-            let moved = self.ids[index as usize];
-            self.indices.insert(moved, index);
-            self.changed.insert(moved);
+        if matches!(id, LightSourceId::DirectionalLight(_)) {
+            self.directional_count -= 1;
+            let last_directional = self.directional_count;
+            if hole != last_directional {
+                self.move_id(last_directional, hole);
+                move_light(last_directional, hole);
+            }
+            hole = last_directional;
         }
 
-        Some((index, last))
+        let last = self.ids.len() as u32 - 1;
+        if hole != last {
+            self.move_id(last, hole);
+            move_light(last, hole);
+        }
+        self.ids.pop();
+    }
+
+    fn move_id(&mut self, from: u32, to: u32) {
+        let moved = self.ids[from as usize];
+        self.ids[to as usize] = moved;
+        self.indices.insert(moved, to);
+        self.changed.insert(moved);
     }
 }
 
@@ -388,20 +426,22 @@ impl LightState {
     }
 
     pub fn add_light(&mut self, id: LightSourceId, source: GpuLightSource) {
-        let index = self.index.insert(id);
-        self.sources.grow_and_set(index, source);
+        let sources = &mut self.sources;
+        let index = self.index.insert(id, |from, to| {
+            let moved = sources.get(from);
+            sources.grow_and_set(to, moved);
+        });
+        sources.grow_and_set(index, source);
     }
 
-    /// Removes a light, moving the last one down into the hole so the array stays gap-free.
+    /// Removes a light, moving others down into the hole so the array stays gap-free, with
+    /// directional lights first.
     pub fn remove_light(&mut self, id: LightSourceId) {
-        let Some((index, last)) = self.index.remove(id) else {
-            return;
-        };
-
-        if index != last {
-            let source = self.sources.get(last);
-            self.sources.grow_and_set(index, source);
-        }
+        let sources = &mut self.sources;
+        self.index.remove(id, |from, to| {
+            let moved = sources.get(from);
+            sources.grow_and_set(to, moved);
+        });
     }
 
     /// Rolls the translation table over for a new frame.
@@ -469,16 +509,46 @@ mod tests {
 
     const ENTITY: Entity = Entity::PLACEHOLDER;
 
+    /// Inserts `id`, returning its index and the moves it made.
+    fn insert(lights: &mut LightIndex, id: LightSourceId) -> (u32, Vec<(u32, u32)>) {
+        let mut moves = Vec::new();
+        let index = lights.insert(id, |from, to| moves.push((from, to)));
+        (index, moves)
+    }
+
+    /// Removes `id`, returning the moves it made.
+    fn remove(lights: &mut LightIndex, id: LightSourceId) -> Vec<(u32, u32)> {
+        let mut moves = Vec::new();
+        lights.remove(id, |from, to| moves.push((from, to)));
+        moves
+    }
+
     #[test]
     fn light_index_keeps_sources_on_the_same_entity_independent() {
+        let emissive = LightSourceId::EmissiveMesh(ENTITY);
         let mut lights = LightIndex::default();
 
-        assert_eq!(lights.insert(LightSourceId::EmissiveMesh(ENTITY)), 0);
-        assert_eq!(lights.insert(LightSourceId::DirectionalLight(ENTITY)), 1);
-        assert_eq!(lights.insert(LightSourceId::PointLight(ENTITY)), 2);
-        assert_eq!(lights.insert(LightSourceId::SpotLight(ENTITY)), 3);
-        assert_eq!(lights.insert(LightSourceId::RectLight(ENTITY)), 4);
+        assert_eq!(insert(&mut lights, emissive), (0, vec![]));
+        // Directional lights come first, so the emissive mesh moves to the end
+        assert_eq!(
+            insert(&mut lights, LightSourceId::DirectionalLight(ENTITY)),
+            (0, vec![(0, 1)])
+        );
+        assert_eq!(lights.get(&emissive), Some(1));
+        assert_eq!(
+            insert(&mut lights, LightSourceId::PointLight(ENTITY)),
+            (2, vec![])
+        );
+        assert_eq!(
+            insert(&mut lights, LightSourceId::SpotLight(ENTITY)),
+            (3, vec![])
+        );
+        assert_eq!(
+            insert(&mut lights, LightSourceId::RectLight(ENTITY)),
+            (4, vec![])
+        );
         assert_eq!(lights.len(), 5);
+        assert_eq!(lights.directional_count(), 1);
     }
 
     #[test]
@@ -486,8 +556,8 @@ mod tests {
         let point = LightSourceId::PointLight(ENTITY);
         let mut lights = LightIndex::default();
 
-        assert_eq!(lights.insert(point), 0);
-        assert_eq!(lights.insert(point), 0);
+        assert_eq!(insert(&mut lights, point), (0, vec![]));
+        assert_eq!(insert(&mut lights, point), (0, vec![]));
         assert_eq!(lights.len(), 1);
     }
 
@@ -497,11 +567,11 @@ mod tests {
         let point = LightSourceId::PointLight(ENTITY);
         let rect = LightSourceId::RectLight(ENTITY);
         let mut lights = LightIndex::default();
-        lights.insert(emissive);
-        lights.insert(point);
-        lights.insert(rect);
+        insert(&mut lights, emissive);
+        insert(&mut lights, point);
+        insert(&mut lights, rect);
 
-        assert_eq!(lights.remove(emissive), Some((0, 2)));
+        assert_eq!(remove(&mut lights, emissive), vec![(2, 0)]);
         assert_eq!(lights.get(&emissive), None);
         assert_eq!(lights.get(&rect), Some(0));
         assert_eq!(lights.get(&point), Some(1));
@@ -513,20 +583,23 @@ mod tests {
         let directional = LightSourceId::DirectionalLight(ENTITY);
         let rect = LightSourceId::RectLight(ENTITY);
         let mut lights = LightIndex::default();
-        lights.insert(directional);
-        lights.insert(rect);
+        insert(&mut lights, directional);
+        insert(&mut lights, rect);
 
-        assert_eq!(lights.remove(rect), Some((1, 1)));
+        assert_eq!(remove(&mut lights, rect), vec![]);
         assert_eq!(lights.get(&directional), Some(0));
         assert_eq!(lights.len(), 1);
     }
 
     #[test]
-    fn light_index_remove_of_a_missing_source_returns_none() {
+    fn light_index_remove_of_a_missing_source_moves_nothing() {
         let mut lights = LightIndex::default();
-        lights.insert(LightSourceId::PointLight(ENTITY));
+        insert(&mut lights, LightSourceId::PointLight(ENTITY));
 
-        assert_eq!(lights.remove(LightSourceId::RectLight(ENTITY)), None);
+        assert_eq!(
+            remove(&mut lights, LightSourceId::RectLight(ENTITY)),
+            vec![]
+        );
         assert_eq!(lights.len(), 1);
     }
 
@@ -535,11 +608,33 @@ mod tests {
         let emissive = LightSourceId::EmissiveMesh(ENTITY);
         let directional = LightSourceId::DirectionalLight(ENTITY);
         let mut lights = LightIndex::default();
-        lights.insert(emissive);
-        lights.insert(directional);
+        insert(&mut lights, emissive);
+        insert(&mut lights, directional);
 
-        assert_eq!(lights.remove(emissive), Some((0, 1)));
-        assert_eq!(lights.remove(directional), Some((0, 0)));
+        assert_eq!(remove(&mut lights, emissive), vec![]);
+        assert_eq!(remove(&mut lights, directional), vec![]);
         assert!(lights.is_empty());
+        assert_eq!(lights.directional_count(), 0);
+    }
+
+    #[test]
+    fn light_index_remove_of_a_directional_light_keeps_directional_lights_first() {
+        let sun = LightSourceId::DirectionalLight(ENTITY);
+        let moon = LightSourceId::DirectionalLight(Entity::from_raw_u32(1).unwrap());
+        let point = LightSourceId::PointLight(ENTITY);
+        let emissive = LightSourceId::EmissiveMesh(ENTITY);
+        let mut lights = LightIndex::default();
+        insert(&mut lights, sun);
+        insert(&mut lights, moon);
+        insert(&mut lights, point);
+        insert(&mut lights, emissive);
+
+        // The last directional light fills the hole, and the last light fills its place
+        assert_eq!(remove(&mut lights, sun), vec![(1, 0), (3, 1)]);
+        assert_eq!(lights.get(&moon), Some(0));
+        assert_eq!(lights.get(&emissive), Some(1));
+        assert_eq!(lights.get(&point), Some(2));
+        assert_eq!(lights.directional_count(), 1);
+        assert_eq!(lights.len(), 3);
     }
 }

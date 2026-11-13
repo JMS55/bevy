@@ -11,7 +11,7 @@ import package::scene::bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY
 import package::realtime::world_cache_query::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
 @if(DLSS_RR_GUIDE_BUFFERS)
-import package::realtime::resolve_dlss_rr_textures::{is_delta_mirror, primary_surface_glossy, psr_bounce_reflectance, psr_chain_mirror, psr_environment_miss, psr_init, replace_primary_surface};
+import package::realtime::resolve_dlss_rr_textures::{has_glossy_reflection_motion, psr_environment_miss, write_glossy_reflection_motion_vector};
 
 enable wgpu_ray_query;
 
@@ -83,9 +83,6 @@ fn generate_initial_path(world_position: vec3<f32>, world_normal: vec3<f32>, mat
 
     var path = new_path_state(world_position, world_normal, wo, material);
 
-    @if(DLSS_RR_GUIDE_BUFFERS)
-    var psr = psr_init(world_normal, material);
-
     for (var bounce = 0u; bounce < constants.max_bounces; bounce++) {
         let NdotV = max(dot(path.normal, path.wo), 0.0001);
         let F_ab = F_AB(path.material.perceptual_roughness, NdotV);
@@ -101,8 +98,8 @@ fn generate_initial_path(world_position: vec3<f32>, world_normal: vec3<f32>, mat
 
         if ray.kind == RAY_QUERY_INTERSECTION_NONE {
             @if(DLSS_RR_GUIDE_BUFFERS)
-            if !psr.finished && !next_bounce.diffuse_selected {
-                psr_environment_miss(pixel_id, wo);
+            if bounce == 0u && !next_bounce.diffuse_selected && has_glossy_reflection_motion(path.material) {
+                psr_environment_miss(pixel_id, path.wo);
             }
 
             let environment_map_light_radiance = sample_environment_map_light(next_bounce.wi);
@@ -119,22 +116,8 @@ fn generate_initial_path(world_position: vec3<f32>, world_normal: vec3<f32>, mat
         let p_brdf = next_bounce.pdf;
 
         @if(DLSS_RR_GUIDE_BUFFERS)
-        if !psr.finished {
-            if next_bounce.diffuse_selected {
-                // Took the non-specular lobe, so not a mirror reflection. Keep the guide-buffer defaults.
-                psr.finished = true;
-            } else {
-                psr.throughput *= psr_bounce_reflectance(path.wo, next_bounce.wi, path.normal, path.material, F_ab, isinf(p_brdf));
-                psr.reflection_length += ray.t;
-
-                if !primary_surface_glossy(material) && is_delta_mirror(ray_hit.material) {
-                    // Still in the mirror chain, fold this mirror's reflection into the chain.
-                    psr = psr_chain_mirror(psr, ray_hit.world_normal);
-                } else {
-                    psr.finished = true;
-                    replace_primary_surface(pixel_id, psr, ray_hit, material, world_position, world_normal, wo, primary_F_ab);
-                }
-            }
+        if bounce == 0u && !next_bounce.diffuse_selected && has_glossy_reflection_motion(path.material) {
+            write_glossy_reflection_motion_vector(pixel_id, path.ray_origin, path.normal, path.wo, path.material, ray.t, ray_hit);
         }
 
         // Capture x2, the first BRDF-sampled hit

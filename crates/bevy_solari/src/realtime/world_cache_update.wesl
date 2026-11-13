@@ -21,29 +21,27 @@ const WORLD_CACHE_RAY_FLAG = RAY_FLAG_FORCE_OPAQUE;
 const WORLD_CACHE_RAY_FLAG = RAY_FLAG_NONE;
 
 @compute @workgroup_size(64, 1, 1)
-fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) active_cell_id: vec3<u32>) {
-    if active_cell_id.x >= world_cache.active_cells_count { return; }
+fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) thread_id: vec3<u32>) {
+    let active_cell_id = select_active_cell(thread_id.x);
+    if active_cell_id == NO_ACTIVE_CELL { return; }
 
-    let cell_index = world_cache.active_cell_indices[active_cell_id.x];
+    let cell_index = world_cache.active_cell_indices[active_cell_id];
     let geometry_data = world_cache.geometry_data[cell_index];
     var rng = cell_index + constants.frame_rng;
-
-    if rand_f(&rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count) { return; }
 
     let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
 
-    world_cache.active_cells_new_radiance[active_cell_id.x] = new_radiance;
+    world_cache.active_cells_new_radiance[active_cell_id] = new_radiance;
 }
 
 @compute @workgroup_size(64, 1, 1)
-fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) active_cell_id: vec3<u32>) {
-    if active_cell_id.x >= world_cache.active_cells_count { return; }
+fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) thread_id: vec3<u32>) {
+    let active_cell_id = select_active_cell(thread_id.x);
+    if active_cell_id == NO_ACTIVE_CELL { return; }
 
-    let cell_index = world_cache.active_cell_indices[active_cell_id.x];
+    let cell_index = world_cache.active_cell_indices[active_cell_id];
     let geometry_data = world_cache.geometry_data[cell_index];
     var rng = cell_index + constants.frame_rng;
-
-    if rand_f(&rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count) { return; }
 
     let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
     let ray = trace_ray(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, constants.world_cache_max_gi_ray_distance, WORLD_CACHE_RAY_FLAG);
@@ -51,26 +49,25 @@ fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         let ray_hit = resolve_ray_hit_full(ray, -ray_direction);
         let cell_life = atomicLoad(&world_cache.life[cell_index]);
         let radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, cell_life, &rng);
-        world_cache.active_cells_new_radiance[active_cell_id.x] += ray_hit.material.base_color * radiance;
+        world_cache.active_cells_new_radiance[active_cell_id] += ray_hit.material.base_color * radiance;
     } else {
         // The ray is cut short at world_cache_max_gi_ray_distance to save on traversal costs.
         // A miss here may actually have been a surface further away if we kept tracing, and not actually have been a miss.
         // We could be leaking sky light due to this if world_cache_max_gi_ray_distance is too small.
-        world_cache.active_cells_new_radiance[active_cell_id.x] += PI * sample_environment_map_light(ray_direction);
+        world_cache.active_cells_new_radiance[active_cell_id] += PI * sample_environment_map_light(ray_direction);
     }
 }
 
 @compute @workgroup_size(64, 1, 1)
-fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
-    if active_cell_id.x >= world_cache.active_cells_count { return; }
+fn blend_new_samples(@builtin(global_invocation_id) thread_id: vec3<u32>) {
+    let active_cell_id = select_active_cell(thread_id.x);
+    if active_cell_id == NO_ACTIVE_CELL { return; }
 
-    let cell_index = world_cache.active_cell_indices[active_cell_id.x];
+    let cell_index = world_cache.active_cell_indices[active_cell_id];
     var rng = cell_index + constants.frame_rng;
 
-    if rand_f(&rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count) { return; }
-
     let old_radiance = world_cache.radiance[cell_index];
-    let new_radiance = world_cache.active_cells_new_radiance[active_cell_id.x];
+    let new_radiance = world_cache.active_cells_new_radiance[active_cell_id];
     let luminance_delta = world_cache.luminance_deltas[cell_index];
 
     // https://bsky.app/profile/gboisse.bsky.social/post/3m5blga3ftk2a
@@ -87,6 +84,28 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 
     world_cache.radiance[cell_index] = vec4(blended_radiance, sample_count);
     world_cache.luminance_deltas[cell_index] = blended_luminance_delta;
+}
+
+const NO_ACTIVE_CELL = 0xFFFFFFFFu;
+
+/// Picks the active cell that this thread updates, or `NO_ACTIVE_CELL`.
+///
+/// When there are more active cells than `world_cache_cell_updates_soft_target`, each cell should be updated with
+/// probability `soft_target / active_cells_count`. Rather than giving every active cell a thread and discarding most
+/// of them, a stratified random subset of about `soft_target` cells is packed onto the first threads, so that the
+/// updates run in full warps.
+fn select_active_cell(thread_id: u32) -> u32 {
+    let active_cells_count = world_cache.active_cells_count;
+    let soft_target = constants.world_cache_cell_updates_soft_target;
+    if active_cells_count <= soft_target {
+        return select(NO_ACTIVE_CELL, thread_id, thread_id < active_cells_count);
+    }
+    if thread_id >= soft_target { return NO_ACTIVE_CELL; }
+
+    let stride = f32(active_cells_count) / f32(soft_target);
+    var rng = constants.frame_rng;
+    let active_cell_id = u32((f32(thread_id) + rand_f(&rng)) * stride);
+    return select(NO_ACTIVE_CELL, active_cell_id, active_cell_id < active_cells_count);
 }
 
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec3<f32> {

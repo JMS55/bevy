@@ -1,5 +1,5 @@
 use super::SolariLighting;
-use crate::scene::RaytracingSceneNeedsPreviousFrameData;
+use crate::scene::{RaytracingSceneBindings, RaytracingSceneNeedsPreviousFrameData};
 #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
 use bevy_anti_alias::dlss::{
     Dlss, DlssRayReconstructionFeature, ViewDlssRayReconstructionTextures,
@@ -64,34 +64,47 @@ pub const WORLD_CACHE_BUFFER_SIZE: u64 =
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SolariLightingUniforms {
     confidence_weight_cap: f32,
-    primary_di_samples: u32,
-    secondary_di_samples: u32,
+    primary_local_light_samples: u32,
+    secondary_local_light_samples: u32,
     max_bounces: u32,
     world_cache_max_temporal_samples: f32,
-    world_cache_direct_light_sample_count: u32,
+    world_cache_local_light_sample_count: u32,
     world_cache_max_gi_ray_distance: f32,
     world_cache_cell_updates_soft_target: u32,
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     reset: u32,
+    directional_light_count: u32,
+    _padding0: u32,
+    _padding1: u32,
+    _padding2: u32,
 }
 
 impl SolariLightingUniforms {
-    fn new(settings: &SolariLighting, frame_count: u32, force_reset: bool) -> Self {
+    fn new(
+        settings: &SolariLighting,
+        frame_count: u32,
+        force_reset: bool,
+        directional_light_count: u32,
+    ) -> Self {
         Self {
             confidence_weight_cap: settings.confidence_weight_cap,
-            primary_di_samples: settings.primary_di_samples,
-            secondary_di_samples: settings.secondary_di_samples,
+            primary_local_light_samples: settings.primary_local_light_samples,
+            secondary_local_light_samples: settings.secondary_local_light_samples,
             max_bounces: settings.max_bounces,
             world_cache_max_temporal_samples: settings.world_cache_max_temporal_samples,
-            world_cache_direct_light_sample_count: settings.world_cache_direct_light_sample_count,
+            world_cache_local_light_sample_count: settings.world_cache_local_light_sample_count,
             world_cache_max_gi_ray_distance: settings.world_cache_max_gi_ray_distance,
             world_cache_cell_updates_soft_target: settings.world_cache_cell_updates_soft_target,
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
             reset: (settings.reset || force_reset) as u32,
+            directional_light_count,
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
         }
     }
 }
@@ -146,6 +159,7 @@ pub fn prepare_solari_lighting_resources(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     frame_count: Res<FrameCount>,
+    scene_bindings: Res<RaytracingSceneBindings>,
     mut commands: Commands,
 ) {
     for query_item in &query {
@@ -172,8 +186,12 @@ pub fn prepare_solari_lighting_resources(
         let reusable = solari_lighting_resources.filter(|r| {
             r.view_size == view_size && r.reservoirs.is_some() == solari_lighting.restir
         });
-        let uniforms =
-            SolariLightingUniforms::new(solari_lighting, frame_count.0, reusable.is_none());
+        let uniforms = SolariLightingUniforms::new(
+            solari_lighting,
+            frame_count.0,
+            reusable.is_none(),
+            scene_bindings.directional_light_count(),
+        );
 
         if let Some(solari_lighting_resources) = reusable {
             // The constants uniform can change every frame, so always upload it.

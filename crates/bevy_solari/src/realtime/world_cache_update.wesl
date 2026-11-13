@@ -1,13 +1,12 @@
 import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance;
 import bevy_pbr::render::utils::{rand_f, rand_range_u, sample_cosine_hemisphere};
 import bevy_render::maths::PI;
-import package::realtime::presample_light_tiles::unpack_resolved_light_sample;
+import package::realtime::light_candidates::{generate_light_candidate, light_candidate_count, light_candidate_split, LightCandidateSplit};
 import package::realtime::atmosphere::calculate_light_contribution;
 import package::scene::sampling::{trace_visibility, sample_environment_map_light};
 import package::scene::bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN};
 import package::realtime::world_cache_query::query_world_cache;
 import package::realtime::bindings::{
-    light_tile_resolved_samples,
     view,
     constants,
     world_cache,
@@ -90,6 +89,23 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 }
 
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec3<f32> {
+    // Directional and local lights are sampled apart, each with its own shadow ray, through one
+    // call site, see generate_nee_candidate in initial_path.wesl
+    let split = light_candidate_split(constants.world_cache_local_light_sample_count);
+    var radiance = vec3(0.0);
+    for (var pick = 0u; pick < 2u; pick++) {
+        let candidate_start = select(split.directional, 0u, pick == 0u);
+        let candidate_end = select(light_candidate_count(split), split.directional, pick == 0u);
+        if candidate_start == candidate_end { continue; }
+
+        radiance += sample_light_ris_range(world_position, world_normal, split, candidate_start, candidate_end, workgroup_id, rng);
+    }
+    return radiance;
+}
+
+/// RIS over candidates `[candidate_start, candidate_end)`, then one shadow ray for the winner.
+/// See `LightCandidateSplit` for which strategy each candidate comes from.
+fn sample_light_ris_range(world_position: vec3<f32>, world_normal: vec3<f32>, split: LightCandidateSplit, candidate_start: u32, candidate_end: u32, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec3<f32> {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -97,15 +113,14 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
     var selected_sample_radiance = vec3(0.0);
     var selected_sample_target_function = 0.0;
     var selected_sample_world_position = vec4(0.0);
-    let mis_weight = 1.0 / f32(constants.world_cache_direct_light_sample_count);
-    for (var i = 0u; i < constants.world_cache_direct_light_sample_count; i++) {
-        let tile_sample = light_tile_start + rand_range_u(1024u, rng);
-        let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+    for (var i = candidate_start; i < candidate_end; i++) {
+        // Each candidate's inverse_pdf already includes its strategy's 1 / candidate count
+        let resolved_light_sample = generate_light_candidate(i, split, light_tile_start, rng).resolved_light_sample;
         let light_contribution = calculate_light_contribution(resolved_light_sample, world_position, world_normal);
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
-        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+        let resampling_weight = target_function * light_contribution.inverse_pdf;
 
         weight_sum += resampling_weight;
 

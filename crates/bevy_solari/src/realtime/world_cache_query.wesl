@@ -36,7 +36,7 @@ fn query_world_cache(world_position: vec3<f32>, world_normal: vec3<f32>, view_po
     // it, so a cell inserted there would shoot its rays from the wrong place. Misses fall back to
     // the cell at the real point below, which can be inserted.
     let jittered_position_quantized = bitcast<vec3<u32>>(quantize_position(jittered_world_position, jittered_cell_size));
-    let jittered_key = find_world_cache_cell(jittered_position_quantized, world_normal_quantized);
+    let jittered_key = find_world_cache_cell(jittered_position_quantized, world_normal_quantized, jittered_cell_size);
     if jittered_key != WORLD_CACHE_CELL_NOT_FOUND {
         keep_world_cache_cell_alive(jittered_key, cell_lifetime);
         return world_cache.radiance[jittered_key].rgb;
@@ -44,7 +44,7 @@ fn query_world_cache(world_position: vec3<f32>, world_normal: vec3<f32>, view_po
 }
 
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
-    let key = find_world_cache_cell(world_position_quantized, world_normal_quantized);
+    let key = find_world_cache_cell(world_position_quantized, world_normal_quantized, cell_size);
     if key != WORLD_CACHE_CELL_NOT_FOUND {
         // Cache entry already exists - get radiance
         keep_world_cache_cell_alive(key, cell_lifetime);
@@ -52,8 +52,8 @@ fn query_world_cache(world_position: vec3<f32>, world_normal: vec3<f32>, view_po
     }
 
     // Not found - insert into the first empty slot
-    let home_key = compute_key(world_position_quantized, world_normal_quantized);
-    let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
+    let home_key = compute_key(world_position_quantized, world_normal_quantized, cell_size);
+    let checksum = compute_checksum(world_position_quantized, world_normal_quantized, cell_size);
     for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
         let key = wrap_key(home_key + i);
         let existing_checksum = atomicLoad(&world_cache.checksums[key]);
@@ -88,9 +88,9 @@ fn query_world_cache(world_position: vec3<f32>, world_normal: vec3<f32>, view_po
 /// leave empty slots in the middle of probe sequences, and stopping there would miss cells stored
 /// past them, which would then be inserted again as duplicates starting over from no radiance.
 @if(!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER)
-fn find_world_cache_cell(world_position_quantized: vec3<u32>, world_normal_quantized: vec3<u32>) -> u32 {
-    let home_key = compute_key(world_position_quantized, world_normal_quantized);
-    let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
+fn find_world_cache_cell(world_position_quantized: vec3<u32>, world_normal_quantized: vec3<u32>, cell_size: f32) -> u32 {
+    let home_key = compute_key(world_position_quantized, world_normal_quantized, cell_size);
+    let checksum = compute_checksum(world_position_quantized, world_normal_quantized, cell_size);
     for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
         let key = wrap_key(home_key + i);
         if atomicLoad(&world_cache.checksums[key]) == checksum {
@@ -125,23 +125,26 @@ fn quantize_normal(world_normal: vec3<f32>) -> vec3<f32> {
     return floor(world_normal + 0.0001);
 }
 
-fn compute_key(world_position: vec3<u32>, world_normal: vec3<u32>) -> u32 {
+// The cell size is hashed too, so that cells of different LODs with the same quantized position don't collide
+fn compute_key(world_position: vec3<u32>, world_normal: vec3<u32>, cell_size: f32) -> u32 {
     var key = pcg_hash(world_position.x);
     key = pcg_hash(key + world_position.y);
     key = pcg_hash(key + world_position.z);
     key = pcg_hash(key + world_normal.x);
     key = pcg_hash(key + world_normal.y);
     key = pcg_hash(key + world_normal.z);
+    key = pcg_hash(key + bitcast<u32>(cell_size));
     return wrap_key(key);
 }
 
-fn compute_checksum(world_position: vec3<u32>, world_normal: vec3<u32>) -> u32 {
-    var key = iqint_hash(world_position.x);
-    key = iqint_hash(key + world_position.y);
-    key = iqint_hash(key + world_position.z);
-    key = iqint_hash(key + world_normal.x);
-    key = iqint_hash(key + world_normal.y);
-    key = iqint_hash(key + world_normal.z);
+fn compute_checksum(world_position: vec3<u32>, world_normal: vec3<u32>, cell_size: f32) -> u32 {
+    var key = jenkins_hash(world_position.x);
+    key = jenkins_hash(key + world_position.y);
+    key = jenkins_hash(key + world_position.z);
+    key = jenkins_hash(key + world_normal.x);
+    key = jenkins_hash(key + world_normal.y);
+    key = jenkins_hash(key + world_normal.z);
+    key = jenkins_hash(key + bitcast<u32>(cell_size));
     return max(key, 1u); // 0u is reserved for WORLD_CACHE_EMPTY_CELL
 }
 
@@ -151,9 +154,16 @@ fn pcg_hash(input: u32) -> u32 {
     return (word >> 22u) ^ word;
 }
 
-fn iqint_hash(input: u32) -> u32 {
-    let n = (input << 13u) ^ input;
-    return n * (n * n * 15731u + 789221u) + 1376312589u;
+// http://burtleburtle.net/bob/hash/integer.html
+fn jenkins_hash(input: u32) -> u32 {
+    var a = input;
+    a = (a + 0x7ed55d16u) + (a << 12u);
+    a = (a ^ 0xc761c23cu) ^ (a >> 19u);
+    a = (a + 0x165667b1u) + (a << 5u);
+    a = (a + 0xd3a2646cu) ^ (a << 9u);
+    a = (a + 0xfd7046c5u) + (a << 3u);
+    a = (a ^ 0xb55a4f09u) ^ (a >> 16u);
+    return a;
 }
 
 fn wrap_key(key: u32) -> u32 {

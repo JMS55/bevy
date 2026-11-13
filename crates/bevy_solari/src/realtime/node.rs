@@ -375,9 +375,11 @@ pub fn solari_lighting(
 
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
+        let d = diagnostics.time_span(&mut pass, "solari_lighting/resolve_dlss_rr_textures");
         pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
         pass.set_pipeline(resolve_dlss_rr_textures_pipeline);
         pass.dispatch_workgroups(dx, dy, 1);
+        d.end(&mut pass);
     }
 
     let d = diagnostics.time_span(&mut pass, "solari_lighting/presample_light_tiles");

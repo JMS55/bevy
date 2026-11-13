@@ -2,10 +2,10 @@ import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance;
 import bevy_pbr::deferred::types::unpack_24bit_normal;
 import bevy_pbr::render::pbr_functions::{calculate_diffuse_color, calculate_F0, calculate_F0_dielectric};
 import bevy_render::utils::octahedral_decode;
-import package::realtime::gbuffer_utils::gpixel_resolve;
-import package::realtime::bindings::{gbuffer, depth_buffer, load_motion_vector, motion_vectors, previous_view, view, diffuse_albedo, specular_albedo, normal_roughness, dlss_rr_depth, specular_motion_vectors};
+import package::realtime::gbuffer_utils::{gpixel_resolve, ResolvedGPixel};
+import package::realtime::bindings::{constants, gbuffer, depth_buffer, load_motion_vector, motion_vectors, previous_view, view, diffuse_albedo, specular_albedo, normal_roughness, dlss_rr_depth, specular_motion_vectors};
 import package::scene::brdf::{evaluate_specular_brdf, F_AB, lobe_reflectances};
-import package::scene::bindings::{MIRROR_ROUGHNESS_THRESHOLD, ResolvedMaterial, ResolvedRayHitFull};
+import package::scene::bindings::{MIRROR_ROUGHNESS_THRESHOLD, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
 
 enable wgpu_ray_query;
 
@@ -58,13 +58,50 @@ fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>)
     if !needs_specular_motion_vector(surface.material.roughness) {
         textureStore(specular_motion_vectors, pixel_id, vec4(surface_motion_vector, vec2(0.0)));
     }
+
+    if surface.material.roughness <= MIRROR_ROUGHNESS_THRESHOLD {
+        trace_mirror_chain(pixel_id, surface, wo);
+    }
+}
+
+/// Primary surface replacement for mirror-smooth surfaces, traced here instead of in the path walk so the
+/// walk carries no mirror chain state. Mirror reflections are deterministic, so this follows the chain
+/// with exact reflection directions to its first non-mirror hit.
+fn trace_mirror_chain(pixel_id: vec2<u32>, primary: ResolvedGPixel, primary_wo: vec3<f32>) {
+    var psr = psr_init(primary.world_normal, primary.material);
+    var ray_origin = primary.world_position + primary.world_normal * RAY_T_MIN;
+    var wo = primary_wo;
+    var normal = primary.world_normal;
+    var material = primary.material;
+    for (var bounce = 0u; bounce < constants.max_bounces; bounce++) {
+        let wi = reflect(-wo, normal);
+        let F_ab = F_AB(material.perceptual_roughness, max(dot(normal, wo), 0.0001));
+        let ray = trace_ray(ray_origin, wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+        if ray.kind == RAY_QUERY_INTERSECTION_NONE {
+            psr_environment_miss(pixel_id, primary_wo);
+            return;
+        }
+        let ray_hit = resolve_ray_hit_full(ray, -wi);
+        psr.throughput *= psr_bounce_reflectance(wo, wi, normal, material, F_ab, true);
+        psr.reflection_length += ray.t;
+        if !is_delta_mirror(ray_hit.material) {
+            let primary_F_ab = F_AB(primary.material.perceptual_roughness, max(dot(primary.world_normal, primary_wo), 0.0001));
+            replace_primary_surface(pixel_id, psr, ray_hit, primary.material, primary.world_position, primary.world_normal, primary_wo, primary_F_ab);
+            return;
+        }
+        psr = psr_chain_mirror(psr, ray_hit.world_normal);
+        ray_origin = ray_hit.world_position + ray_hit.geometric_world_normal * RAY_T_MIN;
+        wo = -wi;
+        normal = ray_hit.world_normal;
+        material = ray_hit.material;
+    }
 }
 
 fn needs_specular_motion_vector(roughness: f32) -> bool {
     return roughness <= 0.0625;
 }
 
-/// Carried across every bounce of the path walk, so anything derivable from a value the walk already
+/// Carried across every mirror of `trace_mirror_chain`, so anything derivable from a value the walk already
 /// holds is derived at the end instead of stored. What is left is only what the walk itself produces.
 struct PsrState {
     finished: bool,
@@ -170,6 +207,24 @@ fn replace_primary_surface(
     textureStore(diffuse_albedo, pixel_id, vec4(psr.throughput * reflected_diffuse + own_diffuse, 0.0));
     textureStore(specular_albedo, pixel_id, vec4(mix(own_specular, psr.throughput * reflected_specular, specular_fraction), 0.0));
     textureStore(normal_roughness, pixel_id, vec4(virtual_normal, ray_hit.material.perceptual_roughness));
+}
+
+/// Whether the primary surface is glossy enough to need a specular motion vector, but too rough to be a
+/// mirror whose reflection chain is followed. Such a surface reflects exactly once, so the path walk can
+/// write its guide at the first bounce without carrying any state.
+fn has_glossy_reflection_motion(material: ResolvedMaterial) -> bool {
+    return needs_specular_motion_vector(material.roughness) && primary_surface_glossy(material);
+}
+
+/// Specular motion vector for a glossy primary surface, from the single reflection the path walk traced at
+/// its first bounce (`ray_origin`, `normal`, `wo` and `material` are the primary surface's).
+fn write_glossy_reflection_motion_vector(pixel_id: vec2<u32>, ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, reflection_length: f32, ray_hit: ResolvedRayHitFull) {
+    var psr = psr_init(normal, material);
+    psr.reflection_length = reflection_length;
+    let virtual_position = (ray_origin - normal * RAY_T_MIN) - (wo * reflection_length);
+    let world_motion = ray_hit.previous_frame_world_position - ray_hit.world_position;
+    let virtual_previous_position = virtual_position + apply_mirror_chain(psr, world_motion);
+    textureStore(specular_motion_vectors, pixel_id, vec4(calculate_motion_vector(virtual_position, virtual_previous_position), vec2(0.0)));
 }
 
 fn primary_surface_glossy(material: ResolvedMaterial) -> bool {

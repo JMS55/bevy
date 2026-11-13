@@ -14,6 +14,9 @@ use core::{f32::consts::TAU, hash::Hash};
 
 const LIGHT_NOT_PRESENT_THIS_FRAME: u32 = u32::MAX;
 
+/// Marks an instance that is not an emissive mesh light in `GpuInstanceGeometryIds::light_id`.
+pub const NO_LIGHT_ID: u32 = u32::MAX;
+
 const LIGHT_SOURCE_KIND_BITS: u32 = 3;
 
 const LIGHT_SOURCE_KIND_EMISSIVE_MESH: u32 = 0;
@@ -130,6 +133,10 @@ impl LightIndex {
 }
 
 impl GpuLightSource {
+    fn kind(&self) -> u32 {
+        self.kind & ((1 << LIGHT_SOURCE_KIND_BITS) - 1)
+    }
+
     pub fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32) -> GpuLightSource {
         if triangle_count > u16::MAX as u32 {
             panic!("Too many triangles ({triangle_count}) in an emissive mesh, maximum is 65535.");
@@ -279,6 +286,8 @@ pub struct LightState {
     rect_light_slots: SlotAllocator<Entity>,
     /// Set by the lighting node once it has recorded work reading the translation table.
     translations_consumed: AtomicBool,
+    /// Whether any light id moved since the last [`LightState::finish_update`].
+    light_ids_moved: bool,
 }
 
 impl LightState {
@@ -311,6 +320,7 @@ impl LightState {
             point_light_slots: SlotAllocator::new(),
             rect_light_slots: SlotAllocator::new(),
             translations_consumed: AtomicBool::new(false),
+            light_ids_moved: false,
         }
     }
 
@@ -405,12 +415,24 @@ impl LightState {
         }
     }
 
-    pub fn finish_update(&mut self) {
+    /// Returns true if light ids moved this frame, in which case every emissive mesh instance's
+    /// light id has to be rewritten, see [`LightState::emissive_mesh_lights`].
+    pub fn finish_update(&mut self) -> bool {
         self.write_light_id_translations();
 
         if self.index.len() > u16::MAX as usize {
             panic!("Too many light sources in the scene, maximum is 65535.");
         }
+
+        core::mem::take(&mut self.light_ids_moved)
+    }
+
+    /// Each emissive mesh light's instance slot and light id.
+    pub fn emissive_mesh_lights(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        (0..self.index.len() as u32).filter_map(|light_id| {
+            let source = self.sources.get(light_id);
+            (source.kind() == LIGHT_SOURCE_KIND_EMISSIVE_MESH).then_some((source.id, light_id))
+        })
     }
 
     fn set_point_or_spot_light(&mut self, id: LightSourceId, light: GpuPointLight) {
@@ -425,22 +447,28 @@ impl LightState {
         }
     }
 
-    pub fn add_light(&mut self, id: LightSourceId, source: GpuLightSource) {
+    /// Adds or updates a light, and returns its light id.
+    pub fn add_light(&mut self, id: LightSourceId, source: GpuLightSource) -> u32 {
         let sources = &mut self.sources;
+        let light_ids_moved = &mut self.light_ids_moved;
         let index = self.index.insert(id, |from, to| {
             let moved = sources.get(from);
             sources.grow_and_set(to, moved);
+            *light_ids_moved = true;
         });
         sources.grow_and_set(index, source);
+        index
     }
 
     /// Removes a light, moving others down into the hole so the array stays gap-free, with
     /// directional lights first.
     pub fn remove_light(&mut self, id: LightSourceId) {
         let sources = &mut self.sources;
+        let light_ids_moved = &mut self.light_ids_moved;
         self.index.remove(id, |from, to| {
             let moved = sources.get(from);
             sources.grow_and_set(to, moved);
+            *light_ids_moved = true;
         });
     }
 

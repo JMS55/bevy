@@ -100,18 +100,13 @@ fn find_world_cache_cell(world_position_quantized: vec3<u32>, world_normal_quant
     return WORLD_CACHE_CELL_NOT_FOUND;
 }
 
-/// Resets a cell's lifetime, writing only when it changes.
+/// Resets a cell's lifetime.
 @if(!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER)
 fn keep_world_cache_cell_alive(key: u32, cell_lifetime: u32) {
-    @if(!WORLD_CACHE_QUERY_ATOMIC_MAX_LIFETIME) {
-        if atomicLoad(&world_cache.life[key]) != cell_lifetime {
-            atomicStore(&world_cache.life[key], cell_lifetime);
-        }
-    } @else {
-        if atomicLoad(&world_cache.life[key]) < cell_lifetime {
-            atomicMax(&world_cache.life[key], cell_lifetime);
-        }
-    }
+    @if(!WORLD_CACHE_QUERY_ATOMIC_MAX_LIFETIME)
+    atomicStore(&world_cache.life[key], cell_lifetime);
+    @else
+    atomicMax(&world_cache.life[key], cell_lifetime);
 }
 
 fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>, rng: ptr<function, u32>) -> f32 {

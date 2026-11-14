@@ -51,7 +51,7 @@ const _: () = assert!(
         && WORLD_CACHE_SIZE <= 2u64.pow(20)
 );
 /// Sum of per-cell field sizes in `WorldCache`. Keep in sync with `realtime_bindings.wgsl`.
-const WORLD_CACHE_ENTRY_SIZE: u64 = 84;
+const WORLD_CACHE_ENTRY_SIZE: u64 = 88;
 /// Size of the fixed `b` array (`array<u32, WORLD_CACHE_SIZE / 1024>`).
 const WORLD_CACHE_B_SIZE: u64 = (WORLD_CACHE_SIZE / 1024) * size_of::<u32>() as u64;
 /// Offset of `active_cells_count`.
@@ -80,6 +80,7 @@ struct SolariLightingUniforms {
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
+    frame_index: u32,
     reset: u32,
 }
 
@@ -97,6 +98,7 @@ impl SolariLightingUniforms {
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
+            frame_index: frame_count,
             reset: (settings.reset || force_reset) as u32,
         }
     }

@@ -38,6 +38,7 @@ use bevy_render::{
 };
 use bevy_shader::{Shader, ShaderDefVal};
 use bevy_utils::default;
+use core::sync::atomic::Ordering;
 
 /// Resource holding the Solari lighting pipeline configuration.
 #[derive(Resource)]
@@ -263,6 +264,10 @@ pub fn solari_lighting(
     if restir.is_some() {
         scene_bindings.note_light_translations_consumed();
     }
+    // Likewise, any reset in this frame's constants will be applied
+    solari_lighting_resources
+        .reset_pending
+        .store(false, Ordering::Relaxed);
 
     let view_target_attachment = view_target.get_unsampled_color_attachment();
 

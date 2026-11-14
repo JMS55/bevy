@@ -22,13 +22,16 @@ var<workgroup> w2: array<u32, 1024u>;
 fn decay_world_cache(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var life = world_cache.life[global_id.x];
     if life > 0u {
-        life -= 1u;
+        // A reset deletes every cell, so that no light from before it survives. Lookups insert fresh cells again,
+        // starting with this frame's lighting passes.
+        life = select(life - 1u, 0u, bool(constants.reset));
         world_cache.life[global_id.x] = life;
 
         if life == 0u {
             world_cache.checksums[global_id.x] = WORLD_CACHE_EMPTY_CELL;
             world_cache.radiance[global_id.x] = vec4(0.0);
             world_cache.luminance_deltas[global_id.x] = 0.0;
+            world_cache.last_update_frame[global_id.x] = 0u;
         }
     }
 }

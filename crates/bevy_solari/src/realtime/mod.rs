@@ -231,10 +231,10 @@ pub struct SolariLighting {
     /// Useful for preventing ghosting when the history is no longer
     /// representative of the current frame, such as in sudden camera cuts.
     ///
-    /// The world cache drops each cell's history at the cell's next update, and
-    /// keeps serving the old radiance until then. That can take up to about
-    /// `active_cells / world_cache_cell_updates_soft_target` frames (27 frames
-    /// for a full cache at the default settings).
+    /// This deletes every world cache cell. The cells are created again as
+    /// they are looked up, but contribute no light until their first update,
+    /// which can take up to about `active_cells / world_cache_cell_updates_soft_target`
+    /// frames (27 frames for a full cache at the default settings).
     ///
     /// After setting this to true, it will automatically be toggled
     /// back to false at the end of the frame.

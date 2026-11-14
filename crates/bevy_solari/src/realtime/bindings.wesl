@@ -60,7 +60,6 @@ struct SolariLightingSettings {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     frame_index: u32,
-    last_reset_frame: u32,
     reset: u32,
 }
 

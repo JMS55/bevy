@@ -15,7 +15,14 @@ pub fn extract_solari_lighting(mut main_world: ResMut<MainWorld>, mut commands: 
             && camera.is_active
         {
             entity_commands.insert((solari_lighting.clone(), SkipDeferredLighting));
-            solari_lighting.reset = false;
+            // `reset` only lasts one frame. Keep it while the camera doesn't render, e.g. while its window is
+            // minimized, since the render world skips the view then.
+            if camera
+                .physical_target_size()
+                .is_some_and(|size| size.x > 0 && size.y > 0)
+            {
+                solari_lighting.reset = false;
+            }
         } else {
             entity_commands.remove::<(
                 SolariLighting,

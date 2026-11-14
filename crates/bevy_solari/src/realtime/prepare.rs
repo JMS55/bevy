@@ -50,7 +50,7 @@ const _: () = assert!(
         && WORLD_CACHE_SIZE >= 2u64.pow(10)
         && WORLD_CACHE_SIZE <= 2u64.pow(20)
 );
-/// Sum of per-cell field sizes in `WorldCache`. Keep in sync with `realtime_bindings.wgsl`.
+/// Sum of per-cell field sizes in `WorldCache`. Keep in sync with `bindings.wesl`.
 const WORLD_CACHE_ENTRY_SIZE: u64 = 88;
 /// Size of the fixed `b` array (`array<u32, WORLD_CACHE_SIZE / 1024>`).
 const WORLD_CACHE_B_SIZE: u64 = (WORLD_CACHE_SIZE / 1024) * size_of::<u32>() as u64;
@@ -58,8 +58,9 @@ const WORLD_CACHE_B_SIZE: u64 = (WORLD_CACHE_SIZE / 1024) * size_of::<u32>() as 
 pub const WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET: u64 =
     WORLD_CACHE_SIZE * WORLD_CACHE_ENTRY_SIZE + WORLD_CACHE_B_SIZE;
 /// Must stay under wgpu's default `max_storage_buffer_binding_size` (128 MiB or 2^27 bytes).
+/// `active_cells_count` and `update_window_start` follow the per-cell fields.
 pub const WORLD_CACHE_BUFFER_SIZE: u64 =
-    (WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET + size_of::<u32>() as u64).next_multiple_of(16);
+    (WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET + 2 * size_of::<u32>() as u64).next_multiple_of(16);
 
 /// GPU representation of the user-configurable [`SolariLighting`] settings, plus
 /// per-frame state.

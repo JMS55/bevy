@@ -21,7 +21,8 @@ const WORLD_CACHE_RAY_FLAG = RAY_FLAG_FORCE_OPAQUE;
 const WORLD_CACHE_RAY_FLAG = RAY_FLAG_NONE;
 
 /// Cells are only updated every few frames, so their history is limited to this many frames too, not just to a sample count.
-const WORLD_CACHE_HISTORY_FRAMES = 64.0;
+/// Tuned for the sweep in `select_active_cell`, whose evenly spaced updates otherwise act as a longer history.
+const WORLD_CACHE_HISTORY_FRAMES = 32.0;
 
 @compute @workgroup_size(64, 1, 1)
 fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) thread_id: vec3<u32>) {
@@ -100,10 +101,10 @@ const NO_ACTIVE_CELL = 0xFFFFFFFFu;
 
 /// Picks the active cell that this thread updates, or `NO_ACTIVE_CELL`.
 ///
-/// When there are more active cells than `world_cache_cell_updates_soft_target`, each cell should be updated with
-/// probability `soft_target / active_cells_count`. Rather than giving every active cell a thread and discarding most
-/// of them, a stratified random subset of about `soft_target` cells is packed onto the first threads, so that the
-/// updates run in full warps.
+/// When there are more active cells than `world_cache_cell_updates_soft_target`, only that many are updated per frame.
+/// They are packed onto the first threads so that the updates run in full warps, and are taken from a window that
+/// moves through the active cells every frame (see `compact_world_cache_write_active_cells`), so that every active
+/// cell is updated about once every `ceil(active_cells_count / soft_target)` frames.
 fn select_active_cell(thread_id: u32) -> u32 {
     let active_cells_count = world_cache.active_cells_count;
     let soft_target = constants.world_cache_cell_updates_soft_target;
@@ -112,10 +113,7 @@ fn select_active_cell(thread_id: u32) -> u32 {
     }
     if thread_id >= soft_target { return NO_ACTIVE_CELL; }
 
-    let stride = f32(active_cells_count) / f32(soft_target);
-    var rng = constants.frame_rng;
-    let active_cell_id = u32((f32(thread_id) + rand_f(&rng)) * stride);
-    return select(NO_ACTIVE_CELL, active_cell_id, active_cell_id < active_cells_count);
+    return (world_cache.update_window_start + thread_id) % active_cells_count;
 }
 
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec3<f32> {

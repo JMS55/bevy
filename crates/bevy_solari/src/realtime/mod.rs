@@ -192,9 +192,9 @@ pub struct SolariLighting {
     /// cost of more work per frame. Lower values are cheaper but make the cache
     /// slower to update.
     ///
-    /// When there are more active cells than this, this many of them, picked at
-    /// random, are updated per frame, so each active cell is updated on average
-    /// once every `active_cells / target` frames. When there are fewer active
+    /// When there are more active cells than this, this many of them are updated
+    /// per frame, taking turns, so each active cell is updated about once every
+    /// `active_cells / target` frames (rounded up). When there are fewer active
     /// cells than this, all of them update every frame.
     pub world_cache_cell_updates_soft_target: u32,
 
@@ -231,9 +231,10 @@ pub struct SolariLighting {
     /// Useful for preventing ghosting when the history is no longer
     /// representative of the current frame, such as in sudden camera cuts.
     ///
-    /// The world cache drops each cell's history at the cell's next update (see
-    /// [`Self::world_cache_cell_updates_soft_target`]), and keeps serving the
-    /// old radiance until then.
+    /// The world cache drops each cell's history at the cell's next update, and
+    /// keeps serving the old radiance until then. That can take up to about
+    /// `active_cells / world_cache_cell_updates_soft_target` frames (27 frames
+    /// for a full cache at the default settings).
     ///
     /// After setting this to true, it will automatically be toggled
     /// back to false at the end of the frame.

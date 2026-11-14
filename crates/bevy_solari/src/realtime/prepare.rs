@@ -98,10 +98,15 @@ impl SolariLightingUniforms {
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
-            frame_index: frame_count,
+            frame_index: world_cache_frame_index(frame_count),
             reset: (settings.reset || force_reset) as u32,
         }
     }
+}
+
+/// The frame index for the world cache shaders. It starts at 1, since 0 marks cells that were never updated.
+fn world_cache_frame_index(frame_count: u32) -> u32 {
+    frame_count.wrapping_add(1)
 }
 
 /// Declares to the raytracing scene whether any view needs last frame's TLAS and light ids.

@@ -65,7 +65,7 @@ pub const WORLD_CACHE_BUFFER_SIZE: u64 =
 /// per-frame state.
 ///
 /// Field order and types must match the `SolariLightingSettings` struct in
-/// `realtime_bindings.wgsl`.
+/// `bindings.wesl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SolariLightingUniforms {
@@ -81,11 +81,17 @@ struct SolariLightingUniforms {
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
     frame_index: u32,
+    last_reset_frame: u32,
     reset: u32,
 }
 
 impl SolariLightingUniforms {
-    fn new(settings: &SolariLighting, frame_count: u32, force_reset: bool) -> Self {
+    fn new(
+        settings: &SolariLighting,
+        frame_count: u32,
+        last_reset_frame: u32,
+        reset: bool,
+    ) -> Self {
         Self {
             confidence_weight_cap: settings.confidence_weight_cap,
             primary_di_samples: settings.primary_di_samples,
@@ -94,12 +100,16 @@ impl SolariLightingUniforms {
             world_cache_max_temporal_samples: settings.world_cache_max_temporal_samples,
             world_cache_direct_light_sample_count: settings.world_cache_direct_light_sample_count,
             world_cache_max_gi_ray_distance: settings.world_cache_max_gi_ray_distance,
-            world_cache_cell_updates_soft_target: settings.world_cache_cell_updates_soft_target,
+            // With no cell updates, the world cache would never apply resets either
+            world_cache_cell_updates_soft_target: settings
+                .world_cache_cell_updates_soft_target
+                .max(1),
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
             frame_index: world_cache_frame_index(frame_count),
-            reset: (settings.reset || force_reset) as u32,
+            last_reset_frame,
+            reset: reset as u32,
         }
     }
 }
@@ -133,6 +143,8 @@ pub struct SolariLightingResources {
     pub world_cache: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
     pub view_size: UVec2,
+    /// Frame of the last reset. World cache cells drop their history at their first update after it.
+    pub last_reset_frame: u32,
 }
 
 pub struct SolariReservoirBuffers {
@@ -141,18 +153,18 @@ pub struct SolariReservoirBuffers {
 }
 
 pub fn prepare_solari_lighting_resources(
-    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))] query: Query<(
+    #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))] mut query: Query<(
         Entity,
         &ExtractedCamera,
         &SolariLighting,
-        Option<&SolariLightingResources>,
+        Option<&mut SolariLightingResources>,
         Option<&MainPassResolutionOverride>,
     )>,
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] query: Query<(
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))] mut query: Query<(
         Entity,
         &ExtractedCamera,
         &SolariLighting,
-        Option<&SolariLightingResources>,
+        Option<&mut SolariLightingResources>,
         Option<&MainPassResolutionOverride>,
         Has<Dlss<DlssRayReconstructionFeature>>,
     )>,
@@ -161,19 +173,26 @@ pub fn prepare_solari_lighting_resources(
     frame_count: Res<FrameCount>,
     mut commands: Commands,
 ) {
-    for query_item in &query {
+    for query_item in &mut query {
         #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
-        let (entity, camera, solari_lighting, solari_lighting_resources, resolution_override) =
+        let (entity, camera, solari_lighting, mut solari_lighting_resources, resolution_override) =
             query_item;
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
         let (
             entity,
             camera,
             solari_lighting,
-            solari_lighting_resources,
+            mut solari_lighting_resources,
             resolution_override,
             has_dlss_rr,
         ) = query_item;
+
+        // `reset` only lasts one frame, so record it even if the view is skipped this frame
+        if solari_lighting.reset
+            && let Some(solari_lighting_resources) = solari_lighting_resources.as_mut()
+        {
+            solari_lighting_resources.last_reset_frame = world_cache_frame_index(frame_count.0);
+        }
 
         let Some(mut view_size) = camera.physical_viewport_size else {
             continue;
@@ -185,10 +204,15 @@ pub fn prepare_solari_lighting_resources(
         let reusable = solari_lighting_resources.filter(|r| {
             r.view_size == view_size && r.reservoirs.is_some() == solari_lighting.restir
         });
-        let uniforms =
-            SolariLightingUniforms::new(solari_lighting, frame_count.0, reusable.is_none());
+        let reset = solari_lighting.reset || reusable.is_none();
 
         if let Some(solari_lighting_resources) = reusable {
+            let uniforms = SolariLightingUniforms::new(
+                solari_lighting,
+                frame_count.0,
+                solari_lighting_resources.last_reset_frame,
+                reset,
+            );
             // The constants uniform can change every frame, so always upload it.
             render_queue.write_buffer(
                 &solari_lighting_resources.constants,
@@ -197,6 +221,10 @@ pub fn prepare_solari_lighting_resources(
             );
             continue;
         }
+
+        let last_reset_frame = world_cache_frame_index(frame_count.0);
+        let uniforms =
+            SolariLightingUniforms::new(solari_lighting, frame_count.0, last_reset_frame, reset);
 
         let constants = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("solari_lighting_constants"),
@@ -257,6 +285,7 @@ pub fn prepare_solari_lighting_resources(
             world_cache,
             world_cache_active_cells_dispatch,
             view_size,
+            last_reset_frame,
         });
 
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]

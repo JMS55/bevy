@@ -231,6 +231,10 @@ pub struct SolariLighting {
     /// Useful for preventing ghosting when the history is no longer
     /// representative of the current frame, such as in sudden camera cuts.
     ///
+    /// The world cache drops each cell's history at the cell's next update (see
+    /// [`Self::world_cache_cell_updates_soft_target`]), and keeps serving the
+    /// old radiance until then.
+    ///
     /// After setting this to true, it will automatically be toggled
     /// back to false at the end of the frame.
     pub reset: bool,

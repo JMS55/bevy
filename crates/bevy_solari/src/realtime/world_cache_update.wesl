@@ -72,20 +72,25 @@ fn blend_new_samples(@builtin(global_invocation_id) thread_id: vec3<u32>) {
     let new_radiance = world_cache.active_cells_new_radiance[active_cell_id];
     let luminance_delta = world_cache.luminance_deltas[cell_index];
 
+    let last_update_frame = world_cache.last_update_frame[cell_index];
+    let frames_since_last_update = constants.frame_index - last_update_frame;
+    world_cache.last_update_frame[cell_index] = constants.frame_index;
+
+    // Resets are applied lazily: a cell drops its history, sample count included, at its first update after the reset.
+    // Until then it keeps returning its old radiance, rather than black, and the reset frame costs no more than any other.
+    let reset = frames_since_last_update > constants.frame_index - constants.last_reset_frame;
+
     // https://bsky.app/profile/gboisse.bsky.social/post/3m5blga3ftk2a
-    // Resets drop the history, sample count included, so the next frames reconverge from 1 sample
-    let sample_count = select(min(old_radiance.a + 1.0, constants.world_cache_max_temporal_samples), 1.0, bool(constants.reset));
+    let sample_count = select(min(old_radiance.a + 1.0, constants.world_cache_max_temporal_samples), 1.0, reset);
     let alpha = abs(luminance_delta) / max(luminance(old_radiance.rgb), 0.001);
     let max_sample_count = mix(constants.world_cache_max_temporal_samples, 1.0, pow(saturate(alpha), 1.0 / 8.0));
     var blend_amount = 1.0 / min(sample_count, max_sample_count);
 
-    let last_update_frame = world_cache.last_update_frame[cell_index];
-    let frames_since_last_update = select(f32(constants.frame_index - last_update_frame), WORLD_CACHE_HISTORY_FRAMES, last_update_frame == 0u);
-    blend_amount = max(blend_amount, min(frames_since_last_update / WORLD_CACHE_HISTORY_FRAMES, 1.0));
-    world_cache.last_update_frame[cell_index] = constants.frame_index;
+    let history_frames = select(f32(frames_since_last_update), WORLD_CACHE_HISTORY_FRAMES, last_update_frame == 0u);
+    blend_amount = max(blend_amount, min(history_frames / WORLD_CACHE_HISTORY_FRAMES, 1.0));
 
     let blended_radiance = mix(old_radiance.rgb, new_radiance, blend_amount);
-    let blended_luminance_delta = select(mix(luminance_delta, luminance(blended_radiance) - luminance(old_radiance.rgb), 1.0 / 8.0), 0.0, bool(constants.reset));
+    let blended_luminance_delta = select(mix(luminance_delta, luminance(blended_radiance) - luminance(old_radiance.rgb), 1.0 / 8.0), 0.0, reset);
 
     world_cache.radiance[cell_index] = vec4(blended_radiance, sample_count);
     world_cache.luminance_deltas[cell_index] = blended_luminance_delta;

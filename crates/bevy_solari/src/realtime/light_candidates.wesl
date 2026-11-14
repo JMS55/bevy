@@ -32,13 +32,18 @@ fn light_candidate_split(candidate_count: u32) -> LightCandidateSplit {
     let directional_count = directional_light_count();
     let local_count = local_light_count();
 
-    // Without local lights, every candidate goes to directional lights, as without the split
-    if candidate_count == 0u || local_count == 0u {
-        return LightCandidateSplit(select(candidate_count, 0u, directional_count == 0u), 0u);
+    if directional_count == 0u {
+        return LightCandidateSplit(0u, select(candidate_count, 0u, local_count == 0u));
+    }
+
+    // Without local lights, every candidate goes to directional lights, as without the split,
+    // but they always keep at least their own candidates
+    if local_count == 0u {
+        return LightCandidateSplit(max(candidate_count, DIRECTIONAL_CANDIDATES), 0u);
     }
 
     // Local lights get every candidate asked for, and directional lights get extra ones of their own
-    return LightCandidateSplit(select(DIRECTIONAL_CANDIDATES, 0u, directional_count == 0u), candidate_count);
+    return LightCandidateSplit(DIRECTIONAL_CANDIDATES, candidate_count);
 }
 
 fn light_candidate_count(split: LightCandidateSplit) -> u32 {

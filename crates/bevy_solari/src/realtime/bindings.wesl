@@ -59,6 +59,7 @@ struct SolariLightingSettings {
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
     frame_rng: u32,
+    frame_index: u32,
     reset: u32,
 }
 
@@ -106,9 +107,10 @@ struct WorldCache {
     radiance: array<vec4<f32>, constants::WORLD_CACHE_SIZE>,
     geometry_data: array<WorldCacheGeometryData, constants::WORLD_CACHE_SIZE>,
     luminance_deltas: array<f32, constants::WORLD_CACHE_SIZE>,
+    last_update_frame: array<u32, constants::WORLD_CACHE_SIZE>,
     active_cells_new_radiance: array<vec3<f32>, constants::WORLD_CACHE_SIZE>,
     a: array<u32, constants::WORLD_CACHE_SIZE>,
-    b: array<u32, 1024u>,
+    b: array<u32, constants::WORLD_CACHE_SIZE / 1024u>,
     active_cell_indices: array<u32, constants::WORLD_CACHE_SIZE>,
     active_cells_count: u32,
 }

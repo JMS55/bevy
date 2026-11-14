@@ -20,6 +20,9 @@ const WORLD_CACHE_RAY_FLAG = RAY_FLAG_FORCE_OPAQUE;
 @if(!WORLD_CACHE_FORCE_OPAQUE)
 const WORLD_CACHE_RAY_FLAG = RAY_FLAG_NONE;
 
+/// Cells are only updated every few frames, so their history is limited to this many frames too, not just to a sample count.
+const WORLD_CACHE_HISTORY_FRAMES = 64.0;
+
 @compute @workgroup_size(64, 1, 1)
 fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     if active_cell_id.x >= world_cache.active_cells_count { return; }
@@ -28,7 +31,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     let geometry_data = world_cache.geometry_data[cell_index];
     var rng = cell_index + constants.frame_rng;
 
-    if rand_f(&rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count) { return; }
+    if skip_world_cache_cell_update(&rng) { return; }
 
     let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
 
@@ -43,14 +46,14 @@ fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     let geometry_data = world_cache.geometry_data[cell_index];
     var rng = cell_index + constants.frame_rng;
 
-    if rand_f(&rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count) { return; }
+    if skip_world_cache_cell_update(&rng) { return; }
 
     let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
     let ray = trace_ray(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, constants.world_cache_max_gi_ray_distance, WORLD_CACHE_RAY_FLAG);
     if ray.kind != RAY_QUERY_INTERSECTION_NONE {
         let ray_hit = resolve_ray_hit_full(ray, -ray_direction);
         let cell_life = atomicLoad(&world_cache.life[cell_index]);
-        let radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, cell_life, &rng);
+        let radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, cell_life, &rng);
         world_cache.active_cells_new_radiance[active_cell_id.x] += ray_hit.material.base_color * radiance;
     } else {
         // The ray is cut short at world_cache_max_gi_ray_distance to save on traversal costs.
@@ -67,26 +70,38 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     let cell_index = world_cache.active_cell_indices[active_cell_id.x];
     var rng = cell_index + constants.frame_rng;
 
-    if rand_f(&rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count) { return; }
+    if skip_world_cache_cell_update(&rng) { return; }
 
     let old_radiance = world_cache.radiance[cell_index];
     let new_radiance = world_cache.active_cells_new_radiance[active_cell_id.x];
     let luminance_delta = world_cache.luminance_deltas[cell_index];
 
     // https://bsky.app/profile/gboisse.bsky.social/post/3m5blga3ftk2a
-    let sample_count = min(old_radiance.a + 1.0, constants.world_cache_max_temporal_samples);
+    // Resets drop the history, sample count included, so the next frames reconverge from 1 sample
+    let sample_count = select(min(old_radiance.a + 1.0, constants.world_cache_max_temporal_samples), 1.0, bool(constants.reset));
     let alpha = abs(luminance_delta) / max(luminance(old_radiance.rgb), 0.001);
     let max_sample_count = mix(constants.world_cache_max_temporal_samples, 1.0, pow(saturate(alpha), 1.0 / 8.0));
     var blend_amount = 1.0 / min(sample_count, max_sample_count);
-    if bool(constants.reset) {
-        blend_amount = 1.0;
-    }
+
+    let last_update_frame = world_cache.last_update_frame[cell_index];
+    let frames_since_last_update = select(f32(constants.frame_index - last_update_frame), WORLD_CACHE_HISTORY_FRAMES, last_update_frame == 0u);
+    blend_amount = max(blend_amount, min(frames_since_last_update / WORLD_CACHE_HISTORY_FRAMES, 1.0));
+    world_cache.last_update_frame[cell_index] = constants.frame_index;
 
     let blended_radiance = mix(old_radiance.rgb, new_radiance, blend_amount);
     let blended_luminance_delta = select(mix(luminance_delta, luminance(blended_radiance) - luminance(old_radiance.rgb), 1.0 / 8.0), 0.0, bool(constants.reset));
 
     world_cache.radiance[cell_index] = vec4(blended_radiance, sample_count);
     world_cache.luminance_deltas[cell_index] = blended_luminance_delta;
+}
+
+/// Whether to skip updating a cell this frame, to stay near `world_cache_cell_updates_soft_target`.
+///
+/// Every update pass must make the same choice for a cell, so each calls this first, with the same seed.
+/// Resets update every cell, so that no cell keeps history from before the reset.
+fn skip_world_cache_cell_update(rng: ptr<function, u32>) -> bool {
+    if bool(constants.reset) { return false; }
+    return rand_f(rng) >= f32(constants.world_cache_cell_updates_soft_target) / f32(world_cache.active_cells_count);
 }
 
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec3<f32> {

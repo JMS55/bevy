@@ -20,21 +20,30 @@ const WORLD_CACHE_EMPTY_CELL: u32 = 0u;
 const WORLD_CACHE_CELL_NOT_FOUND: u32 = 0xFFFFFFFFu;
 
 @if(!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER)
-fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, ray_t: f32, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
-    var world_position = world_position_in;
-    var cell_size = get_cell_size(world_position, view_position, ray_t, rng);
+fn query_world_cache(world_position: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, ray_t: f32, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
+    let cell_size = get_cell_size(world_position, view_position, ray_t, rng);
+    let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));
 
 @if(!NO_JITTER_WORLD_CACHE) {
     // Jitter query point, which essentially blurs the cache a bit so it's not so grid-like
     // https://tomclabault.github.io/blog/2025/regir, jitter_world_position_tangent_plane
     let TBN = orthonormalize(world_normal);
     let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
-    world_position += offset.x * TBN[0] + offset.y * TBN[1];
-    cell_size = get_cell_size(world_position, view_position, ray_t, rng);
+    let jittered_world_position = world_position + offset.x * TBN[0] + offset.y * TBN[1];
+    let jittered_cell_size = get_cell_size(jittered_world_position, view_position, ray_t, rng);
+
+    // Only look up cells at the jittered point. The jittered point can be off the surface, or behind
+    // it, so a cell inserted there would shoot its rays from the wrong place. Misses fall back to
+    // the cell at the real point below, which can be inserted.
+    let jittered_position_quantized = bitcast<vec3<u32>>(quantize_position(jittered_world_position, jittered_cell_size));
+    let jittered_key = find_world_cache_cell(jittered_position_quantized, world_normal_quantized);
+    if jittered_key != WORLD_CACHE_CELL_NOT_FOUND {
+        keep_world_cache_cell_alive(jittered_key, cell_lifetime);
+        return world_cache.radiance[jittered_key].rgb;
+    }
 }
 
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
-    let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));
     let key = find_world_cache_cell(world_position_quantized, world_normal_quantized);
     if key != WORLD_CACHE_CELL_NOT_FOUND {
         // Cache entry already exists - get radiance

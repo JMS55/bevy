@@ -45,7 +45,7 @@ pub const LIGHT_TILE_SAMPLES_PER_BLOCK: u64 = 1024;
 /// Amount of entries in the world cache (must be a power of 2, and >= 2^10)
 pub const WORLD_CACHE_SIZE: u64 = 2u64.pow(20);
 /// Sum of per-cell field sizes in `WorldCache`. Keep in sync with `realtime_bindings.wgsl`.
-const WORLD_CACHE_ENTRY_SIZE: u64 = 84;
+const WORLD_CACHE_ENTRY_SIZE: u64 = 88;
 /// Size of the fixed `b` array (`array<u32, WORLD_CACHE_SIZE / 1024>`).
 const WORLD_CACHE_B_SIZE: u64 = (WORLD_CACHE_SIZE / 1024) * size_of::<u32>() as u64;
 /// Offset of `active_cells_count`.
@@ -59,7 +59,7 @@ pub const WORLD_CACHE_BUFFER_SIZE: u64 =
 /// per-frame state.
 ///
 /// Field order and types must match the `SolariLightingSettings` struct in
-/// `realtime_bindings.wgsl`.
+/// `bindings.wesl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SolariLightingUniforms {
@@ -73,7 +73,7 @@ struct SolariLightingUniforms {
     world_cache_cell_updates_soft_target: u32,
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
-    frame_rng: u32,
+    frame_index: u32,
     reset: u32,
 }
 
@@ -90,7 +90,8 @@ impl SolariLightingUniforms {
             world_cache_cell_updates_soft_target: settings.world_cache_cell_updates_soft_target,
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
-            frame_rng: frame_count.wrapping_mul(5782582),
+            // Starts at 1, since the world cache uses 0 for cells that were never updated
+            frame_index: frame_count.wrapping_add(1),
             reset: (settings.reset || force_reset) as u32,
         }
     }

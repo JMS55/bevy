@@ -6,7 +6,7 @@ import bevy_render::utils::octahedral_decode;
 import package::scene::brdf::{brdf_pdf, evaluate_brdf, F_AB};
 import package::realtime::gbuffer_utils::{gpixel_resolve, permute_pixel, pixel_dissimilar};
 import package::realtime::initial_path::{generate_initial_path, InitialSamplingResult, nee_probability};
-import package::realtime::bindings::{depth_buffer, empty_reservoir, gbuffer, load_motion_vector, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, view, view_output};
+import package::realtime::bindings::{depth_buffer, empty_reservoir, gbuffer, load_motion_vector, previous_depth_buffer, previous_gbuffer, previous_view, reservoirs_a, reservoirs_b, Reservoir, constants, frame_rng, view, view_output};
 import package::realtime::atmosphere::calculate_light_contribution;
 import package::scene::sampling::{balance_heuristic, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_visibility, trace_visibility_previous_frame};
 import package::scene::bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial};
@@ -21,7 +21,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    var rng = pixel_index + constants.frame_rng;
+    var rng = pixel_index + frame_rng();
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
@@ -47,7 +47,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
 
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
-    var rng = pixel_index + constants.frame_rng + 0x6A09E667u;
+    var rng = pixel_index + frame_rng() + 0x6A09E667u;
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
@@ -89,7 +89,7 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
         point_temporal_pixel_id = vec2<u32>(temporal_pixel_id_float);
     }
 
-    var permute_rng = constants.frame_rng;
+    var permute_rng = frame_rng();
     let permuted_temporal_pixel_id = permute_pixel(point_temporal_pixel_id, rand_u(&permute_rng), view.main_pass_viewport.zw);
 
     // Check if the pixel features have changed heavily between the current and previous frame

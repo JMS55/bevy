@@ -27,6 +27,7 @@ fn decay_world_cache(@builtin(global_invocation_id) global_id: vec3<u32>) {
             world_cache.checksums[global_id.x] = WORLD_CACHE_EMPTY_CELL;
             world_cache.radiance[global_id.x] = vec4(0.0);
             world_cache.luminance_deltas[global_id.x] = 0.0;
+            world_cache.last_update_frame[global_id.x] = 0u;
         }
     }
 }

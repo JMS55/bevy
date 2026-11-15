@@ -29,6 +29,7 @@ use bevy_render::{
     texture::CachedTexture,
 };
 use bytemuck::{Pod, Zeroable};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Size of the `LightSample` shader struct in bytes.
 const LIGHT_SAMPLE_STRUCT_SIZE: u64 = 8;
@@ -78,7 +79,7 @@ struct SolariLightingUniforms {
 }
 
 impl SolariLightingUniforms {
-    fn new(settings: &SolariLighting, frame_count: u32, force_reset: bool) -> Self {
+    fn new(settings: &SolariLighting, frame_count: u32, reset: bool) -> Self {
         Self {
             confidence_weight_cap: settings.confidence_weight_cap,
             primary_di_samples: settings.primary_di_samples,
@@ -91,7 +92,7 @@ impl SolariLightingUniforms {
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),
-            reset: (settings.reset || force_reset) as u32,
+            reset: reset as u32,
         }
     }
 }
@@ -120,6 +121,9 @@ pub struct SolariLightingResources {
     pub world_cache: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
     pub view_size: UVec2,
+    /// Whether the constants request a reset that the lighting node hasn't applied yet. The node can skip a
+    /// frame (e.g. while pipelines compile or the scene has no lights yet), and the reset must survive until it runs.
+    pub reset_pending: AtomicBool,
 }
 
 pub struct SolariReservoirBuffers {
@@ -172,10 +176,18 @@ pub fn prepare_solari_lighting_resources(
         let reusable = solari_lighting_resources.filter(|r| {
             r.view_size == view_size && r.reservoirs.is_some() == solari_lighting.restir
         });
-        let uniforms =
-            SolariLightingUniforms::new(solari_lighting, frame_count.0, reusable.is_none());
+        let reset = solari_lighting.reset || reusable.is_none();
 
         if let Some(solari_lighting_resources) = reusable {
+            // Keep requesting the reset until the lighting node has run with it
+            let reset = reset
+                || solari_lighting_resources
+                    .reset_pending
+                    .load(Ordering::Relaxed);
+            solari_lighting_resources
+                .reset_pending
+                .store(reset, Ordering::Relaxed);
+            let uniforms = SolariLightingUniforms::new(solari_lighting, frame_count.0, reset);
             // The constants uniform can change every frame, so always upload it.
             render_queue.write_buffer(
                 &solari_lighting_resources.constants,
@@ -184,6 +196,8 @@ pub fn prepare_solari_lighting_resources(
             );
             continue;
         }
+
+        let uniforms = SolariLightingUniforms::new(solari_lighting, frame_count.0, reset);
 
         let constants = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("solari_lighting_constants"),
@@ -244,6 +258,7 @@ pub fn prepare_solari_lighting_resources(
             world_cache,
             world_cache_active_cells_dispatch,
             view_size,
+            reset_pending: AtomicBool::new(reset),
         });
 
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]

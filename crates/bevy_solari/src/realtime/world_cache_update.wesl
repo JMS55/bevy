@@ -10,6 +10,7 @@ import package::realtime::bindings::{
     light_tile_resolved_samples,
     view,
     constants,
+    frame_rng,
     world_cache,
 };
 
@@ -20,6 +21,9 @@ const WORLD_CACHE_RAY_FLAG = RAY_FLAG_FORCE_OPAQUE;
 @if(!WORLD_CACHE_FORCE_OPAQUE)
 const WORLD_CACHE_RAY_FLAG = RAY_FLAG_NONE;
 
+/// Cells are only updated every few frames, so their history is limited to this many frames too, not just to a sample count.
+const WORLD_CACHE_HISTORY_FRAMES = 64.0;
+
 @compute @workgroup_size(64, 1, 1)
 fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) thread_id: vec3<u32>) {
     let active_cell_id = select_active_cell(thread_id.x);
@@ -27,7 +31,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     let cell_index = world_cache.active_cell_indices[active_cell_id];
     let geometry_data = world_cache.geometry_data[cell_index];
-    var rng = cell_index + constants.frame_rng;
+    var rng = cell_index + frame_rng();
 
     let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
 
@@ -41,7 +45,7 @@ fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
 
     let cell_index = world_cache.active_cell_indices[active_cell_id];
     let geometry_data = world_cache.geometry_data[cell_index];
-    var rng = cell_index + constants.frame_rng;
+    var rng = cell_index + frame_rng();
 
     let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
     let ray = trace_ray(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, constants.world_cache_max_gi_ray_distance, WORLD_CACHE_RAY_FLAG);
@@ -69,11 +73,18 @@ fn blend_new_samples(@builtin(global_invocation_id) thread_id: vec3<u32>) {
     let new_radiance = world_cache.active_cells_new_radiance[active_cell_id];
     let luminance_delta = world_cache.luminance_deltas[cell_index];
 
+    let last_update_frame = world_cache.last_update_frame[cell_index];
+    let frames_since_last_update = constants.frame_index - last_update_frame;
+    world_cache.last_update_frame[cell_index] = constants.frame_index;
+
     // https://bsky.app/profile/gboisse.bsky.social/post/3m5blga3ftk2a
     let sample_count = min(old_radiance.a + 1.0, constants.world_cache_max_temporal_samples);
     let alpha = abs(luminance_delta) / max(luminance(old_radiance.rgb), 0.001);
     let max_sample_count = mix(constants.world_cache_max_temporal_samples, 1.0, pow(saturate(alpha), 1.0 / 8.0));
     var blend_amount = 1.0 / min(sample_count, max_sample_count);
+
+    let history_frames = select(f32(frames_since_last_update), WORLD_CACHE_HISTORY_FRAMES, last_update_frame == 0u);
+    blend_amount = max(blend_amount, min(history_frames / WORLD_CACHE_HISTORY_FRAMES, 1.0));
     if bool(constants.reset) {
         blend_amount = 1.0;
     }
@@ -102,7 +113,7 @@ fn select_active_cell(thread_id: u32) -> u32 {
     if thread_id >= soft_target { return NO_ACTIVE_CELL; }
 
     let stride = f32(active_cells_count) / f32(soft_target);
-    var rng = constants.frame_rng;
+    var rng = frame_rng();
     let active_cell_id = u32((f32(thread_id) + rand_f(&rng)) * stride);
     return select(NO_ACTIVE_CELL, active_cell_id, active_cell_id < active_cells_count);
 }

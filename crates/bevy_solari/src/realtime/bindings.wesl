@@ -118,4 +118,5 @@ struct WorldCache {
     b: array<u32, constants::WORLD_CACHE_SIZE / 1024u>,
     active_cell_indices: array<u32, constants::WORLD_CACHE_SIZE>,
     active_cells_count: u32,
+    update_window_start: u32,
 }

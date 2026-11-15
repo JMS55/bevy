@@ -192,9 +192,9 @@ pub struct SolariLighting {
     /// cost of more work per frame. Lower values are cheaper but make the cache
     /// slower to update.
     ///
-    /// When there are more active cells than this, this many of them, picked at
-    /// random, are updated per frame, so each active cell is updated on average
-    /// once every `active_cells / target` frames. When there are fewer active
+    /// When there are more active cells than this, this many of them are updated
+    /// per frame, taking turns, so each active cell is updated about once every
+    /// `active_cells / target` frames (rounded up). When there are fewer active
     /// cells than this, all of them update every frame.
     pub world_cache_cell_updates_soft_target: u32,
 

@@ -86,9 +86,15 @@ fn compact_world_cache_write_active_cells(
     // The last cell writes the total
     if cell_id.x == WORLD_CACHE_SIZE - 1u {
         let active_cell_count = compacted_index + u32(cell_active);
+        let previous_active_cell_count = world_cache.active_cells_count;
         world_cache.active_cells_count = active_cell_count;
         // Cell updates only use the first soft-target threads, see `select_active_cell`
-        let update_thread_count = min(active_cell_count, constants.world_cache_cell_updates_soft_target);
+        let soft_target = constants.world_cache_cell_updates_soft_target;
+        let update_thread_count = min(active_cell_count, soft_target);
         world_cache_active_cells_dispatch = DispatchIndirectArgs((update_thread_count + 63u) / 64u, 1u, 1u);
+        // Move the window of cells to update along by the soft target. The active cells are listed in slot order, so
+        // cells coming and going shift the others' indices: scale the start with the count to stay at the same place.
+        let window_start = u32(f32(world_cache.update_window_start) * f32(active_cell_count) / max(f32(previous_active_cell_count), 1.0));
+        world_cache.update_window_start = select(0u, (window_start + soft_target) % active_cell_count, active_cell_count > soft_target);
     }
 }

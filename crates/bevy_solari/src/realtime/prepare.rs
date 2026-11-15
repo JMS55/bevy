@@ -93,7 +93,10 @@ impl SolariLightingUniforms {
             world_cache_max_temporal_samples: settings.world_cache_max_temporal_samples,
             world_cache_direct_light_sample_count: settings.world_cache_direct_light_sample_count,
             world_cache_max_gi_ray_distance: settings.world_cache_max_gi_ray_distance,
-            world_cache_cell_updates_soft_target: settings.world_cache_cell_updates_soft_target,
+            // With no cell updates, the world cache would never fill
+            world_cache_cell_updates_soft_target: settings
+                .world_cache_cell_updates_soft_target
+                .max(1),
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
             frame_rng: frame_count.wrapping_mul(5782582),

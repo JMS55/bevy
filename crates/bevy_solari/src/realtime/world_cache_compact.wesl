@@ -1,6 +1,7 @@
 import constants::WORLD_CACHE_SIZE;
 import package::realtime::world_cache_query::WORLD_CACHE_EMPTY_CELL;
 import package::realtime::bindings::{
+    constants,
     world_cache,
 };
 
@@ -85,6 +86,8 @@ fn compact_world_cache_write_active_cells(
     if cell_id.x == WORLD_CACHE_SIZE - 1u {
         let active_cell_count = compacted_index + u32(cell_active);
         world_cache.active_cells_count = active_cell_count;
-        world_cache_active_cells_dispatch = DispatchIndirectArgs((active_cell_count + 63u) / 64u, 1u, 1u);
+        // Cell updates only use the first soft-target threads, see `select_active_cell`
+        let update_thread_count = min(active_cell_count, constants.world_cache_cell_updates_soft_target);
+        world_cache_active_cells_dispatch = DispatchIndirectArgs((update_thread_count + 63u) / 64u, 1u, 1u);
     }
 }

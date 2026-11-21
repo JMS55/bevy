@@ -2,6 +2,7 @@ import bevy_render::view::View;
 import package::ui::{
     draw_uinode_background,
     draw_uinode_border,
+    encode_output,
 };
 
 import bevy_render::color_operations::{
@@ -128,9 +129,9 @@ fn fragment(in: GradientVertexOutput) -> @location(0) vec4<f32> {
     );
 
     if enabled(in.flags, BORDER_ANY) {
-        return draw_uinode_border(gradient_color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags);
+        return encode_output(draw_uinode_border(gradient_color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags));
     } else {
-        return draw_uinode_background(gradient_color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags);
+        return encode_output(draw_uinode_background(gradient_color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags));
     }
 }
 

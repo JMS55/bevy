@@ -1,4 +1,5 @@
 import bevy_render::view::View;
+import bevy_render::color_operations::linear_to_srgb;
 
 const TEXTURED = 1u;
 const RIGHT_VERTEX = 2u;
@@ -13,6 +14,13 @@ const INVERT: u32 = 4096u;
 
 fn enabled(flags: u32, mask: u32) -> bool {
     return (flags & mask) != 0u;
+}
+
+/// Encodes a linear color to sRGB. UI renders to targets that store sRGB-encoded
+/// values without converting them, so the hardware blends UI in sRGB space, as
+/// web browsers do. Every UI fragment shader must pass its output through this.
+fn encode_output(color: vec4<f32>) -> vec4<f32> {
+    return vec4(linear_to_srgb(color.rgb), color.a);
 }
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -260,9 +268,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = select(in.color, in.color * texture_color, enabled(in.flags, TEXTURED));
 
     if enabled(in.flags, BORDER_ANY) {
-        return draw_uinode_border(color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags);
+        return encode_output(draw_uinode_border(color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags));
     } else {
-        return draw_uinode_background(color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags);
+        return encode_output(draw_uinode_background(color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags));
     }
 }
 

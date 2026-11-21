@@ -674,7 +674,10 @@ pub fn queue_gradient(
     gradients_pipeline: Res<GradientPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<GradientPipeline>>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    render_views: Query<(&UiCameraView, Option<&UiAntiAlias>), With<ExtractedView>>,
+    render_views: Query<
+        (&UiCameraView, &UiRenderTarget, Option<&UiAntiAlias>),
+        With<ExtractedView>,
+    >,
     camera_views: Query<&ExtractedView>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
@@ -687,7 +690,7 @@ pub fn queue_gradient(
     {
         if current_camera_entity != *extracted_camera_entity {
             current_phase = render_views.get(*extracted_camera_entity).ok().and_then(
-                |(default_camera_view, ui_anti_alias)| {
+                |(default_camera_view, ui_render_target, ui_anti_alias)| {
                     camera_views
                         .get(default_camera_view.0)
                         .ok()
@@ -695,7 +698,7 @@ pub fn queue_gradient(
                             transparent_render_phases
                                 .get_mut(&view.retained_view_entity)
                                 .map(|transparent_phase| {
-                                    (view.target_format, ui_anti_alias, transparent_phase)
+                                    (ui_render_target.format(), ui_anti_alias, transparent_phase)
                                 })
                         })
                 },

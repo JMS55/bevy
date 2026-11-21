@@ -674,7 +674,7 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
     pipeline_cache: Res<PipelineCache>,
     render_materials: Res<RenderAssets<PreparedUiMaterial<M>>>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    render_views: Query<&UiCameraView, With<ExtractedView>>,
+    render_views: Query<(&UiCameraView, &UiRenderTarget), With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
@@ -687,22 +687,20 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
         extracted_uinodes.uinodes.iter()
     {
         if current_camera_entity != *extracted_camera_entity {
-            current_phase =
-                render_views
-                    .get(*extracted_camera_entity)
-                    .ok()
-                    .and_then(|default_camera_view| {
-                        camera_views
-                            .get(default_camera_view.0)
-                            .ok()
-                            .and_then(|view| {
-                                transparent_render_phases
-                                    .get_mut(&view.retained_view_entity)
-                                    .map(|transparent_phase| {
-                                        (view.target_format, transparent_phase)
-                                    })
-                            })
-                    });
+            current_phase = render_views.get(*extracted_camera_entity).ok().and_then(
+                |(default_camera_view, ui_render_target)| {
+                    camera_views
+                        .get(default_camera_view.0)
+                        .ok()
+                        .and_then(|view| {
+                            transparent_render_phases
+                                .get_mut(&view.retained_view_entity)
+                                .map(|transparent_phase| {
+                                    (ui_render_target.format(), transparent_phase)
+                                })
+                        })
+                },
+            );
             current_camera_entity = *extracted_camera_entity;
         }
 

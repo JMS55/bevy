@@ -2,7 +2,10 @@ use core::ops::Range;
 
 use super::{ImageNodeBindGroups, UiBatch, UiMeta, UiViewTarget};
 
-use crate::UiCameraView;
+use crate::{
+    srgb_target::{run_srgb_conversion, SrgbConversionPipeline},
+    UiCameraView, UiRenderTarget,
+};
 use bevy_ecs::{
     entity::EntityHash,
     prelude::*,
@@ -13,7 +16,9 @@ use bevy_render::{
     camera::ExtractedCamera,
     diagnostic::RecordDiagnostics,
     render_phase::*,
-    render_resource::{CachedRenderPipelineId, RenderPassDescriptor},
+    render_resource::{
+        CachedRenderPipelineId, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
+    },
     renderer::{RenderContext, ViewQuery},
     sync_world::MainEntity,
     view::*,
@@ -25,8 +30,10 @@ pub fn ui_pass(
     world: &World,
     view: ViewQuery<&UiCameraView>,
     ui_view_query: Query<(&ExtractedView, &UiViewTarget)>,
-    ui_view_target_query: Query<(&ViewTarget, &ExtractedCamera)>,
+    ui_view_target_query: Query<(&ViewTarget, &ExtractedCamera, &UiRenderTarget)>,
     transparent_render_phases: Res<ViewSortedRenderPhases<TransparentUi>>,
+    conversion_pipeline: Res<SrgbConversionPipeline>,
+    pipeline_cache: Res<PipelineCache>,
     mut ctx: RenderContext,
 ) {
     let ui_camera_view = view.into_inner();
@@ -36,7 +43,7 @@ pub fn ui_pass(
         return;
     };
 
-    let Ok((target, camera)) = ui_view_target_query.get(ui_view_target.0) else {
+    let Ok((target, camera, ui_render_target)) = ui_view_target_query.get(ui_view_target.0) else {
         return;
     };
 
@@ -50,12 +57,93 @@ pub fn ui_pass(
         return;
     }
 
+    // UI shaders output sRGB-encoded colors. Each arm renders them to a target
+    // that stores them as they are, so the hardware blends them in sRGB space.
+    match *ui_render_target {
+        UiRenderTarget::Direct(_) => {
+            let attachment = target.get_unsampled_color_attachment();
+            render_ui_phase(
+                &mut ctx,
+                world,
+                attachment,
+                camera,
+                transparent_phase,
+                ui_view_entity,
+            );
+        }
+        UiRenderTarget::EncodedView(_) => {
+            let Some(encoded_view) = target.main_texture_encoded_view() else {
+                return;
+            };
+            let attachment = target.get_unsampled_color_attachment_with_view(&encoded_view);
+            render_ui_phase(
+                &mut ctx,
+                world,
+                attachment,
+                camera,
+                transparent_phase,
+                ui_view_entity,
+            );
+        }
+        UiRenderTarget::Convert {
+            to_srgb, from_srgb, ..
+        } => {
+            let Some(to_srgb) = pipeline_cache.get_render_pipeline(to_srgb) else {
+                return;
+            };
+            // Without a pipeline back, upscaling decodes from sRGB instead.
+            let from_srgb = match from_srgb {
+                Some(id) => {
+                    let Some(pipeline) = pipeline_cache.get_render_pipeline(id) else {
+                        return;
+                    };
+                    Some(pipeline)
+                }
+                None => None,
+            };
+            run_srgb_conversion(
+                &mut ctx,
+                target,
+                &conversion_pipeline,
+                to_srgb,
+                "ui_to_srgb",
+            );
+            let attachment = target.get_unsampled_color_attachment();
+            render_ui_phase(
+                &mut ctx,
+                world,
+                attachment,
+                camera,
+                transparent_phase,
+                ui_view_entity,
+            );
+            if let Some(from_srgb) = from_srgb {
+                run_srgb_conversion(
+                    &mut ctx,
+                    target,
+                    &conversion_pipeline,
+                    from_srgb,
+                    "ui_from_srgb",
+                );
+            }
+        }
+    }
+}
+
+fn render_ui_phase(
+    ctx: &mut RenderContext,
+    world: &World,
+    attachment: RenderPassColorAttachment,
+    camera: &ExtractedCamera,
+    transparent_phase: &SortedRenderPhase<TransparentUi>,
+    ui_view_entity: Entity,
+) {
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("ui"),
-        color_attachments: &[Some(target.get_unsampled_color_attachment())],
+        color_attachments: &[Some(attachment)],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,

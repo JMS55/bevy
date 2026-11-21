@@ -64,10 +64,21 @@ impl ColorAttachment {
     ///
     /// The returned attachment will always have writing enabled (`store: StoreOp::Load`).
     pub fn get_unsampled_attachment(&self) -> RenderPassColorAttachment<'_> {
+        self.get_unsampled_attachment_with_view(&self.texture.default_view)
+    }
+
+    /// Like [`Self::get_unsampled_attachment`], but renders through `view`, which must
+    /// be a view of this attachment's texture. Use it to render through a view whose
+    /// format is one of the texture's
+    /// [`view_formats`](wgpu::TextureDescriptor::view_formats).
+    pub fn get_unsampled_attachment_with_view<'a>(
+        &'a self,
+        view: &'a TextureView,
+    ) -> RenderPassColorAttachment<'a> {
         let first_call = self.is_first_call.fetch_and(false, Ordering::SeqCst);
 
         RenderPassColorAttachment {
-            view: &self.texture.default_view,
+            view,
             depth_slice: None,
             resolve_target: None,
             ops: Operations {

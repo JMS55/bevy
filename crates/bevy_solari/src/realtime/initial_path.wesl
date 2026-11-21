@@ -3,7 +3,7 @@ import bevy_pbr::render::utils::{rand_f, rand_range_u};
 import bevy_render::maths::PI;
 import bevy_render::utils::octahedral_encode;
 import package::scene::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB};
-import package::realtime::light_candidates::{generate_light_candidate, light_candidate_count, light_candidate_split, LightCandidateSplit};
+import package::realtime::light_candidates::{candidate_light_sample, generate_light_candidate, light_candidate_count, light_candidate_split, LightCandidateSplit};
 import package::realtime::bindings::{empty_reservoir, local_light_count, Reservoir, constants, view};
 import package::realtime::atmosphere::calculate_light_contribution;
 import package::scene::sampling::{isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility, sample_environment_map_light};
@@ -292,6 +292,7 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
     var weight_sum = 0.0;
     var selected_target_function = 0.0;
     var selected_light_sample = LightSample(NULL_LIGHT_ID, 0u);
+    var selected_light_tile_slot = 0u;
     var selected_world_position = vec4(0.0);
     var selected_wi = vec3(0.0);
     var selected_brdf_radiance = vec3(0.0);
@@ -313,6 +314,7 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
         if rand_f(rng) * weight_sum < resampling_weight {
             selected_target_function = target_function;
             selected_light_sample = candidate.light_sample;
+            selected_light_tile_slot = candidate.light_tile_slot;
             selected_world_position = resolved_light_sample.world_position;
             selected_wi = light_contribution.wi;
             selected_inverse_solid_angle_pdf = light_contribution.inverse_solid_angle_pdf;
@@ -324,6 +326,7 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
     var unbiased_contribution_weight = 0.0;
     if selected_target_function > 0.0 {
         unbiased_contribution_weight = weight_sum / selected_target_function;
+        selected_light_sample = candidate_light_sample(selected_light_sample, selected_light_tile_slot);
     }
 
     return DiSample(unbiased_contribution_weight, selected_light_sample, selected_world_position, selected_wi, selected_brdf_radiance, selected_inverse_solid_angle_pdf, selected_brdf_rays_can_hit);

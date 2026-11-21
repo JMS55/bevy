@@ -15,7 +15,7 @@
 import bevy_pbr::render::utils::rand_range_u;
 import package::realtime::bindings::{directional_light_count, light_tile_resolved_samples, light_tile_samples, local_light_count, view};
 import package::realtime::presample_light_tiles::unpack_resolved_light_sample;
-import package::scene::sampling::{generate_light_sample, LightSample, ResolvedLightSample};
+import package::scene::sampling::{generate_light_sample, LightSample, NULL_LIGHT_ID, ResolvedLightSample};
 
 enable wgpu_ray_query;
 
@@ -62,8 +62,15 @@ fn local_light_selection_pdf(split: LightCandidateSplit) -> f32 {
     return f32(split.local) / f32(max(local_light_count(), 1u));
 }
 
+/// `LightCandidate::light_tile_slot` of directional light candidates.
+const NO_LIGHT_TILE_SLOT: u32 = 0xFFFFFFFFu;
+
 struct LightCandidate {
+    /// Only set for directional light candidates. Local light candidates leave it null and set
+    /// `light_tile_slot`, so that RIS loops only load the `LightSample` of the candidate they pick, see
+    /// `candidate_light_sample`.
     light_sample: LightSample,
+    light_tile_slot: u32,
     /// `inverse_pdf` includes the probability of picking the light, summed over the candidates of
     /// its strategy, so the candidate's RIS weight is just `target_function * inverse_pdf`.
     resolved_light_sample: ResolvedLightSample,
@@ -77,11 +84,17 @@ fn generate_light_candidate(i: u32, split: LightCandidateSplit, light_tile_start
         let light_id = rand_range_u(directional_count, rng);
         var sample = generate_light_sample(light_id, rng);
         sample.resolved_light_sample.inverse_pdf *= f32(directional_count) / f32(split.directional);
-        return LightCandidate(sample.light_sample, sample.resolved_light_sample);
+        return LightCandidate(sample.light_sample, NO_LIGHT_TILE_SLOT, sample.resolved_light_sample);
     }
 
     let tile_sample = light_tile_start + rand_range_u(1024u, rng);
     var resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
     resolved_light_sample.inverse_pdf /= local_light_selection_pdf(split);
-    return LightCandidate(light_tile_samples[tile_sample], resolved_light_sample);
+    return LightCandidate(LightSample(NULL_LIGHT_ID, 0u), tile_sample, resolved_light_sample);
+}
+
+/// The `LightSample` of a candidate, loading it from the light tiles for local light candidates.
+fn candidate_light_sample(light_sample: LightSample, light_tile_slot: u32) -> LightSample {
+    if light_tile_slot == NO_LIGHT_TILE_SLOT { return light_sample; }
+    return light_tile_samples[light_tile_slot];
 }

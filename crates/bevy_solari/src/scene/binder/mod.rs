@@ -62,6 +62,12 @@ pub struct RaytracingSceneBindings {
 }
 
 impl RaytracingSceneBindings {
+    /// Light ids `0..directional_light_count()` in `light_sources` are directional lights, and the
+    /// rest are local (point, spot, rect, and emissive mesh) lights.
+    pub fn directional_light_count(&self) -> u32 {
+        self.lights.index.directional_count()
+    }
+
     /// Records that a lighting pass read `previous_frame_light_id_translations`, so the next
     /// frame's table translates from this frame's light ids rather than older ones.
     pub fn note_light_translations_consumed(&self) {

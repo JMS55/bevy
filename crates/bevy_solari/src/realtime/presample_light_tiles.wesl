@@ -2,8 +2,8 @@
 
 import bevy_pbr::render::rgb9e5::{vec3_to_rgb9e5_, rgb9e5_to_vec3_};
 import bevy_render::utils::{octahedral_encode, octahedral_decode};
-import package::scene::sampling::{generate_random_light_sample, ResolvedLightSample};
-import package::realtime::bindings::{light_tile_samples, light_tile_resolved_samples, view, constants, ResolvedLightSamplePacked};
+import package::scene::sampling::{generate_random_local_light_sample, ResolvedLightSample};
+import package::realtime::bindings::{directional_light_count, light_tile_samples, light_tile_resolved_samples, local_light_count, view, constants, ResolvedLightSamplePacked};
 
 enable wgpu_ray_query;
 
@@ -18,7 +18,10 @@ fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builti
     let tile_id = workgroup_id.x;
     var rng = (tile_id * 0x9E3779B9u) + sample_index + constants.frame_rng;
 
-    let sample = generate_random_light_sample(&rng);
+    // Tiles only hold local lights, and leave the light selection pdf out of inverse_pdf,
+    // see `generate_light_candidate`
+    if local_light_count() == 0u { return; }
+    let sample = generate_random_local_light_sample(directional_light_count(), &rng);
 
     let i = (tile_id * 1024u) + sample_index;
     light_tile_samples[i] = sample.light_sample;

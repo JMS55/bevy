@@ -1,5 +1,6 @@
 //! This shader draws the color plane in various color spaces.
 import bevy_ui_render::ui_vertex_output::UiVertexOutput;
+import bevy_ui_render::ui::encode_output;
 import bevy_render::color_operations::{
     srgb_to_linear_rgb,
     hsl_to_linear_rgb,
@@ -14,8 +15,8 @@ struct ColorPlaneUniform {
 
 @group(1) @binding(0) var<uniform> uniform_data: ColorPlaneUniform;
 
-@fragment
-fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
+/// The linear color of the plane at this fragment.
+fn plane_color(in: UiVertexOutput) -> vec4<f32> {
     let uv = in.uv;
 @if(PLANE_RG)
     return vec4(srgb_to_linear_rgb(vec3(uv.x, 1.0 - uv.y, uniform_data.fixed_channel)), 1.0);
@@ -34,4 +35,9 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
 @else
     // Error color
     return vec4(1.0, 0.0, 1.0, 1.0);
+}
+
+@fragment
+fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
+    return encode_output(plane_color(in));
 }

@@ -1,6 +1,6 @@
 use crate::blit::{BlitPipeline, BlitPipelineKey};
 use bevy_app::prelude::*;
-use bevy_camera::CameraOutputMode;
+use bevy_camera::{CameraOutputMode, CompositingSpace};
 use bevy_ecs::prelude::*;
 use bevy_render::{
     camera::ExtractedCamera,
@@ -37,6 +37,16 @@ impl Plugin for UpscalingPlugin {
 #[derive(Component)]
 pub struct ViewUpscalingPipeline(CachedRenderPipelineId, BlitPipelineKey);
 
+/// The space the main texture stores colors in when upscaling reads it, if it
+/// differs from the view's [`ResolvedCompositingSpace`]. `None` means linear.
+///
+/// A pass that leaves the main texture in another space adds this to the view
+/// before [`prepare_view_upscaling_pipelines`] runs, so upscaling decodes from
+/// that space. The UI pass does this to skip converting the main texture back
+/// after it blends UI in sRGB.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UpscalingSourceSpace(pub Option<CompositingSpace>);
+
 /// This is not required on first startup but is required during render recovery
 fn clear_view_upscaling_pipelines(
     mut commands: Commands,
@@ -47,7 +57,7 @@ fn clear_view_upscaling_pipelines(
     }
 }
 
-fn prepare_view_upscaling_pipelines(
+pub fn prepare_view_upscaling_pipelines(
     mut commands: Commands,
     mut pipeline_cache: ResMut<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<BlitPipeline>>,
@@ -58,9 +68,12 @@ fn prepare_view_upscaling_pipelines(
         Option<&ExtractedCamera>,
         Option<&ViewUpscalingPipeline>,
         Option<&ResolvedCompositingSpace>,
+        Option<&UpscalingSourceSpace>,
     )>,
 ) {
-    for (entity, view_target, camera, maybe_pipeline, resolved_space) in view_targets.iter() {
+    for (entity, view_target, camera, maybe_pipeline, resolved_space, source_space) in
+        view_targets.iter()
+    {
         let blend_state = if let Some(extracted_camera) = camera {
             match extracted_camera.output_mode {
                 CameraOutputMode::Skip => None,
@@ -93,7 +106,10 @@ fn prepare_view_upscaling_pipelines(
             target_format,
             blend_state,
             samples: 1,
-            source_space: ResolvedCompositingSpace::space(resolved_space),
+            source_space: source_space.map_or_else(
+                || ResolvedCompositingSpace::space(resolved_space),
+                |source_space| source_space.0,
+            ),
         };
 
         if maybe_pipeline.is_none_or(|ViewUpscalingPipeline(_, cached_key)| *cached_key != key) {

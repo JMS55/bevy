@@ -38,7 +38,7 @@ use crate::{
     clipping::clip_polygon, BoxShadowSamples, RenderUiSystems, TransparentUi, UiCameraMap,
 };
 
-use super::{stack_z_offsets, UiCameraView, QUAD_VERTEX_POSITIONS};
+use super::{stack_z_offsets, UiCameraView, UiRenderTarget, QUAD_VERTEX_POSITIONS};
 
 /// A plugin that enables the rendering of box shadows.
 pub struct BoxShadowPlugin;
@@ -405,7 +405,10 @@ pub fn queue_shadows(
     box_shadow_pipeline: Res<BoxShadowPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<BoxShadowPipeline>>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    render_views: Query<(&UiCameraView, Option<&BoxShadowSamples>), With<ExtractedView>>,
+    render_views: Query<
+        (&UiCameraView, &UiRenderTarget, Option<&BoxShadowSamples>),
+        With<ExtractedView>,
+    >,
     camera_views: Query<&ExtractedView>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
@@ -419,7 +422,7 @@ pub fn queue_shadows(
     {
         if current_camera_entity != *extracted_camera_entity {
             current_phase = render_views.get(*extracted_camera_entity).ok().and_then(
-                |(default_camera_view, shadow_samples)| {
+                |(default_camera_view, ui_render_target, shadow_samples)| {
                     camera_views
                         .get(default_camera_view.0)
                         .ok()
@@ -431,7 +434,7 @@ pub fn queue_shadows(
                                         &pipeline_cache,
                                         &box_shadow_pipeline,
                                         BoxShadowPipelineKey {
-                                            target_format: view.target_format,
+                                            target_format: ui_render_target.format(),
                                             samples: shadow_samples.copied().unwrap_or_default().0,
                                         },
                                     );

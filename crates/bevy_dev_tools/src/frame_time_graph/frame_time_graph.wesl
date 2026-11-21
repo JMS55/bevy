@@ -1,4 +1,5 @@
 import bevy_ui_render::ui_vertex_output::UiVertexOutput;
+import bevy_ui_render::ui::encode_output;
 
 @group(1) @binding(0) var<storage> values: array<f32>;
 struct Config {
@@ -28,8 +29,8 @@ fn sdf_square(pos: vec2<f32>, half_size: vec2<f32>, offset: vec2<f32>) -> f32 {
     return outside_dist + inside_dist;
 }
 
-@fragment
-fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
+/// The linear color of the graph at this fragment.
+fn graph_color(in: UiVertexOutput) -> vec4<f32> {
     let dt_min = config.dt_min;
     let dt_max = config.dt_max;
     let dt_min_log2 = config.dt_min_log2;
@@ -64,4 +65,9 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     }
 
     return vec4(0.0, 0.0, 0.0, 0.5);
+}
+
+@fragment
+fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
+    return encode_output(graph_color(in));
 }

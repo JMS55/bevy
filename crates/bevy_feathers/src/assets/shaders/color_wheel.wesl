@@ -1,5 +1,6 @@
 // This shader draws a hue ring and an inner whiteness/blackness triangle.
 import bevy_ui_render::ui_vertex_output::UiVertexOutput;
+import bevy_ui_render::ui::encode_output;
 import bevy_render::color_operations::hwb_to_linear_rgb;
 import bevy_render::maths::PI_2;
 
@@ -85,5 +86,5 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     let ring_color = hwb_to_linear_rgb(vec3(ring_hue, 0.0, 0.0));
     let triangle_color = hwb_to_linear_rgb(vec3(triangle_hue, whiteness, blackness));
     let color = (ring_color * ring_alpha + triangle_color * triangle_alpha) / max(alpha, 0.001);
-    return vec4(color, alpha);
+    return encode_output(vec4(color, alpha));
 }

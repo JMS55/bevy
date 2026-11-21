@@ -23,7 +23,7 @@ use crate::{
     render_resource::{
         BindGroup, DynamicUniformBuffer, ShaderType, Texture, TextureView, TextureViewId,
     },
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderAdapter, RenderDevice, RenderQueue},
     sync_world::MainEntity,
     texture::{
         CachedTexture, ColorAttachment, DepthStencilAttachment, GpuImage, ManualTextureViews,
@@ -47,8 +47,9 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use wgpu::{
-    BufferUsages, Color as WgpuColor, RenderPassColorAttachment, RenderPassDepthStencilAttachment,
-    StoreOp, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    BufferUsages, Color as WgpuColor, DownlevelFlags, RenderPassColorAttachment,
+    RenderPassDepthStencilAttachment, StoreOp, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages, TextureViewDescriptor,
 };
 
 /// The matrix that converts from the RGB to the LMS color space.
@@ -794,6 +795,8 @@ pub struct ViewUniformOffset {
 pub struct ViewTarget {
     main_textures: MainTargetTextures,
     main_texture_format: TextureFormat,
+    /// See [`ViewTarget::main_texture_encoded_view_format`].
+    encoded_view_format: Option<TextureFormat>,
     /// 0 represents `main_textures.a`, 1 represents `main_textures.b`
     /// This is shared across view targets with the same render target
     main_texture: Arc<AtomicUsize>,
@@ -1002,6 +1005,47 @@ impl ViewTarget {
     #[inline]
     pub fn main_texture_format(&self) -> TextureFormat {
         self.main_texture_format
+    }
+
+    /// The format of a view of the main texture that reads and writes its stored,
+    /// sRGB-encoded values as they are, without converting them to or from linear.
+    ///
+    /// This is `Some` when the main texture has an sRGB format and the device can
+    /// view textures in other formats. Blending through such a view happens in
+    /// sRGB space. See [`Self::main_texture_encoded_view`].
+    #[inline]
+    pub fn main_texture_encoded_view_format(&self) -> Option<TextureFormat> {
+        self.encoded_view_format
+    }
+
+    /// Creates a view of the current main texture in
+    /// [`Self::main_texture_encoded_view_format`], if there is one. Render to it
+    /// with [`Self::get_unsampled_color_attachment_with_view`].
+    pub fn main_texture_encoded_view(&self) -> Option<TextureView> {
+        let format = self.encoded_view_format?;
+        Some(self.main_texture().create_view(&TextureViewDescriptor {
+            label: Some("main_texture_encoded_view"),
+            format: Some(format),
+            ..Default::default()
+        }))
+    }
+
+    /// Like [`Self::get_unsampled_color_attachment`], but renders through `view`, which
+    /// must be a view of the current [`Self::main_texture`], such as one from
+    /// [`Self::main_texture_encoded_view`].
+    pub fn get_unsampled_color_attachment_with_view<'a>(
+        &'a self,
+        view: &'a TextureView,
+    ) -> RenderPassColorAttachment<'a> {
+        if self.main_texture.load(Ordering::SeqCst) == 0 {
+            self.main_textures
+                .a
+                .get_unsampled_attachment_with_view(view)
+        } else {
+            self.main_textures
+                .b
+                .get_unsampled_attachment_with_view(view)
+        }
     }
 
     /// The final texture this view will render to.
@@ -1380,10 +1424,37 @@ pub fn cleanup_view_targets_for_resize(
 ///
 /// [`CameraMainTextureUsages`] isn't part of the key, because render world
 /// systems can add usages after [`resolve_composition_spaces`] runs.
-type MainTextureKey = (Option<NormalizedRenderTarget>, TextureFormat, Msaa);
+pub type MainTextureKey = (Option<NormalizedRenderTarget>, TextureFormat, Msaa);
 
-fn main_texture_key(camera: &ExtractedCamera, view: &ExtractedView, msaa: Msaa) -> MainTextureKey {
+/// The [`MainTextureKey`] of a camera view. Views with equal keys share a main texture.
+pub fn main_texture_key(
+    camera: &ExtractedCamera,
+    view: &ExtractedView,
+    msaa: Msaa,
+) -> MainTextureKey {
     (camera.target.clone(), view.target_format, msaa)
+}
+
+/// The other formats a main texture in `format` may be viewed as, when the device
+/// supports [`DownlevelFlags::VIEW_FORMATS`].
+fn main_texture_view_formats(format: TextureFormat) -> &'static [TextureFormat] {
+    match format {
+        TextureFormat::Bgra8Unorm => &[TextureFormat::Bgra8UnormSrgb],
+        TextureFormat::Rgba8Unorm => &[TextureFormat::Rgba8UnormSrgb],
+        TextureFormat::Bgra8UnormSrgb => &[TextureFormat::Bgra8Unorm],
+        TextureFormat::Rgba8UnormSrgb => &[TextureFormat::Rgba8Unorm],
+        _ => &[],
+    }
+}
+
+/// The format that views an sRGB main texture's stored values without conversion.
+/// See [`ViewTarget::main_texture_encoded_view_format`].
+fn encoded_view_format(format: TextureFormat) -> Option<TextureFormat> {
+    match format {
+        TextureFormat::Bgra8UnormSrgb => Some(TextureFormat::Bgra8Unorm),
+        TextureFormat::Rgba8UnormSrgb => Some(TextureFormat::Rgba8Unorm),
+        _ => None,
+    }
 }
 
 pub fn prepare_view_targets(
@@ -1400,9 +1471,16 @@ pub fn prepare_view_targets(
         Option<&ResolvedCompositingSpace>,
     )>,
     view_target_attachments: Res<ViewTargetAttachments>,
+    render_adapter: Res<RenderAdapter>,
     mut main_texture_atomics: Local<HashMap<MainTextureKey, Weak<AtomicUsize>>>,
 ) {
     main_texture_atomics.retain(|_, weak| weak.strong_count() > 0);
+
+    // WebGL2 and some GL drivers can't view a texture in a format other than its own.
+    let supports_view_formats = render_adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(DownlevelFlags::VIEW_FORMATS);
 
     let mut usages = HashMap::new();
     for (_, camera, view, texture_usage, msaa, _) in cameras.iter() {
@@ -1459,10 +1537,10 @@ pub fn prepare_view_targets(
                 dimension: TextureDimension::D2,
                 format: main_texture_format,
                 usage: usages[&key],
-                view_formats: match main_texture_format {
-                    TextureFormat::Bgra8Unorm => &[TextureFormat::Bgra8UnormSrgb],
-                    TextureFormat::Rgba8Unorm => &[TextureFormat::Rgba8UnormSrgb],
-                    _ => &[],
+                view_formats: if supports_view_formats {
+                    main_texture_view_formats(main_texture_format)
+                } else {
+                    &[]
                 },
             };
             let a = texture_cache.get(
@@ -1523,6 +1601,9 @@ pub fn prepare_view_targets(
             main_texture: main_textures.main_texture.clone(),
             main_textures,
             main_texture_format,
+            encoded_view_format: supports_view_formats
+                .then(|| encoded_view_format(main_texture_format))
+                .flatten(),
             out_texture: out_attachment.cloned(),
         });
     }

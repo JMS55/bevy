@@ -15,6 +15,7 @@ mod image;
 pub use image::ImageNodeAssetChangedSystems;
 mod pipeline;
 pub mod render_pass;
+pub mod srgb_target;
 mod text;
 pub mod ui_material;
 mod ui_material_pipeline;
@@ -88,6 +89,7 @@ pub use blur::{
 };
 pub use pipeline::*;
 pub use render_pass::*;
+pub use srgb_target::{UiRenderTarget, UiRenderTargetPlugin};
 pub use ui_material_pipeline::*;
 use ui_texture_slice_pipeline::UiTextureSlicerPlugin;
 
@@ -310,6 +312,7 @@ impl Plugin for UiRenderPlugin {
                 ui_pass.after(Core3dSystems::PostProcess).before(upscaling),
             );
 
+        app.add_plugins(UiRenderTargetPlugin);
         app.add_plugins(UiTextureSlicerPlugin);
         app.add_plugins(GradientPlugin);
         app.add_plugins(BoxShadowPlugin);
@@ -1522,7 +1525,13 @@ pub fn extract_ui_camera_view(
         commands
             .get_entity(render_entity)
             .expect("Camera entity wasn't synced.")
-            .remove::<(UiCameraView, UiAntiAlias, BoxShadowSamples)>();
+            .remove::<(
+                UiCameraView,
+                UiRenderTarget,
+                bevy_core_pipeline::upscaling::UpscalingSourceSpace,
+                UiAntiAlias,
+                BoxShadowSamples,
+            )>();
         live_entities.remove(&retained_view_entity);
         if let Some(cached_ui_view_data) = cached_ui_view_data.remove(&main_entity) {
             commands
@@ -2221,7 +2230,10 @@ pub fn queue_uinodes(
     ui_pipeline: Res<UiPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<UiPipeline>>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    render_views: Query<(&UiCameraView, Option<&UiAntiAlias>), With<ExtractedView>>,
+    render_views: Query<
+        (&UiCameraView, &UiRenderTarget, Option<&UiAntiAlias>),
+        With<ExtractedView>,
+    >,
     camera_views: Query<&ExtractedView>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
@@ -2235,7 +2247,7 @@ pub fn queue_uinodes(
     {
         if current_camera_entity != *extracted_camera_entity {
             current_phase = render_views.get(*extracted_camera_entity).ok().and_then(
-                |(default_camera_view, ui_anti_alias)| {
+                |(default_camera_view, ui_render_target, ui_anti_alias)| {
                     camera_views
                         .get(default_camera_view.0)
                         .ok()
@@ -2247,7 +2259,7 @@ pub fn queue_uinodes(
                                         &pipeline_cache,
                                         &ui_pipeline,
                                         UiPipelineKey {
-                                            target_format: view.target_format,
+                                            target_format: ui_render_target.format(),
                                             anti_alias: matches!(
                                                 ui_anti_alias,
                                                 None | Some(UiAntiAlias::On)

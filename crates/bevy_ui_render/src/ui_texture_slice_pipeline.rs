@@ -418,7 +418,7 @@ pub fn queue_ui_slices(
     ui_slicer_pipeline: Res<UiTextureSlicePipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<UiTextureSlicePipeline>>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    render_views: Query<&UiCameraView, With<ExtractedView>>,
+    render_views: Query<(&UiCameraView, &UiRenderTarget), With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
     pipeline_cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<TransparentUi>>,
@@ -429,29 +429,27 @@ pub fn queue_ui_slices(
 
     for (main_entity, (extracted_camera_entity, subslices)) in extracted_ui_slicers.slices.iter() {
         if current_camera_entity != *extracted_camera_entity {
-            current_phase =
-                render_views
-                    .get(*extracted_camera_entity)
-                    .ok()
-                    .and_then(|default_camera_view| {
-                        camera_views
-                            .get(default_camera_view.0)
-                            .ok()
-                            .and_then(|view| {
-                                transparent_render_phases
-                                    .get_mut(&view.retained_view_entity)
-                                    .map(|transparent_phase| {
-                                        let pipeline = pipelines.specialize(
-                                            &pipeline_cache,
-                                            &ui_slicer_pipeline,
-                                            UiTextureSlicePipelineKey {
-                                                target_format: view.target_format,
-                                            },
-                                        );
-                                        (pipeline, transparent_phase)
-                                    })
-                            })
-                    });
+            current_phase = render_views.get(*extracted_camera_entity).ok().and_then(
+                |(default_camera_view, ui_render_target)| {
+                    camera_views
+                        .get(default_camera_view.0)
+                        .ok()
+                        .and_then(|view| {
+                            transparent_render_phases
+                                .get_mut(&view.retained_view_entity)
+                                .map(|transparent_phase| {
+                                    let pipeline = pipelines.specialize(
+                                        &pipeline_cache,
+                                        &ui_slicer_pipeline,
+                                        UiTextureSlicePipelineKey {
+                                            target_format: ui_render_target.format(),
+                                        },
+                                    );
+                                    (pipeline, transparent_phase)
+                                })
+                        })
+                },
+            );
             current_camera_entity = *extracted_camera_entity;
         }
 

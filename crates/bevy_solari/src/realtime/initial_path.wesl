@@ -223,32 +223,8 @@ fn generate_nee_candidate(
     let p_nee = nee_probability((*path).material);
     if p_nee == 0.0 { return; }
 
-    // Directional and local lights get separate RIS picks and shadow rays, see light_candidates.wesl.
-    // The two sets don't overlap, and each candidate's pdf only involves its own strategy, so each
-    // pick is an unbiased estimate of its own set, and the two add up.
-    //
-    // Both picks go through one call site, so the RIS loop and shadow ray are only inlined once.
-    let split = light_candidate_split(di_samples);
-    for (var pick = 0u; pick < 2u; pick++) {
-        let candidate_start = select(split.directional, 0u, pick == 0u);
-        let candidate_end = select(light_candidate_count(split), split.directional, pick == 0u);
-        if candidate_start == candidate_end { continue; }
-
-        let di = sample_light_ris((*path).ray_origin, (*path).normal, (*path).wo, (*path).material, F_ab, split, candidate_start, candidate_end, workgroup_id, bounce, rng);
-        add_nee_sample(path, di, F_ab, p_nee, bounce, rng);
-    }
-}
-
-/// Traces visibility for one NEE sample, and adds it to the path.
-fn add_nee_sample(
-    path: ptr<function, PathState>,
-    di_in: DiSample,
-    F_ab: vec2<f32>,
-    p_nee: f32,
-    bounce: u32,
-    rng: ptr<function, u32>,
-) {
-    var di = di_in;
+    // One RIS pick over the directional and local light candidates, see light_candidates.wesl
+    var di = sample_light_ris((*path).ray_origin, (*path).normal, (*path).wo, (*path).material, F_ab, light_candidate_split(di_samples), workgroup_id, bounce, rng);
     let di_target_function = luminance(di.brdf_radiance);
     if di_target_function <= 0.0 { return; }
 
@@ -308,8 +284,8 @@ struct DiSample {
     brdf_rays_can_hit: bool,
 }
 
-/// RIS over candidates `[candidate_start, candidate_end)`, see `LightCandidateSplit`.
-fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, split: LightCandidateSplit, candidate_start: u32, candidate_end: u32, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
+/// RIS over the directional and local light candidates, see `LightCandidateSplit`.
+fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, split: LightCandidateSplit, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y + bounce;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -321,7 +297,7 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
     var selected_brdf_radiance = vec3(0.0);
     var selected_inverse_solid_angle_pdf = 0.0;
     var selected_brdf_rays_can_hit = false;
-    for (var i = candidate_start; i < candidate_end; i++) {
+    for (var i = 0u; i < light_candidate_count(split); i++) {
         // Each candidate's inverse_pdf already includes its strategy's 1 / candidate count
         let candidate = generate_light_candidate(i, split, light_tile_start, rng);
         let resolved_light_sample = candidate.resolved_light_sample;

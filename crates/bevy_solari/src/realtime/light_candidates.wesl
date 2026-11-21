@@ -1,10 +1,16 @@
 //! NEE candidates for directional and local (point, spot, rect, and emissive mesh) lights.
 //!
 //! NEE draws candidates from two strategies: directional lights picked uniformly, and local lights
-//! from the presampled light tiles. Callers run a separate RIS pick,
-//! and a separate shadow ray, for each strategy's candidates. In one shared pick, an occluded
-//! sun's unshadowed contribution dwarfs any local light's, so in shadow the sun wins nearly every
-//! pick, and local lights only get through as rare fireflies.
+//! from the presampled light tiles. Callers run one RIS pick, with one shadow ray, over the
+//! candidates of both. That's the same as merging a reservoir of local light candidates with a
+//! reservoir of directional light candidates: the two sets don't overlap, and each candidate's pdf
+//! only involves its own strategy, so the pick stays unbiased.
+//!
+//! The light tiles sample every light uniformly, so before the split, the sun was one light among
+//! hundreds of emissives in Bistro and rarely a candidate at all. Now the sun is always a candidate,
+//! so sunlit surfaces converge quickly. In shadow, the occluded sun's unshadowed contribution still
+//! wins most picks and its shadow ray fails, which leaves local lights noisier there than a separate
+//! pick per strategy would, but that would cost a second shadow ray.
 
 import bevy_pbr::render::utils::rand_range_u;
 import package::realtime::bindings::{directional_light_count, light_tile_resolved_samples, light_tile_samples, local_light_count, view};

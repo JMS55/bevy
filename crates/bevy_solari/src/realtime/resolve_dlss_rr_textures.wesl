@@ -21,6 +21,18 @@ const MAX_VIRTUAL_DEPTH_JITTER = 0.002;
 /// 24-bit octahedral and neighboring texels round differently.
 const NORMAL_QUANTIZATION_FLOOR = 0.002;
 
+/// Glossy surfaces up to this roughness (GGX alpha) that reflect nearly everything specularly (polished
+/// metal) are replaced like perfect mirrors. Their lobe is narrow enough that the mirror direction
+/// stands for it, and treating them as plain glossy surfaces leaves DLSS-RR smearing their highlights
+/// in motion. Their guides come from a separate mirror-direction ray (`replace_near_mirror_surface`).
+const NEAR_MIRROR_MAX_ROUGHNESS = 0.003;
+
+/// Roughness written to the DLSS-RR guide for mirrors too curved to replace (chrome trim, tubes). Their
+/// reflection can't be tracked by a virtual image and falls back to the surface's motion; telling the
+/// denoiser the reflection is rough lets it reproject and filter it instead of treating it as a sharp
+/// mirror it can't follow, which flickers and pumps in camera motion. Guide only: shading is untouched.
+const CURVED_MIRROR_GUIDE_ROUGHNESS = 0.5;
+
 /// Distance, in meters, standing in for "infinitely far" when a mirror ray finds nothing.
 const ENVIRONMENT_VIRTUAL_DISTANCE = 10000.0;
 
@@ -69,7 +81,8 @@ fn needs_specular_motion_vector(roughness: f32) -> bool {
 struct PsrState {
     finished: bool,
     /// Whether this pixel's surface is being swapped out for the reflected one, or is only having its
-    /// reflection's motion described. Keyed on the primary surface only, and false for anything glossy.
+    /// reflection's motion described. Keyed on the primary surface only: perfect mirrors and near-mirror
+    /// metals (`is_near_mirror`), false for anything else glossy.
     replace_fully: bool,
     /// The chain's cumulative transform - the product of one Householder reflection per mirror, in
     /// chain order - stored as a rotor plus the parity of the reflection count rather than as the 3x3
@@ -88,7 +101,7 @@ struct PsrState {
 fn psr_init(world_normal: vec3<f32>, material: ResolvedMaterial) -> PsrState {
     var psr: PsrState;
     psr.finished = !needs_specular_motion_vector(material.roughness);
-    psr.replace_fully = is_delta_mirror(material);
+    psr.replace_fully = is_delta_mirror(material) || is_near_mirror(material);
     // The chain opens with the primary surface's own reflection, so parity starts odd.
     psr.mirror_rotor = mirror_chain_rotor(world_normal, false);
     psr.mirror_parity_odd = true;
@@ -135,6 +148,7 @@ fn replace_primary_surface(
     // Too curved to track the reflection; fall back to the surface's own motion so the guide is not stale
     if psr.replace_fully && 2.0 * reflector_curvature(pixel_id, primary_normal) * psr.reflection_length > MAX_VIRTUAL_DEPTH_JITTER * path_length {
         textureStore(specular_motion_vectors, pixel_id, vec4(load_motion_vector(pixel_id), vec2(0.0)));
+        textureStore(normal_roughness, pixel_id, vec4(primary_normal, max(primary_material.perceptual_roughness, CURVED_MIRROR_GUIDE_ROUGHNESS)));
         return;
     }
 
@@ -178,6 +192,12 @@ fn primary_surface_glossy(material: ResolvedMaterial) -> bool {
 
 fn is_delta_mirror(material: ResolvedMaterial) -> bool {
     return material.roughness <= MIRROR_ROUGHNESS_THRESHOLD
+        && specular_fraction(material, F_AB(material.perceptual_roughness, 1.0)) >= FULL_REPLACEMENT_FRACTION;
+}
+
+/// Polished, nearly-mirror glossy surfaces that are replaced like perfect mirrors, see `NEAR_MIRROR_MAX_ROUGHNESS`.
+fn is_near_mirror(material: ResolvedMaterial) -> bool {
+    return material.roughness > MIRROR_ROUGHNESS_THRESHOLD && material.roughness <= NEAR_MIRROR_MAX_ROUGHNESS
         && specular_fraction(material, F_AB(material.perceptual_roughness, 1.0)) >= FULL_REPLACEMENT_FRACTION;
 }
 

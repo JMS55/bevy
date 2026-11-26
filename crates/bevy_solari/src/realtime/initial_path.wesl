@@ -11,7 +11,7 @@ import package::scene::bindings::{light_sources, MIRROR_ROUGHNESS_THRESHOLD, RAY
 import package::realtime::world_cache_query::{get_cell_size, query_world_cache, WORLD_CACHE_CELL_LIFETIME};
 
 @if(DLSS_RR_GUIDE_BUFFERS)
-import package::realtime::resolve_dlss_rr_textures::{is_delta_mirror, primary_surface_glossy, psr_bounce_reflectance, psr_chain_mirror, psr_environment_miss, psr_init, replace_primary_surface};
+import package::realtime::resolve_dlss_rr_textures::{is_delta_mirror, is_near_mirror, primary_surface_glossy, psr_bounce_reflectance, psr_chain_mirror, psr_environment_miss, psr_init, PsrState, replace_primary_surface};
 
 enable wgpu_ray_query;
 
@@ -85,6 +85,13 @@ fn generate_initial_path(world_position: vec3<f32>, world_normal: vec3<f32>, mat
 
     @if(DLSS_RR_GUIDE_BUFFERS)
     var psr = psr_init(world_normal, material);
+
+    // Near-mirrors get their guides from the mirror direction, not from this path's sampled lobe direction
+    @if(DLSS_RR_GUIDE_BUFFERS)
+    if !psr.finished && is_near_mirror(material) {
+        replace_near_mirror_surface(psr, pixel_id, world_position, world_normal, wo, material, primary_F_ab);
+        psr.finished = true;
+    }
 
     for (var bounce = 0u; bounce < constants.max_bounces; bounce++) {
         let NdotV = max(dot(path.normal, path.wo), 0.0001);
@@ -508,4 +515,23 @@ fn reconnection_reusable(ray_t: f32, p_brdf: f32, wi: vec3<f32>, diffuse_selecte
 @if(RESTIR)
 fn x1_lobe_reusable(p_brdf: f32, diffuse_selected: bool, x1_perceptual_roughness: f32) -> bool {
     return !isinf(p_brdf) && (diffuse_selected || x1_perceptual_roughness >= RECONNECTION_ROUGHNESS_MIN);
+}
+
+/// Primary surface replacement for near-mirror glossy surfaces (`is_near_mirror`). Traces one extra ray in the
+/// mirror direction for the guides, so they don't jitter from frame to frame with the sampled direction within
+/// the lobe the way they would if they came from the path's own BRDF sample. The path's shading is unaffected.
+@if(DLSS_RR_GUIDE_BUFFERS)
+fn replace_near_mirror_surface(psr_in: PsrState, pixel_id: vec2<u32>, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, primary_F_ab: vec2<f32>) {
+    let wi = reflect(-wo, world_normal);
+    let ray = trace_ray(world_position + (world_normal * RAY_T_MIN), wi, RAY_T_MIN, RAY_T_MAX, RAY_FLAG_NONE);
+    if ray.kind == RAY_QUERY_INTERSECTION_NONE {
+        psr_environment_miss(pixel_id, wo);
+        return;
+    }
+    let ray_hit = resolve_ray_hit_full(ray, -wi);
+
+    var psr = psr_in;
+    psr.throughput *= psr_bounce_reflectance(wo, wi, world_normal, material, primary_F_ab, false);
+    psr.reflection_length = ray.t;
+    replace_primary_surface(pixel_id, psr, ray_hit, material, world_position, world_normal, wo, primary_F_ab);
 }

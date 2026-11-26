@@ -244,7 +244,7 @@ pub struct SolariLighting {
     /// lights left out of a cell can still be found.
     ///
     /// This greatly reduces noise in scenes with many lights, at the cost of building the grid
-    /// each frame.
+    /// each frame. Scenes with fewer than [`SolariLighting::light_grid_min_lights`] lights skip it.
     ///
     /// Defaults to `true`.
     pub light_grid: bool,
@@ -264,29 +264,60 @@ pub struct SolariLighting {
     /// are left out of the cell's list.
     ///
     /// Lower values find more lights in each cell, at the cost of a slower build, and of spreading
-    /// each cell's slots over more lights.
+    /// each cell's probability over more lights.
     pub light_grid_contribution_threshold: f32,
 
     /// Fraction of local light candidates drawn uniformly from every local light, rather than
     /// from the light grid cell. At least one candidate is always used.
     ///
     /// These are what find lights left out of a cell, and the lights of cells that have no list.
+    ///
+    /// Defaults to 0.5: dense clusters of lights (particle effects) find more lights than a cell's
+    /// list holds, and only these candidates find the rest (in a city with fire and spark lights,
+    /// noise x0.7 vs 0.25), at the price of some noise where lists hold every light that matters.
     pub light_grid_global_candidate_fraction: f32,
 
-    /// How many slots each light grid cell's list has, at most 512.
+    /// The most lights a light grid cell's list holds, at most 4096.
     ///
-    /// Lights get a number of slots proportional to an estimate of their contribution to the cell,
-    /// and light candidates pick a slot uniformly. More slots follow the estimate more closely, at
-    /// the cost of more memory per cell. Lights whose share is under half a slot get none, and are
-    /// only found by the global candidates.
-    pub light_grid_weighted_slots: u32,
+    /// Each list is an exact distribution over its lights, in proportion to an estimate of their
+    /// contribution to the cell. When more lights reach the threshold, the heaviest are kept, and
+    /// the others are only found by the global candidates.
+    pub light_grid_max_lights_per_cell: u32,
 
     /// Every light in a light grid cell's list gets at least the heaviest light's weight divided by
     /// this.
     ///
-    /// Lower values spread slots more evenly, which guards against a poor contribution estimate,
-    /// such as for lights that are bright but occluded.
+    /// Lower values spread the probability more evenly, which guards against a poor contribution
+    /// estimate, such as for lights that are bright but occluded.
     pub light_grid_weight_ratio_cap: f32,
+
+    /// Rebuild each light grid cell's list every this many frames, staggered between cells, and
+    /// carry the last list over in between. 1 rebuilds every cell every frame.
+    ///
+    /// Higher values make the grid cheaper to build, but slower to react to lights that move or
+    /// change. Lights that newly matter to a cell are still found by the global candidates
+    /// meanwhile, so this only affects noise.
+    ///
+    /// Defaults to 4: the same noise as rebuilding every frame in the test scenes, with no
+    /// measurable lag after a fast bright light moves or every light switches on.
+    pub light_grid_rebuild_interval: u32,
+
+    /// Learn, per light grid cell, how much of its direct light comes from directional lights (the
+    /// sun) and how much from local lights, and give each that share of the candidates (clamped so
+    /// both keep some). Without it, directional lights always get one candidate on top of the local
+    /// ones.
+    ///
+    /// Helps sunlit scenes with local lights (indoors next to a sunlit window, shadowed streets).
+    /// The candidates' pdfs use the expected counts, so the estimate stays unbiased.
+    ///
+    /// Defaults to `true`.
+    pub light_grid_sun_split: bool,
+
+    /// Scenes with fewer lights than this skip the light grid, whose lists would hold every light
+    /// anyway, and pick local lights as without it.
+    ///
+    /// Defaults to 16.
+    pub light_grid_min_lights: u32,
 
     /// Insert the light grid cell of every primary surface before building the grid each frame.
     ///
@@ -331,9 +362,12 @@ impl Default for SolariLighting {
             light_grid_base_cell_size: 1.0,
             light_grid_position_lod_scale: 15.0,
             light_grid_contribution_threshold: 1e-2,
-            light_grid_global_candidate_fraction: 0.25,
-            light_grid_weighted_slots: 32,
+            light_grid_global_candidate_fraction: 0.5,
+            light_grid_max_lights_per_cell: 64,
             light_grid_weight_ratio_cap: 64.0,
+            light_grid_rebuild_interval: 4,
+            light_grid_sun_split: true,
+            light_grid_min_lights: 16,
             light_grid_primary_cell_prepass: true,
             light_grid_visualization: LightGridVisualization::None,
             reset: true, // No temporal history on the first frame
@@ -354,9 +388,9 @@ pub enum LightGridVisualization {
     /// reaches the threshold, white if the pool ran out of space, and red if the hash table lookup
     /// gave up after too many collisions.
     Cells,
-    /// How many lights each cell lists, as a fraction of every local light, from blue (few)
-    /// through green to red (all). Cells without a list are colored as in
-    /// [`LightGridVisualization::Cells`].
+    /// How many lights each cell lists, as a fraction of
+    /// [`SolariLighting::light_grid_max_lights_per_cell`], from blue (few) through green to red
+    /// (full). Cells without a list are colored as in [`LightGridVisualization::Cells`].
     LightsPerCell,
 }
 

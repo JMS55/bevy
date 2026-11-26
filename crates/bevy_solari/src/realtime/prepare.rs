@@ -57,21 +57,42 @@ pub const WORLD_CACHE_BUFFER_SIZE: u64 =
 
 /// Amount of cells in the light grid (must be a power of 2, and a multiple of 256).
 pub const LIGHT_GRID_SIZE: u64 = 2u64.pow(16);
-/// Sum of per-cell field sizes in `LightGrid`. Keep in sync with `realtime/bindings.wesl`.
-const LIGHT_GRID_ENTRY_SIZE: u64 = 32;
-/// Offset of `pool_used`, followed by `live_cells`, `overflowed_cells` and `failed_queries`.
+/// Sum of the per-cell field sizes at the start of `LightGrid` (checksums, life, both lists,
+/// bounds). Keep the whole layout in sync with `LightGrid` in `realtime/bindings.wesl`.
+const LIGHT_GRID_ENTRY_SIZE: u64 = 40;
+/// Offset of the counters: `pool_used`, `live_cells`, `overflowed_cells`, `failed_queries`,
+/// `used_light_count`, `big_light_count`, and padding. Cleared every frame.
 pub const LIGHT_GRID_COUNTERS_OFFSET: u64 = LIGHT_GRID_SIZE * LIGHT_GRID_ENTRY_SIZE;
 /// Size of the counters.
-pub const LIGHT_GRID_COUNTERS_SIZE: u64 = 4 * size_of::<u32>() as u64;
-const LIGHT_GRID_BUFFER_SIZE: u64 = LIGHT_GRID_COUNTERS_OFFSET + LIGHT_GRID_COUNTERS_SIZE;
-/// Amount of slots the light grid's cell lists can hold in total.
+pub const LIGHT_GRID_COUNTERS_SIZE: u64 = 8 * size_of::<u32>() as u64;
+/// Amount of u32s the light grid's cell lists can hold in total.
 pub const LIGHT_GRID_POOL_CAPACITY: u64 = 2u64.pow(23);
-/// Amount of light samples presampled across every light each frame, see `PerLightSamples`.
+/// Amount of points presampled on lights each frame, see `PerLightSamples`.
 pub const PER_LIGHT_SAMPLES_CAPACITY: u64 = 2u64.pow(18);
 /// Size of the `LightBounds` shader struct in bytes.
 const LIGHT_BOUNDS_STRUCT_SIZE: u64 = 48;
-/// The maximum amount of lights in a scene.
-const MAX_LIGHTS: u64 = u16::MAX as u64;
+/// Lights `LightGrid::light_bounds` and the per-light arrays hold (light ids are 16 bits).
+const LIGHT_CAPACITY: u64 = 65536;
+/// Offset of `LightGrid::light_used_bits`, followed by `light_usage`, both cleared every frame.
+pub const LIGHT_USED_OFFSET: u64 = LIGHT_GRID_COUNTERS_OFFSET
+    + LIGHT_GRID_COUNTERS_SIZE
+    // live cell list, lookup, touched
+    + LIGHT_GRID_SIZE * (4 + 16 + 4)
+    // split_accum, split_state
+    + LIGHT_GRID_SIZE * 2 * 4
+    + LIGHT_GRID_SIZE * 16
+    // pool, presampled points, light bounds
+    + LIGHT_GRID_POOL_CAPACITY * 4
+    + PER_LIGHT_SAMPLES_CAPACITY * (LIGHT_SAMPLE_STRUCT_SIZE + RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE)
+    + LIGHT_CAPACITY * LIGHT_BOUNDS_STRUCT_SIZE;
+/// Size of `light_used_bits` and `light_usage`.
+pub const LIGHT_USED_CLEAR_SIZE: u64 = LIGHT_CAPACITY / 32 * 4 + LIGHT_CAPACITY * 4;
+const LIGHT_GRID_BUFFER_SIZE: u64 = LIGHT_USED_OFFSET
+    + LIGHT_USED_CLEAR_SIZE
+    // light slots, used lights, point offsets (one past the light capacity, padded), big lights
+    + LIGHT_CAPACITY * 4 * 2
+    + (LIGHT_CAPACITY + 4) * 4
+    + 1024 * 4;
 
 /// GPU representation of the user-configurable [`SolariLighting`] settings, plus
 /// per-frame state.
@@ -99,8 +120,12 @@ struct SolariLightingUniforms {
     light_grid_contribution_threshold: f32,
     light_grid_global_candidate_fraction: f32,
     light_grid_visualization: u32,
-    light_grid_weighted_slots: u32,
+    light_grid_max_lights_per_cell: u32,
     light_grid_weight_ratio_cap: f32,
+    light_grid_frame: u32,
+    light_grid_rebuild_interval: u32,
+    light_grid_sun_split: u32,
+    _padding0: u32,
 }
 
 impl SolariLightingUniforms {
@@ -133,8 +158,12 @@ impl SolariLightingUniforms {
                 LightGridVisualization::Cells => 1,
                 LightGridVisualization::LightsPerCell => 2,
             },
-            light_grid_weighted_slots: settings.light_grid_weighted_slots,
+            light_grid_max_lights_per_cell: settings.light_grid_max_lights_per_cell,
             light_grid_weight_ratio_cap: settings.light_grid_weight_ratio_cap,
+            light_grid_frame: frame_count,
+            light_grid_rebuild_interval: settings.light_grid_rebuild_interval,
+            light_grid_sun_split: settings.light_grid_sun_split as u32,
+            _padding0: 0,
         }
     }
 }
@@ -162,10 +191,8 @@ pub struct SolariLightingResources {
     pub reservoirs: Option<SolariReservoirBuffers>,
     pub world_cache: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    pub light_grid_build_dispatch: Buffer,
     pub light_grid: Buffer,
-    pub light_grid_pool: Buffer,
-    pub light_bounds: Buffer,
-    pub per_light_samples: Buffer,
     pub view_size: UVec2,
 }
 
@@ -288,32 +315,17 @@ pub fn prepare_solari_lighting_resources(
             mapped_at_creation: false,
         });
 
+        let light_grid_build_dispatch = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solari_lighting_light_grid_build_dispatch"),
+            size: size_of::<[u32; 3]>() as u64,
+            usage: BufferUsages::INDIRECT | BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         let light_grid = render_device.create_buffer(&BufferDescriptor {
             label: Some("solari_lighting_light_grid"),
             size: LIGHT_GRID_BUFFER_SIZE,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let light_grid_pool = render_device.create_buffer(&BufferDescriptor {
-            label: Some("solari_lighting_light_grid_pool"),
-            size: LIGHT_GRID_POOL_CAPACITY * size_of::<u32>() as u64,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let light_bounds = render_device.create_buffer(&BufferDescriptor {
-            label: Some("solari_lighting_light_bounds"),
-            size: MAX_LIGHTS * LIGHT_BOUNDS_STRUCT_SIZE,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let per_light_samples = render_device.create_buffer(&BufferDescriptor {
-            label: Some("solari_lighting_per_light_samples"),
-            size: PER_LIGHT_SAMPLES_CAPACITY
-                * (LIGHT_SAMPLE_STRUCT_SIZE + RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE),
-            usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -324,10 +336,8 @@ pub fn prepare_solari_lighting_resources(
             reservoirs,
             world_cache,
             world_cache_active_cells_dispatch,
+            light_grid_build_dispatch,
             light_grid,
-            light_grid_pool,
-            light_bounds,
-            per_light_samples,
             view_size,
         });
 

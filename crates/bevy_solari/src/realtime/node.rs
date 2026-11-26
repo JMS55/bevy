@@ -1,6 +1,7 @@
 use super::{
     prepare::{
         SolariLightingResources, LIGHT_GRID_COUNTERS_OFFSET, LIGHT_GRID_COUNTERS_SIZE,
+        LIGHT_USED_CLEAR_SIZE, LIGHT_USED_OFFSET,
         LIGHT_GRID_POOL_CAPACITY, LIGHT_GRID_SIZE, LIGHT_TILE_BLOCKS, PER_LIGHT_SAMPLES_CAPACITY,
         WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET, WORLD_CACHE_SIZE,
     },
@@ -58,7 +59,11 @@ pub struct SolariLightingPipelines {
     presample_light_tiles_pipeline: CachedComputePipelineId,
     insert_primary_light_grid_cells_pipeline: CachedComputePipelineId,
     compute_light_bounds_pipeline: CachedComputePipelineId,
+    compute_big_light_bounds_pipeline: CachedComputePipelineId,
+    compact_light_grid_cells_pipeline: CachedComputePipelineId,
+    write_light_grid_build_dispatch_pipeline: CachedComputePipelineId,
     build_light_grid_pipeline: CachedComputePipelineId,
+    allocate_light_points_pipeline: CachedComputePipelineId,
     presample_lights_pipeline: CachedComputePipelineId,
     /// Light sampling with [`SolariLighting::light_grid`].
     light_grid: LightSamplingPipelines,
@@ -158,7 +163,10 @@ pub fn solari_lighting(
         return;
     };
 
-    let light_sampling = if solari_lighting.light_grid {
+    // Scenes with few lights skip the grid, see `SolariLighting::light_grid_min_lights`
+    let use_light_grid = solari_lighting.light_grid
+        && scene_bindings.light_count() >= solari_lighting.light_grid_min_lights;
+    let light_sampling = if use_light_grid {
         &pipelines.light_grid
     } else {
         &pipelines.no_light_grid
@@ -278,27 +286,32 @@ pub fn solari_lighting(
         return;
     };
 
-    let light_grid_pipelines = if solari_lighting.light_grid {
-        let (
-            Some(insert_primary_light_grid_cells_pipeline),
-            Some(compute_light_bounds_pipeline),
-            Some(build_light_grid_pipeline),
-            Some(presample_lights_pipeline),
-        ) = (
-            pipeline_cache.get_compute_pipeline(pipelines.insert_primary_light_grid_cells_pipeline),
-            pipeline_cache.get_compute_pipeline(pipelines.compute_light_bounds_pipeline),
-            pipeline_cache.get_compute_pipeline(pipelines.build_light_grid_pipeline),
-            pipeline_cache.get_compute_pipeline(pipelines.presample_lights_pipeline),
-        )
+    let light_grid_pipelines = if use_light_grid {
+        let [Some(insert_primary_light_grid_cells_pipeline), Some(compute_light_bounds_pipeline), Some(compute_big_light_bounds_pipeline), Some(compact_light_grid_cells_pipeline), Some(write_light_grid_build_dispatch_pipeline), Some(build_light_grid_pipeline), Some(allocate_light_points_pipeline), Some(presample_lights_pipeline)] =
+            [
+                pipelines.insert_primary_light_grid_cells_pipeline,
+                pipelines.compute_light_bounds_pipeline,
+                pipelines.compute_big_light_bounds_pipeline,
+                pipelines.compact_light_grid_cells_pipeline,
+                pipelines.write_light_grid_build_dispatch_pipeline,
+                pipelines.build_light_grid_pipeline,
+                pipelines.allocate_light_points_pipeline,
+                pipelines.presample_lights_pipeline,
+            ]
+            .map(|id| pipeline_cache.get_compute_pipeline(id))
         else {
             return;
         };
-        Some((
+        Some([
             insert_primary_light_grid_cells_pipeline,
             compute_light_bounds_pipeline,
+            compute_big_light_bounds_pipeline,
+            compact_light_grid_cells_pipeline,
+            write_light_grid_build_dispatch_pipeline,
             build_light_grid_pipeline,
+            allocate_light_points_pipeline,
             presample_lights_pipeline,
-        ))
+        ])
     } else {
         None
     };
@@ -329,9 +342,6 @@ pub fn solari_lighting(
             &linear_sampler.0,
             atmosphere.clone(),
             s.light_grid.as_entire_binding(),
-            s.light_grid_pool.as_entire_binding(),
-            s.light_bounds.as_entire_binding(),
-            s.per_light_samples.as_entire_binding(),
         )),
     );
 
@@ -355,9 +365,6 @@ pub fn solari_lighting(
                     &linear_sampler.0,
                     atmosphere,
                     s.light_grid.as_entire_binding(),
-                    s.light_grid_pool.as_entire_binding(),
-                    s.light_bounds.as_entire_binding(),
-                    s.per_light_samples.as_entire_binding(),
                     previous_gbuffer,
                     previous_depth_buffer,
                     reservoirs.a.as_entire_binding(),
@@ -371,6 +378,13 @@ pub fn solari_lighting(
         &pipeline_cache
             .get_bind_group_layout(&pipelines.bind_group_layout_world_cache_active_cells_dispatch),
         &BindGroupEntries::single(s.world_cache_active_cells_dispatch.as_entire_binding()),
+    );
+
+    let bind_group_light_grid_build_dispatch = render_device.create_bind_group(
+        "solari_lighting_bind_group_light_grid_build_dispatch",
+        &pipeline_cache
+            .get_bind_group_layout(&pipelines.bind_group_layout_world_cache_active_cells_dispatch),
+        &BindGroupEntries::single(s.light_grid_build_dispatch.as_entire_binding()),
     );
 
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -394,13 +408,14 @@ pub fn solari_lighting(
 
     let command_encoder = ctx.command_encoder();
 
-    // Reset the light grid's pool allocator and counters
+    // Reset the light grid's pool allocator and counters, and which lights the lists use
     if light_grid_pipelines.is_some() {
         command_encoder.clear_buffer(
             &s.light_grid,
             LIGHT_GRID_COUNTERS_OFFSET,
             Some(LIGHT_GRID_COUNTERS_SIZE),
         );
+        command_encoder.clear_buffer(&s.light_grid, LIGHT_USED_OFFSET, Some(LIGHT_USED_CLEAR_SIZE));
     }
 
     // Clear the view target if we're the first node to write to it
@@ -446,12 +461,9 @@ pub fn solari_lighting(
     pass.dispatch_workgroups(LIGHT_TILE_BLOCKS as u32, 1, 1);
     d.end(&mut pass);
 
-    if let Some((
-        insert_primary_light_grid_cells_pipeline,
-        compute_light_bounds_pipeline,
-        build_light_grid_pipeline,
-        presample_lights_pipeline,
-    )) = light_grid_pipelines
+    if let Some(
+        [insert_primary_light_grid_cells_pipeline, compute_light_bounds_pipeline, compute_big_light_bounds_pipeline, compact_light_grid_cells_pipeline, write_light_grid_build_dispatch_pipeline, build_light_grid_pipeline, allocate_light_points_pipeline, presample_lights_pipeline],
+    ) = light_grid_pipelines
     {
         let d = diagnostics.time_span(&mut pass, "solari_lighting/light_grid");
 
@@ -460,12 +472,25 @@ pub fn solari_lighting(
             pass.dispatch_workgroups(dx, dy, 1);
         }
 
+        // 8 lights per workgroup, see `compute_light_bounds`
         pass.set_pipeline(compute_light_bounds_pipeline);
-        pass.dispatch_workgroups(scene_bindings.light_count(), 1, 1);
+        pass.dispatch_workgroups(scene_bindings.light_count().div_ceil(8), 1, 1);
+        // Emissive meshes with many triangles, a workgroup each
+        pass.set_pipeline(compute_big_light_bounds_pipeline);
+        pass.dispatch_workgroups(BIG_LIGHT_WORKGROUPS, 1, 1);
 
+        // Decay the cells, list the live ones, and build one workgroup per live cell
+        pass.set_pipeline(compact_light_grid_cells_pipeline);
+        pass.dispatch_workgroups((LIGHT_GRID_SIZE / 128) as u32, 1, 1);
+        pass.set_bind_group(2, &bind_group_light_grid_build_dispatch, &[]);
+        pass.set_pipeline(write_light_grid_build_dispatch_pipeline);
+        pass.dispatch_workgroups(1, 1, 1);
         pass.set_pipeline(build_light_grid_pipeline);
-        pass.dispatch_workgroups(256, (LIGHT_GRID_SIZE / 256) as u32, 1);
+        pass.dispatch_workgroups_indirect(&s.light_grid_build_dispatch, 0);
 
+        // Points on the lights the lists use
+        pass.set_pipeline(allocate_light_points_pipeline);
+        pass.dispatch_workgroups(1, 1, 1);
         pass.set_pipeline(presample_lights_pipeline);
         pass.dispatch_workgroups((PER_LIGHT_SAMPLES_CAPACITY / 64) as u32, 1, 1);
 
@@ -609,9 +634,6 @@ pub fn init_solari_lighting_pipelines(
                 sampler(SamplerBindingType::Filtering),
                 uniform_buffer::<GpuAtmosphere>(true),
                 storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
             ),
         ),
     );
@@ -634,9 +656,6 @@ pub fn init_solari_lighting_pipelines(
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 uniform_buffer::<GpuAtmosphere>(true),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
                 texture_2d(TextureSampleType::Uint),
                 texture_depth_2d(),
@@ -680,7 +699,7 @@ pub fn init_solari_lighting_pipelines(
         let mut layout = vec![scene_bindings.bind_group_layout.clone(), group_1.clone()];
         match extra_bind_group {
             ExtraBindGroup::None => {}
-            ExtraBindGroup::WorldCacheDispatch => {
+            ExtraBindGroup::WorldCacheDispatch | ExtraBindGroup::LightGridDispatch => {
                 layout.push(bind_group_layout_world_cache_active_cells_dispatch.clone());
             }
             #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -712,6 +731,7 @@ pub fn init_solari_lighting_pipelines(
             ExtraBindGroup::WorldCacheDispatch => {
                 shader_defs.push("WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER".into());
             }
+            ExtraBindGroup::LightGridDispatch => {}
             #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
             ExtraBindGroup::DlssRrGuideBuffers => {
                 shader_defs.push("DLSS_RR_GUIDE_BUFFERS".into());
@@ -913,6 +933,38 @@ pub fn init_solari_lighting_pipelines(
             ExtraBindGroup::None,
             vec![],
         ),
+        compute_big_light_bounds_pipeline: create_pipeline(
+            "solari_lighting_compute_big_light_bounds_pipeline",
+            "compute_big_light_bounds",
+            load_embedded_asset!(asset_server.as_ref(), "light_grid_build.wesl"),
+            false,
+            ExtraBindGroup::None,
+            vec![],
+        ),
+        compact_light_grid_cells_pipeline: create_pipeline(
+            "solari_lighting_compact_light_grid_cells_pipeline",
+            "compact_light_grid_cells",
+            load_embedded_asset!(asset_server.as_ref(), "light_grid_build.wesl"),
+            false,
+            ExtraBindGroup::None,
+            vec![],
+        ),
+        write_light_grid_build_dispatch_pipeline: create_pipeline(
+            "solari_lighting_write_light_grid_build_dispatch_pipeline",
+            "write_light_grid_build_dispatch",
+            load_embedded_asset!(asset_server.as_ref(), "light_grid_build.wesl"),
+            false,
+            ExtraBindGroup::LightGridDispatch,
+            vec![],
+        ),
+        allocate_light_points_pipeline: create_pipeline(
+            "solari_lighting_allocate_light_points_pipeline",
+            "allocate_light_points",
+            load_embedded_asset!(asset_server.as_ref(), "light_grid_build.wesl"),
+            false,
+            ExtraBindGroup::None,
+            vec![],
+        ),
         presample_lights_pipeline: create_pipeline(
             "solari_lighting_presample_lights_pipeline",
             "presample_lights",
@@ -939,6 +991,11 @@ pub fn init_solari_lighting_pipelines(
 enum ExtraBindGroup {
     None,
     WorldCacheDispatch,
+    /// The light grid build's indirect dispatch, see `write_light_grid_build_dispatch`.
+    LightGridDispatch,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     DlssRrGuideBuffers,
 }
+
+/// Workgroups of `compute_big_light_bounds`. Keep in sync with `light_grid_build.wesl`.
+const BIG_LIGHT_WORKGROUPS: u32 = 16;

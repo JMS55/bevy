@@ -1,14 +1,14 @@
 use super::{
-    prepare::DlssRenderContext, Dlss, DlssRayReconstructionFeature, DlssSuperResolutionFeature,
-    ViewDlssRayReconstructionTextures,
+    energy_restore::EnergyRestore, prepare::DlssRenderContext, Dlss, DlssEnergyRestore,
+    DlssRayReconstructionFeature, DlssSuperResolutionFeature, ViewDlssRayReconstructionTextures,
 };
 use bevy_camera::MainPassResolutionOverride;
 use bevy_core_pipeline::prepass::ViewPrepassTextures;
-use bevy_ecs::system::Res;
+use bevy_ecs::{entity::Entity, system::Res};
 use bevy_render::{
     camera::TemporalJitter,
     diagnostic::RecordDiagnostics,
-    renderer::{RenderAdapter, RenderContext, ViewQuery},
+    renderer::{RenderAdapter, RenderContext, RenderDevice, RenderQueue, ViewQuery},
     view::ViewTarget,
 };
 use dlss_wgpu::{
@@ -70,6 +70,7 @@ pub fn dlss_super_resolution(
 
 pub fn dlss_ray_reconstruction(
     view: ViewQuery<(
+        Entity,
         &Dlss<DlssRayReconstructionFeature>,
         &DlssRenderContext<DlssRayReconstructionFeature>,
         &MainPassResolutionOverride,
@@ -77,11 +78,16 @@ pub fn dlss_ray_reconstruction(
         &ViewTarget,
         &ViewPrepassTextures,
         &ViewDlssRayReconstructionTextures,
+        Option<&DlssEnergyRestore>,
     )>,
     adapter: Res<RenderAdapter>,
+    energy_restore: Res<EnergyRestore>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
     mut ctx: RenderContext,
 ) {
     let (
+        view_entity,
         dlss,
         dlss_context,
         resolution_override,
@@ -89,6 +95,7 @@ pub fn dlss_ray_reconstruction(
         view_target,
         prepass_textures,
         ray_reconstruction_textures,
+        energy_restore_settings,
     ) = view.into_inner();
 
     let Some(prepass_motion_vectors_texture) = &prepass_textures.motion_vectors else {
@@ -135,5 +142,21 @@ pub fn dlss_ray_reconstruction(
         .expect("Failed to render DLSS Ray Reconstruction");
 
     ctx.add_command_buffer(dlss_command_buffer);
+
+    let energy_restore_settings = energy_restore_settings.cloned().unwrap_or_default();
+    if energy_restore_settings.enabled {
+        energy_restore.run(
+            view_entity,
+            &energy_restore_settings,
+            &render_device,
+            &render_queue,
+            ctx.command_encoder(),
+            view_target.source,
+            view_target.destination,
+            view_target.destination_texture,
+            (render_resolution.x, render_resolution.y),
+            dlss.reset,
+        );
+    }
     time_span.end(ctx.command_encoder());
 }

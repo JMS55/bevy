@@ -169,8 +169,8 @@ pub struct SolariLighting {
     /// but are noisier and less stable.
     pub world_cache_max_temporal_samples: f32,
 
-    /// How many direct light samples each world cache cell takes when updating
-    /// each frame.
+    /// How many light candidates each world cache direct light sample resamples
+    /// down to one light.
     ///
     /// Higher values reduce noise in cached lighting at the cost of more work
     /// per frame. Lower values are faster but noisier.
@@ -186,17 +186,21 @@ pub struct SolariLighting {
     /// map light, and leak sky lighting into the cache.
     pub world_cache_max_gi_ray_distance: f32,
 
-    /// Maximum number of world cache cells to update each frame.
+    /// Maximum number of cold world cache cells to update each frame, and the rate
+    /// at which every cell's indirect light is updated.
     ///
-    /// Higher values let the cache converge faster after lighting changes at the
-    /// cost of more work per frame. Lower values are cheaper but make the cache
+    /// Hot cells (cells that the camera's paths read last frame) are updated every frame,
+    /// on top of this number. Their direct light is recomputed from scratch on every update
+    /// (see [`Self::world_cache_hot_cell_direct_light_samples`]).
+    ///
+    /// Indirect light is blended over time. When there are more active cells than this
+    /// number, each cell traces a new indirect light sample about once every
+    /// `active_cells / world_cache_max_cell_updates_per_frame` frames (rounded up), and
+    /// cold cells take turns being updated at a similar rate.
+    ///
+    /// Higher values let indirect light converge faster after lighting changes at the
+    /// cost of more work per frame. Lower values are cheaper but make indirect light
     /// slower to update.
-    ///
-    /// When there are more active cells than this number, this many of them are updated
-    /// per frame, taking turns, so each active cell is updated about once every
-    /// `active_cells / world_cache_max_cell_updates_per_frame` frames (rounded up).
-    ///
-    /// When there are fewer active cells than this, all of them update every frame.
     pub world_cache_max_cell_updates_per_frame: u32,
 
     /// Size of a world cache cell at the lowest LOD, in meters.
@@ -214,6 +218,27 @@ pub struct SolariLighting {
     /// to larger cells sooner, which is cheaper but coarser farther from the
     /// camera.
     pub world_cache_position_lod_scale: f32,
+
+    /// How many direct light samples each hot world cache cell takes per frame.
+    ///
+    /// Hot cells are the cells that the camera's paths read last frame. Every frame, they
+    /// recompute their direct light from scratch with this many samples (each resampled from
+    /// [`Self::world_cache_direct_light_sample_count`] candidates and with its own shadow ray),
+    /// so direct light in the cache never lags behind changes to lights. On the frames where
+    /// a hot cell's indirect light is updated, it also traces this many indirect rays.
+    ///
+    /// Capped by [`Self::world_cache_hot_cell_direct_light_sample_budget`].
+    ///
+    /// Higher values reduce noise in the cached direct light at the cost of more rays per
+    /// frame. Cold cells always take one sample per update.
+    pub world_cache_hot_cell_direct_light_samples: u32,
+
+    /// Total number of direct light samples that hot world cache cells may take per frame.
+    ///
+    /// When `hot_cells * world_cache_hot_cell_direct_light_samples` exceeds this, each hot cell
+    /// takes `max(1, budget / hot_cells)` samples instead, bounding the cost in scenes with
+    /// many hot cells.
+    pub world_cache_hot_cell_direct_light_sample_budget: u32,
 
     /// Treat all geometry as opaque when tracing rays to update the world cache.
     ///
@@ -251,6 +276,8 @@ impl Default for SolariLighting {
             world_cache_max_cell_updates_per_frame: 40000,
             world_cache_position_base_cell_size: 0.15,
             world_cache_position_lod_scale: 15.0,
+            world_cache_hot_cell_direct_light_samples: 4,
+            world_cache_hot_cell_direct_light_sample_budget: 200_000,
             world_cache_force_opaque: true,
             reset: true, // No temporal history on the first frame
         }

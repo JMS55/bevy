@@ -1,7 +1,7 @@
 use super::{
     prepare::{
         SolariLightingResources, LIGHT_TILE_BLOCKS, WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET,
-        WORLD_CACHE_SIZE,
+        WORLD_CACHE_HOT_CELLS_COUNT_OFFSET, WORLD_CACHE_SIZE,
     },
     SolariLighting,
 };
@@ -443,7 +443,7 @@ pub fn solari_lighting(
 
     drop(pass);
 
-    // Active cell count readback.
+    // Active and hot cell count readbacks.
     diagnostics.record_u32(
         ctx.command_encoder(),
         &s.world_cache.slice(
@@ -451,6 +451,14 @@ pub fn solari_lighting(
                 ..WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET + size_of::<u32>() as u64,
         ),
         "solari_lighting/world_cache_active_cells_count",
+    );
+    diagnostics.record_u32(
+        ctx.command_encoder(),
+        &s.world_cache.slice(
+            WORLD_CACHE_HOT_CELLS_COUNT_OFFSET
+                ..WORLD_CACHE_HOT_CELLS_COUNT_OFFSET + size_of::<u32>() as u64,
+        ),
+        "solari_lighting/world_cache_hot_cells_count",
     );
 }
 

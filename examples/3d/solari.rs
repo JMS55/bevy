@@ -673,4 +673,15 @@ fn update_performance_text(
             (world_cache_active_cells_count * 100.0) / (2u64.pow(20) as f64)
         ));
     }
+    if let Some(world_cache_hot_cells_count) = diagnostics
+        .get(&DiagnosticPath::new(
+            "render/solari_lighting/world_cache_hot_cells_count",
+        ))
+        .and_then(Diagnostic::smoothed)
+    {
+        text.push_str(&format!(
+            "\nWorld cache hot cells {}",
+            world_cache_hot_cells_count as u32
+        ));
+    }
 }

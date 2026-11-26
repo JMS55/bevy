@@ -3,9 +3,9 @@ import bevy_pbr::render::utils::{rand_f, rand_range_u};
 import bevy_render::maths::PI;
 import bevy_render::utils::octahedral_encode;
 import package::scene::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB};
-import package::realtime::light_candidates::{emissive_hit_light_sample, generate_light_candidate, light_candidate_count, light_candidate_split, local_light_selection_pdf_sum, LightCandidateSplit};
-import package::realtime::light_grid::{light_grid_cell_at, LightGridCell};
-import package::realtime::bindings::{empty_reservoir, Reservoir, constants, view};
+import package::realtime::light_candidates::{candidate_light_sample, emissive_hit_light_sample, generate_light_candidate, light_candidate_count, light_candidate_split, local_light_selection_pdf_sum, realize_light_candidate_split, LightCandidateSplit};
+import package::realtime::light_grid::{light_grid_cell_at, light_grid_record_split, LightGridCell};
+import package::realtime::bindings::{directional_light_count, empty_reservoir, Reservoir, constants, view};
 import package::realtime::atmosphere::calculate_light_contribution;
 import package::scene::sampling::{isinf, LightSample, NULL_LIGHT_ID, power_heuristic, trace_visibility, sample_environment_map_light};
 import package::scene::bindings::{MIRROR_ROUGHNESS_THRESHOLD, NO_LIGHT_ID, RAY_T_MAX, RAY_T_MIN, resolve_ray_hit_full, ResolvedMaterial, ResolvedRayHitFull, trace_ray};
@@ -228,32 +228,9 @@ fn generate_nee_candidate(
     let p_nee = nee_probability((*path).material);
     if p_nee == 0.0 { return; }
 
-    // Directional and local lights get separate RIS picks and shadow rays, see light_candidates.wesl.
-    // The two sets don't overlap, and each candidate's pdf only involves its own strategy, so each
-    // pick is an unbiased estimate of its own set, and the two add up.
-    //
-    // Both picks go through one call site, so the RIS loop and shadow ray are only inlined once.
-    let split = light_candidate_split(di_samples, light_grid_cell);
-    for (var pick = 0u; pick < 2u; pick++) {
-        let candidate_start = select(split.directional, 0u, pick == 0u);
-        let candidate_end = select(light_candidate_count(split), split.directional, pick == 0u);
-        if candidate_start == candidate_end { continue; }
-
-        let di = sample_light_ris((*path).ray_origin, (*path).normal, (*path).wo, (*path).material, F_ab, split, light_grid_cell, candidate_start, candidate_end, workgroup_id, bounce, rng);
-        add_nee_sample(path, di, F_ab, p_nee, bounce, rng);
-    }
-}
-
-/// Traces visibility for one NEE sample, and adds it to the path.
-fn add_nee_sample(
-    path: ptr<function, PathState>,
-    di_in: DiSample,
-    F_ab: vec2<f32>,
-    p_nee: f32,
-    bounce: u32,
-    rng: ptr<function, u32>,
-) {
-    var di = di_in;
+    // One RIS pick over the directional and local light candidates, see light_candidates.wesl
+    let split = realize_light_candidate_split(light_candidate_split(di_samples, light_grid_cell), rng);
+    var di = sample_light_ris((*path).ray_origin, (*path).normal, (*path).wo, (*path).material, F_ab, split, light_grid_cell, workgroup_id, bounce, rng);
     let di_target_function = luminance(di.brdf_radiance);
     if di_target_function <= 0.0 { return; }
 
@@ -264,6 +241,8 @@ fn add_nee_sample(
 
     // Trace visibility
     di.unbiased_contribution_weight *= trace_visibility((*path).ray_origin, di.world_position, RAY_FLAG_NONE);
+    // The cell's learned sun/local split: an unbiased estimate of the winner's shadowed contribution
+    light_grid_record_split(light_grid_cell, (di.light_sample.light_id >> 16u) < directional_light_count(), di_target_function * di.unbiased_contribution_weight / p_keep, rng);
     if di.unbiased_contribution_weight <= 0.0 { return; }
 
     // MIS against the BRDF strategy. RIS over N candidates makes the effective NEE pdf at the
@@ -313,20 +292,21 @@ struct DiSample {
     brdf_rays_can_hit: bool,
 }
 
-/// RIS over candidates `[candidate_start, candidate_end)`, see `LightCandidateSplit`.
-fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, split: LightCandidateSplit, light_grid_cell: LightGridCell, candidate_start: u32, candidate_end: u32, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
+/// RIS over the directional and local light candidates, see `LightCandidateSplit`.
+fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>, split: LightCandidateSplit, light_grid_cell: LightGridCell, workgroup_id: vec2<u32>, bounce: u32, rng: ptr<function, u32>) -> DiSample {
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y + bounce;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
     var weight_sum = 0.0;
     var selected_target_function = 0.0;
     var selected_light_sample = LightSample(NULL_LIGHT_ID, 0u);
+    var selected_light_tile_slot = 0u;
     var selected_world_position = vec4(0.0);
     var selected_wi = vec3(0.0);
     var selected_brdf_radiance = vec3(0.0);
     var selected_inverse_solid_angle_pdf = 0.0;
     var selected_brdf_rays_can_hit = false;
-    for (var i = candidate_start; i < candidate_end; i++) {
+    for (var i = 0u; i < light_candidate_count(split); i++) {
         // Each candidate's inverse_pdf already includes its balance heuristic MIS weight
         let candidate = generate_light_candidate(i, split, light_grid_cell, light_tile_start, rng);
         let resolved_light_sample = candidate.resolved_light_sample;
@@ -342,6 +322,7 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
         if rand_f(rng) * weight_sum < resampling_weight {
             selected_target_function = target_function;
             selected_light_sample = candidate.light_sample;
+            selected_light_tile_slot = candidate.light_tile_slot;
             selected_world_position = resolved_light_sample.world_position;
             selected_wi = light_contribution.wi;
             selected_inverse_solid_angle_pdf = light_contribution.inverse_solid_angle_pdf;
@@ -353,6 +334,7 @@ fn sample_light_ris(ray_origin: vec3<f32>, normal: vec3<f32>, wo: vec3<f32>, mat
     var unbiased_contribution_weight = 0.0;
     if selected_target_function > 0.0 {
         unbiased_contribution_weight = weight_sum / selected_target_function;
+        selected_light_sample = candidate_light_sample(selected_light_sample, selected_light_tile_slot);
     }
 
     return DiSample(unbiased_contribution_weight, selected_light_sample, selected_world_position, selected_wi, selected_brdf_radiance, selected_inverse_solid_angle_pdf, selected_brdf_rays_can_hit);

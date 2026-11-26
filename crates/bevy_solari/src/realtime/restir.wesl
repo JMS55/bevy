@@ -11,7 +11,8 @@ import package::realtime::atmosphere::calculate_light_contribution;
 import package::scene::sampling::{balance_heuristic, isinf, isnan, LightSample, NULL_LIGHT_ID, power_heuristic, resolve_light_sample, ResolvedLightSample, trace_visibility, trace_visibility_previous_frame};
 import package::scene::bindings::{light_sources, LIGHT_NOT_PRESENT_THIS_FRAME, previous_frame_light_id_translations, RAY_T_MAX, RAY_T_MIN, ResolvedMaterial};
 import package::realtime::world_cache_query::{query_world_cache, WORLD_CACHE_CELL_LIFETIME};
-import package::realtime::light_candidates::{light_candidate_split, local_light_selection_pdf};
+import package::realtime::light_candidates::{is_emissive_hit_light_sample, light_candidate_split, local_light_selection_pdf_sum};
+import package::realtime::light_grid::{light_grid_cell_at, light_grid_visualization, LightGridCell};
 
 enable wgpu_ray_query;
 
@@ -69,6 +70,12 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     pixel_color += textureLoad(view_output, global_id.xy).rgb;
     pixel_color *= view.exposure;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));
+
+    @if(LIGHT_GRID)
+    if constants.light_grid_visualization != 0u {
+        let visualization = light_grid_visualization(surface.world_position + surface.world_normal * RAY_T_MIN, surface.world_normal, constants.light_grid_visualization);
+        textureStore(view_output, global_id.xy, vec4(visualization, 1.0));
+    }
 
     @if(VISUALIZE_WORLD_CACHE)
     textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, RAY_T_MAX, WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
@@ -191,14 +198,18 @@ fn merge_reservoirs(
     rng: ptr<function, u32>,
 ) -> ReservoirMergeResult {
     var canonical_resolved: ResolvedLightSample;
-    if canonical_reservoir.light_sample.light_id != NULL_LIGHT_ID {
+    if reservoir_holds_light_sample(canonical_reservoir) {
         canonical_resolved = resolve_light_sample(canonical_reservoir.light_sample, light_sources[canonical_reservoir.light_sample.light_id >> 16u]);
     }
+
+    // Each domain's NEE pdf comes from its own light grid cell, found the same way as during
+    // initial sampling
+    let canonical_cell = light_grid_cell_at(canonical_world_position + canonical_world_normal * RAY_T_MIN);
 
     let canonical_wo = normalize(view.world_position - canonical_world_position);
     let canonical_NdotV = max(dot(canonical_world_normal, canonical_wo), 0.0001);
     let canonical_F_ab = F_AB(canonical_material.perceptual_roughness, canonical_NdotV);
-    let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
+    let canonical_sample_at_canonical = reservoir_contribution(canonical_reservoir, canonical_resolved, canonical_cell, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
 
     // Skip resampling empty reservoirs
     if other_reservoir.confidence_weight == 0.0 {
@@ -206,22 +217,23 @@ fn merge_reservoirs(
     }
 
     var other_resolved: ResolvedLightSample;
-    if other_reservoir.light_sample.light_id != NULL_LIGHT_ID {
+    if reservoir_holds_light_sample(other_reservoir) {
         other_resolved = resolve_light_sample(other_reservoir.light_sample, light_sources[other_reservoir.light_sample.light_id >> 16u]);
     }
+    let other_cell = light_grid_cell_at(other_world_position + other_world_normal * RAY_T_MIN);
     let other_wo = normalize(other_view_position - other_world_position);
     let other_NdotV = max(dot(other_world_normal, other_wo), 0.0001);
     let other_F_ab = F_AB(other_material.perceptual_roughness, other_NdotV);
 
     // Contributions for resampling and MIS
-    var other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
-    var canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
-    let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
+    var other_sample_at_canonical = reservoir_contribution(other_reservoir, other_resolved, canonical_cell, canonical_world_position, canonical_world_normal, canonical_wo, canonical_material, canonical_F_ab);
+    var canonical_sample_at_other = reservoir_contribution(canonical_reservoir, canonical_resolved, other_cell, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
+    let other_sample_at_other = reservoir_contribution(other_reservoir, other_resolved, other_cell, other_world_position, other_world_normal, other_wo, other_material, other_F_ab);
 
     // Jacobians for resampling and MIS. Light samples don't need a reprojection jacobian,
     // since calculate_light_contribution already accounts for the shading point's geometry.
     var other_sample_at_canonical_jacobian = 1.0;
-    if other_reservoir.light_sample.light_id == NULL_LIGHT_ID {
+    if !reservoir_holds_light_sample(other_reservoir) {
         other_sample_at_canonical_jacobian = jacobian(
             canonical_world_position,
             other_world_position,
@@ -230,7 +242,7 @@ fn merge_reservoirs(
         );
     }
     var canonical_sample_at_other_jacobian = 1.0;
-    if canonical_reservoir.light_sample.light_id == NULL_LIGHT_ID {
+    if !reservoir_holds_light_sample(canonical_reservoir) {
         canonical_sample_at_other_jacobian = jacobian(
             other_world_position,
             canonical_world_position,
@@ -316,8 +328,13 @@ struct ReservoirContribution {
     sample_world_position: vec4<f32>,
 }
 
-fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> ReservoirContribution {
-    if reservoir.light_sample.light_id != NULL_LIGHT_ID {
+/// Whether a reservoir holds a light sample stored by reference, rather than a reconnection vertex.
+fn reservoir_holds_light_sample(reservoir: Reservoir) -> bool {
+    return reservoir.light_sample.light_id != NULL_LIGHT_ID && !is_emissive_hit_light_sample(reservoir.light_sample);
+}
+
+fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, light_grid_cell: LightGridCell, world_position: vec3<f32>, world_normal: vec3<f32>, wo: vec3<f32>, material: ResolvedMaterial, F_ab: vec2<f32>) -> ReservoirContribution {
+    if reservoir_holds_light_sample(reservoir) {
         let light_contribution = calculate_light_contribution(resolved, world_position, world_normal);
 
         // MIS weight against the bounce-0 BRDF-emissive strategy, recomputed from this surface's
@@ -326,7 +343,8 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         var nee_mis_weight = 1.0;
         if light_contribution.brdf_rays_can_hit && light_contribution.inverse_solid_angle_pdf > 0.0 {
             // Only local lights can be hit by BRDF rays
-            let selection_pdf = local_light_selection_pdf(light_candidate_split(constants.primary_local_light_samples));
+            let split = light_candidate_split(constants.primary_local_light_samples, light_grid_cell);
+            let selection_pdf = local_light_selection_pdf_sum(reservoir.light_sample.light_id >> 16u, light_grid_cell, split);
             let p_nee = nee_probability(material);
             let p_nee_strategy = selection_pdf * (1.0 / light_contribution.inverse_solid_angle_pdf) * p_nee;
             let p_brdf_at_nee = brdf_pdf(wo, light_contribution.wi, world_normal, material, F_ab);
@@ -341,11 +359,12 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
         let wi = delta / sample_distance;
         var brdf_radiance = reservoir.radiance * evaluate_brdf(wo, wi, world_normal, material, F_ab);
 
-        // Bounce-0 BRDF-emissive sample (directly-visible light). The seed field carries the light
-        // triangle's bitcast area pdf, and the stored radiance is the raw emission. Rebuild the MIS
-        // weight against this surface's NEE strategy, the dual of nee_mis_weight above and a mirror
-        // of the emissive candidate in generate_initial_path.
-        if reservoir.light_sample.seed != 0u {
+        // Bounce-0 BRDF-emissive sample (directly-visible light), see `EMISSIVE_HIT_TRIANGLE_ID`.
+        // The seed field carries the bitcast area pdf of the point given the light, and the stored
+        // radiance is the raw emission. Rebuild the MIS weight against this surface's NEE strategy,
+        // with the light selection pdf from this surface's light grid cell, the dual of
+        // nee_mis_weight above and a mirror of the emissive candidate in generate_initial_path.
+        if is_emissive_hit_light_sample(reservoir.light_sample) {
             let area_pdf = bitcast<f32>(reservoir.light_sample.seed);
             let light_normal = octahedral_decode(reservoir.sample_point_world_normal);
             let cos_theta_light = dot(-wi, light_normal);
@@ -355,8 +374,9 @@ fn reservoir_contribution(reservoir: Reservoir, resolved: ResolvedLightSample, w
                 let p_light = area_pdf * sample_distance * sample_distance / cos_theta_light;
                 let p_nee = nee_probability(material);
                 let p_brdf = brdf_pdf(wo, wi, world_normal, material, F_ab);
-                let local_candidates = light_candidate_split(constants.primary_local_light_samples).local;
-                brdf_radiance *= power_heuristic(p_brdf, p_light * p_nee * f32(local_candidates));
+                let split = light_candidate_split(constants.primary_local_light_samples, light_grid_cell);
+                let selection_pdf_sum = local_light_selection_pdf_sum(reservoir.light_sample.light_id >> 16u, light_grid_cell, split);
+                brdf_radiance *= power_heuristic(p_brdf, p_light * selection_pdf_sum * p_nee);
             }
         }
 

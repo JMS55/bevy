@@ -1,7 +1,7 @@
 use super::{
     allocator::{IndexAllocator, RetainedBindingArray},
     assets::AssetState,
-    lights::{GpuLightSource, LightSourceId, LightState},
+    lights::{GpuLightSource, LightSourceId, LightState, NO_LIGHT_ID},
     BlasKey, BlasManager, BlasOpacity, RaytracingMesh3d, RaytracingSceneBindings,
 };
 use bevy_asset::AssetId;
@@ -38,6 +38,8 @@ pub struct GpuInstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
+    /// The instance's light id if it's an emissive mesh light, else [`NO_LIGHT_ID`].
+    light_id: u32,
 }
 
 /// Set in `index_buffer_offset` when the indices are 16-bit.
@@ -402,6 +404,21 @@ impl InstanceState {
             IndexFormat::Uint16 => INDEX_BUFFER_FLAG_U16,
             IndexFormat::Uint32 => 0,
         };
+
+        let is_emissive = inputs
+            .assets
+            .emissive_materials
+            .contains(&instance.material);
+        let light_id = if is_emissive {
+            lights.add_light(
+                LightSourceId::EmissiveMesh(entity),
+                GpuLightSource::new_emissive_mesh_light(slot, triangle_count),
+            )
+        } else {
+            lights.remove_light(LightSourceId::EmissiveMesh(entity));
+            NO_LIGHT_ID
+        };
+
         self.geometry_ids.grow_and_set(
             slot,
             GpuInstanceGeometryIds {
@@ -410,24 +427,24 @@ impl InstanceState {
                 index_buffer_id,
                 index_buffer_offset: index_slice.range.start | index_format_flag,
                 triangle_count,
+                light_id,
             },
         );
         self.material_ids.grow_and_set(slot, material_slot);
         self.set_blas_ref(slot, GpuBlasRef(blas_address));
-
-        let is_emissive = inputs
-            .assets
-            .emissive_materials
-            .contains(&instance.material);
-        if is_emissive {
-            lights.add_light(
-                LightSourceId::EmissiveMesh(entity),
-                GpuLightSource::new_emissive_mesh_light(slot, triangle_count),
-            );
-        } else {
-            lights.remove_light(LightSourceId::EmissiveMesh(entity));
-        }
         true
+    }
+
+    /// Points an emissive mesh instance at its light id, after light ids moved.
+    pub fn set_light_id(&self, slot: u32, light_id: u32) {
+        let geometry_ids = self.geometry_ids.get(slot);
+        self.geometry_ids.set_if_changed(
+            slot,
+            GpuInstanceGeometryIds {
+                light_id,
+                ..geometry_ids
+            },
+        );
     }
 
     fn write_transforms(

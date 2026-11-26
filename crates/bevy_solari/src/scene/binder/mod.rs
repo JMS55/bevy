@@ -68,6 +68,11 @@ impl RaytracingSceneBindings {
         self.lights.index.directional_count()
     }
 
+    /// The number of lights in `light_sources`.
+    pub fn light_count(&self) -> u32 {
+        self.lights.index.len() as u32
+    }
+
     /// Records that a lighting pass read `previous_frame_light_id_translations`, so the next
     /// frame's table translates from this frame's light ids rather than older ones.
     pub fn note_light_translations_consumed(&self) {
@@ -224,7 +229,11 @@ pub fn prepare_raytracing_scene_resources(
         lights.update_point_lights(&changed_point_lights, removed_point_lights.read());
         lights.update_spot_lights(&changed_spot_lights, removed_spot_lights.read());
         lights.update_rect_lights(&changed_rect_lights, removed_rect_lights.read());
-        lights.finish_update();
+        if lights.finish_update() {
+            for (slot, light_id) in lights.emissive_mesh_lights() {
+                bindings.instances.set_light_id(slot, light_id);
+            }
+        }
     }
 
     // Upload the above writes

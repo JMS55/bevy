@@ -14,6 +14,7 @@ use bevy::{
     solari::{
         pathtracer::{Pathtracer, PathtracingPlugin},
         prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins},
+        realtime::LightGridVisualization,
     },
     world_serialization::WorldInstanceReady,
 };
@@ -70,7 +71,7 @@ fn main() {
         #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
         app.add_systems(Update, toggle_dlss_rr);
 
-        app.add_systems(Update, toggle_restir);
+        app.add_systems(Update, (toggle_restir, toggle_light_grid));
 
         if args.many_lights != Some(true) {
             app.add_systems(Update, (pause_scene, toggle_lights, patrol_path));
@@ -478,6 +479,22 @@ fn toggle_restir(
     }
 }
 
+fn toggle_light_grid(
+    key_input: Res<ButtonInput<KeyCode>>,
+    mut solari_lighting: Single<&mut SolariLighting>,
+) {
+    if key_input.just_pressed(KeyCode::KeyG) {
+        solari_lighting.light_grid = !solari_lighting.light_grid;
+    }
+    if key_input.just_pressed(KeyCode::KeyV) {
+        solari_lighting.light_grid_visualization = match solari_lighting.light_grid_visualization {
+            LightGridVisualization::None => LightGridVisualization::Cells,
+            LightGridVisualization::Cells => LightGridVisualization::LightsPerCell,
+            LightGridVisualization::LightsPerCell => LightGridVisualization::None,
+        };
+    }
+}
+
 fn pause_scene(mut time: ResMut<Time<Virtual>>, key_input: Res<ButtonInput<KeyCode>>) {
     if key_input.just_pressed(KeyCode::Space) {
         time.toggle();
@@ -622,6 +639,16 @@ fn update_control_text(
     } else {
         text.0.push_str("\n(R): Enable ReSTIR");
     }
+
+    if solari_lighting.light_grid {
+        text.0.push_str("\n(G): Disable light grid");
+        text.0.push_str(&format!(
+            "\n(V): Light grid visualization: {:?}",
+            solari_lighting.light_grid_visualization
+        ));
+    } else {
+        text.0.push_str("\n(G): Enable light grid");
+    }
 }
 
 #[derive(Component)]
@@ -649,6 +676,10 @@ fn update_performance_text(
     (add_diagnostic)(
         "Light tiles",
         "render/solari_lighting/presample_light_tiles/elapsed_gpu",
+    );
+    (add_diagnostic)(
+        "Light grid",
+        "render/solari_lighting/light_grid/elapsed_gpu",
     );
     (add_diagnostic)(
         "World cache",

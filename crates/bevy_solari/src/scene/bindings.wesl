@@ -10,9 +10,13 @@ struct InstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
+    /// The instance's light id if it's an emissive mesh light, else `NO_LIGHT_ID`.
+    light_id: u32,
 }
 
 const INDEX_BUFFER_FLAG_U16 = 1u << 31u;
+
+const NO_LIGHT_ID = 0xFFFFFFFFu;
 
 struct VertexBuffer { vertices: array<PackedVertex> }
 
@@ -204,6 +208,8 @@ struct ResolvedRayHitFull {
     uv: vec2<f32>,
     triangle_area: f32,
     triangle_count: u32,
+    /// The light id of the hit mesh if it's an emissive mesh light, else `NO_LIGHT_ID`.
+    light_id: u32,
     material: ResolvedMaterial,
     double_sided: bool,
 }
@@ -354,6 +360,7 @@ fn resolve_triangle_data_full(instance_id: u32, triangle_id: u32, barycentrics: 
         uv,
         triangle_area,
         instance_geometry_ids.triangle_count,
+        instance_geometry_ids.light_id,
         resolved_material,
         (material.flags & MATERIAL_FLAG_DOUBLE_SIDED) != 0u,
     );

@@ -1,7 +1,8 @@
 import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance;
 import bevy_pbr::render::utils::{rand_f, rand_range_u, sample_cosine_hemisphere};
 import bevy_render::maths::PI;
-import package::realtime::light_candidates::{generate_light_candidate, light_candidate_count, light_candidate_split};
+import package::realtime::light_candidates::{generate_light_candidate, light_candidate_count, light_candidate_split, realize_light_candidate_split};
+import package::realtime::light_grid::light_grid_existing_cell_at;
 import package::realtime::atmosphere::calculate_light_contribution;
 import package::scene::sampling::{trace_visibility, sample_environment_map_light};
 import package::scene::bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN};
@@ -90,7 +91,12 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 
 /// RIS over the directional and local light candidates, then one shadow ray for the winner, see light_candidates.wesl.
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec3<f32> {
-    let split = light_candidate_split(constants.world_cache_local_light_sample_count);
+    // World cache cells use the light grid cells that lighting built (they're mostly near visible
+    // surfaces), but don't insert cells of their own: elsewhere, every local candidate is global.
+    // Building cells only the world cache needs costs as much as the rest of the grid, for no
+    // measured gain.
+    let light_grid_cell = light_grid_existing_cell_at(world_position + world_normal * RAY_T_MIN);
+    let split = realize_light_candidate_split(light_candidate_split(constants.world_cache_local_light_sample_count, light_grid_cell), rng);
     var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -100,7 +106,7 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
     var selected_sample_world_position = vec4(0.0);
     for (var i = 0u; i < light_candidate_count(split); i++) {
         // Each candidate's inverse_pdf already includes its strategy's 1 / candidate count
-        let resolved_light_sample = generate_light_candidate(i, split, light_tile_start, rng).resolved_light_sample;
+        let resolved_light_sample = generate_light_candidate(i, split, light_grid_cell, light_tile_start, rng).resolved_light_sample;
         let light_contribution = calculate_light_contribution(resolved_light_sample, world_position, world_normal);
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));

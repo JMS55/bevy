@@ -167,6 +167,11 @@ pub struct SolariLighting {
     /// Higher values accumulate more temporal history, giving more stable but
     /// less responsive (slower to update) lighting. Lower values react faster
     /// but are noisier and less stable.
+    ///
+    /// The change detector already shortens the history of cells whose lighting
+    /// changes, so this mainly bounds how long changes it misses (small or slow
+    /// ones, or cells updated only every few frames) take to settle. The default
+    /// of 24 settles them faster than 32 at about the same noise.
     pub world_cache_max_temporal_samples: f32,
 
     /// How many direct light samples each world cache cell takes when updating
@@ -245,7 +250,7 @@ impl Default for SolariLighting {
             primary_di_samples: 8,
             secondary_di_samples: 4,
             max_bounces: 3,
-            world_cache_max_temporal_samples: 32.0,
+            world_cache_max_temporal_samples: 24.0,
             world_cache_direct_light_sample_count: 32,
             world_cache_max_gi_ray_distance: 50.0,
             world_cache_max_cell_updates_per_frame: 40000,

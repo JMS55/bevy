@@ -235,7 +235,15 @@ pub struct SolariLighting {
     /// Set to true to delete the saved temporal history (past frames).
     ///
     /// Useful for preventing ghosting when the history is no longer
-    /// representative of the current frame, such as in sudden camera cuts.
+    /// representative of the current frame, such as in sudden camera cuts,
+    /// or when switching a dominant light (such as the sun) on or off.
+    /// Setting it on the frame of the switch removes the stale cached light
+    /// immediately, instead of letting it fade out over many frames.
+    ///
+    /// This clears all of Solari's temporal history, including the world cache,
+    /// so it is not meant for gradual or unsignaled lighting changes (moving
+    /// or animated lights, emissive changes). The world cache detects and
+    /// follows those on its own.
     ///
     /// After setting this to true, it will automatically be toggled
     /// back to false at the end of the frame.

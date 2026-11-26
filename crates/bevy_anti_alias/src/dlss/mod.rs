@@ -14,11 +14,13 @@
 //! 5. Optionally add sharpening via `ContrastAdaptiveSharpening`
 //! 6. Custom rendering code, including third party crates, should account for the optional `MainPassResolutionOverride` to work with DLSS (see the `custom_render_phase` example)
 
+mod energy_restore;
 mod extract;
 mod node;
 mod prepare;
 
 pub use dlss_wgpu::DlssPerfQualityMode;
+pub use energy_restore::DlssEnergyRestore;
 
 use bevy_app::{App, Plugin};
 use bevy_camera::Hdr;
@@ -31,6 +33,7 @@ use bevy_math::{UVec2, Vec2};
 use bevy_reflect::{reflect_remote, Reflect};
 use bevy_render::{
     camera::{MipBias, TemporalJitter},
+    extract_component::ExtractComponentPlugin,
     renderer::{
         raw_vulkan_init::{AdditionalVulkanFeatures, RawVulkanInitSettings},
         RenderDevice, RenderQueue,
@@ -134,7 +137,8 @@ pub struct DlssPlugin;
 impl Plugin for DlssPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Dlss<DlssSuperResolutionFeature>>()
-            .register_type::<Dlss<DlssRayReconstructionFeature>>();
+            .register_type::<Dlss<DlssRayReconstructionFeature>>()
+            .register_type::<DlssEnergyRestore>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -170,8 +174,11 @@ impl Plugin for DlssPlugin {
             app.insert_resource(DlssRayReconstructionSupported);
         }
 
+        app.add_plugins(ExtractComponentPlugin::<DlssEnergyRestore>::default());
+
         app.sub_app_mut(RenderApp)
             .insert_resource(DlssSdk(dlss_sdk.unwrap()))
+            .init_resource::<energy_restore::EnergyRestore>()
             .add_systems(
                 ExtractSchedule,
                 (

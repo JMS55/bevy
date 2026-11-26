@@ -58,8 +58,12 @@ struct SolariLightingSettings {
     world_cache_max_cell_updates_per_frame: u32,
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
+    world_cache_hot_cell_direct_light_samples: u32,
+    world_cache_hot_cell_direct_light_sample_budget: u32,
     frame_rng: u32,
+    frame_count: u32,
     reset: u32,
+    padding: u32,
 }
 
 /// Don't adjust the size of this struct without also adjusting `prepare::RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE`.
@@ -103,12 +107,18 @@ struct WorldCache {
     life: array<u32, constants::WORLD_CACHE_SIZE>,
     @if(!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER)
     life: array<atomic<u32>, constants::WORLD_CACHE_SIZE>,
+    /// This update's direct light plus `radiance_indirect`.
     radiance: array<vec4<f32>, constants::WORLD_CACHE_SIZE>,
+    /// Temporally accumulated indirect light (rgb) and its sample count (a).
+    radiance_indirect: array<vec4<f32>, constants::WORLD_CACHE_SIZE>,
     geometry_data: array<WorldCacheGeometryData, constants::WORLD_CACHE_SIZE>,
     luminance_deltas: array<f32, constants::WORLD_CACHE_SIZE>,
     a: array<u32, constants::WORLD_CACHE_SIZE>,
     b: array<u32, constants::WORLD_CACHE_SIZE / 1024u>,
+    b_hot: array<u32, constants::WORLD_CACHE_SIZE / 1024u>,
+    /// Hot cells (read by camera paths last frame) first, then cold cells.
     active_cell_indices: array<u32, constants::WORLD_CACHE_SIZE>,
     active_cells_count: u32,
     update_window_start: u32,
+    hot_cells_count: u32,
 }

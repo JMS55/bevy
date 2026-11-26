@@ -50,15 +50,19 @@ const _: () = assert!(
         && WORLD_CACHE_SIZE <= 2u64.pow(20)
 );
 /// Sum of per-cell field sizes in `WorldCache`. Keep in sync with `bindings.wesl`.
-const WORLD_CACHE_ENTRY_SIZE: u64 = 68;
-/// Size of the fixed `b` array (`array<u32, WORLD_CACHE_SIZE / 1024>`).
+const WORLD_CACHE_ENTRY_SIZE: u64 = 84;
+/// Size of each of the fixed `b` and `b_hot` arrays (`array<u32, WORLD_CACHE_SIZE / 1024>`).
 const WORLD_CACHE_B_SIZE: u64 = (WORLD_CACHE_SIZE / 1024) * size_of::<u32>() as u64;
 /// Offset of `active_cells_count`.
 pub const WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET: u64 =
-    WORLD_CACHE_SIZE * WORLD_CACHE_ENTRY_SIZE + WORLD_CACHE_B_SIZE;
+    WORLD_CACHE_SIZE * WORLD_CACHE_ENTRY_SIZE + 2 * WORLD_CACHE_B_SIZE;
+/// Offset of `hot_cells_count`.
+pub const WORLD_CACHE_HOT_CELLS_COUNT_OFFSET: u64 =
+    WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET + 2 * size_of::<u32>() as u64;
 /// Must stay under wgpu's default `max_storage_buffer_binding_size` (128 MiB or 2^27 bytes).
 pub const WORLD_CACHE_BUFFER_SIZE: u64 =
-    (WORLD_CACHE_ACTIVE_CELLS_COUNT_OFFSET + 2 * size_of::<u32>() as u64).next_multiple_of(16);
+    (WORLD_CACHE_HOT_CELLS_COUNT_OFFSET + size_of::<u32>() as u64).next_multiple_of(16);
+const _: () = assert!(WORLD_CACHE_BUFFER_SIZE <= 2u64.pow(27));
 
 /// GPU representation of the user-configurable [`SolariLighting`] settings, plus
 /// per-frame state.
@@ -78,8 +82,12 @@ struct SolariLightingUniforms {
     world_cache_max_cell_updates_per_frame: u32,
     world_cache_position_base_cell_size: f32,
     world_cache_position_lod_scale: f32,
+    world_cache_hot_cell_direct_light_samples: u32,
+    world_cache_hot_cell_direct_light_sample_budget: u32,
     frame_rng: u32,
+    frame_count: u32,
     reset: u32,
+    padding: u32,
 }
 
 impl SolariLightingUniforms {
@@ -95,8 +103,14 @@ impl SolariLightingUniforms {
             world_cache_max_cell_updates_per_frame: settings.world_cache_max_cell_updates_per_frame,
             world_cache_position_base_cell_size: settings.world_cache_position_base_cell_size,
             world_cache_position_lod_scale: settings.world_cache_position_lod_scale,
+            world_cache_hot_cell_direct_light_samples: settings
+                .world_cache_hot_cell_direct_light_samples,
+            world_cache_hot_cell_direct_light_sample_budget: settings
+                .world_cache_hot_cell_direct_light_sample_budget,
             frame_rng: frame_count.wrapping_mul(5782582),
+            frame_count,
             reset: (settings.reset || force_reset) as u32,
+            padding: 0,
         }
     }
 }

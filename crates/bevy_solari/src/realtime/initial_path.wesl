@@ -2,7 +2,7 @@ import bevy_core_pipeline::tonemapping::tonemapping_luminance as luminance;
 import bevy_pbr::render::utils::{rand_f, rand_range_u};
 import bevy_render::maths::PI;
 import bevy_render::utils::octahedral_encode;
-import package::scene::brdf::{brdf_pdf, evaluate_and_sample_brdf, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB};
+import package::scene::brdf::{brdf_pdf, directional_albedo, evaluate_and_sample_brdf, evaluate_brdf, EvaluateAndSampleBrdfResult, F_AB};
 import package::realtime::presample_light_tiles::unpack_resolved_light_sample;
 import package::realtime::bindings::{empty_reservoir, light_tile_resolved_samples, light_tile_samples, Reservoir, constants, view};
 import package::realtime::atmosphere::calculate_light_contribution;
@@ -435,13 +435,19 @@ fn terminate_into_cache(
 
     // Only use the cache when the ray cleared the cache cell (diagonal = sqrt(3) * cell_size). Short
     // rays land in a cell that may straddle occluders and leak light through corners.
+    // Except at the last bounce: the path can't continue from there, and ending it with nothing would drop all
+    // the light past this vertex, which loses far more energy than a short ray's cell can leak.
     var rng_copy = *rng;
     let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, &rng_copy);
-    if ray.t <= sqrt(3.0) * world_cache_cell_size { return false; }
+    if ray.t <= sqrt(3.0) * world_cache_cell_size && !forced_terminate { return false; }
 
     let cached_radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, WORLD_CACHE_CELL_LIFETIME, rng);
 
-    let cache_outgoing = (ray_hit.material.base_color / PI) * cached_radiance;
+    // The cache stores irradiance. Turn it into outgoing radiance toward the path with the BRDF's directional albedo
+    // (diffuse + specular lobes), which is exact for uniform incoming light. base_color alone would ignore the
+    // specular lobe's reflectance and lose energy, most on dark and glossy surfaces.
+    let wo = -normalize(ray_hit.world_position - (*path).ray_origin);
+    let cache_outgoing = (directional_albedo(ray_hit.material, ray_hit.world_normal, wo) / PI) * cached_radiance;
     let cache_L_at_reconnection = (*path).throughput_past_first_hit * cache_outgoing;
 
     @if(RESTIR) {

@@ -170,6 +170,14 @@ fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(saturate(1.0 - LdotH), 5.0);
 }
 
+/// Directional albedo of the full BRDF (diffuse + specular lobes) for light leaving toward `wo`.
+/// This is the outgoing radiance per unit of incoming radiance when the incoming light is uniform.
+fn directional_albedo(material: ResolvedMaterial, world_normal: vec3<f32>, wo: vec3<f32>) -> vec3<f32> {
+    let F_ab = F_AB(material.perceptual_roughness, max(dot(world_normal, wo), 0.0001));
+    let rho = lobe_reflectances(material.base_color, calculate_F0_dielectric(vec3(material.reflectance)), material, F_ab);
+    return rho.diffuse + rho.specular;
+}
+
 /// Scale/bias approximation
 fn F_AB(perceptual_roughness: f32, NdotV: f32) -> vec2<f32> {
     return textureSampleLevel(brdf_dfg_lut, brdf_dfg_lut_sampler, vec2<f32>(NdotV, perceptual_roughness), 0.0).rg;

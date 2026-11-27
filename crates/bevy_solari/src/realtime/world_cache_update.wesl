@@ -3,7 +3,7 @@ import bevy_pbr::render::utils::{rand_f, rand_range_u, sample_cosine_hemisphere}
 import bevy_render::maths::PI;
 import package::realtime::light_candidates::{generate_directional_light_candidate, generate_local_light_candidate, light_candidate_split, LightCandidate};
 import package::realtime::atmosphere::calculate_light_contribution;
-import package::scene::sampling::{trace_visibility, sample_environment_map_light};
+import package::scene::sampling::{local_light_count, power_heuristic, trace_visibility, sample_environment_map_light};
 import package::scene::bindings::{trace_ray, resolve_ray_hit_full, RAY_T_MIN};
 import package::realtime::world_cache_query::query_world_cache;
 import package::realtime::bindings::{
@@ -36,6 +36,22 @@ fn update_world_cache(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(g
     let ray = trace_ray(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, constants.world_cache_max_gi_ray_distance, WORLD_CACHE_RAY_FLAG);
     if ray.kind != RAY_QUERY_INTERSECTION_NONE {
         let ray_hit = resolve_ray_hit_full(ray, -ray_direction);
+
+        // Emission the GI ray hits, combined with the direct light above by MIS (power heuristic). Without it, emissive
+        // meshes reach the cache only through light sampling, whose 1/d^2 makes cells right next to an emitter extremely
+        // noisy, while the cosine-distributed GI ray handles them well.
+        // The light sampling pdf is that of sample_random_light_ris' local candidates: a uniform local light, a
+        // uniform triangle, a uniform point by area, times the number of local candidates (RIS over N candidates
+        // makes the effective pdf about N times one candidate's, the same convention as the camera path's emissive MIS).
+        let NdotV_hit = dot(ray_hit.world_normal, -ray_direction);
+        if any(ray_hit.material.emissive > vec3(0.0)) && NdotV_hit > 0.0 {
+            let split = light_candidate_split(constants.world_cache_local_light_sample_count);
+            let area_pdf = 1.0 / (f32(local_light_count()) * f32(ray_hit.triangle_count) * ray_hit.triangle_area);
+            let p_light = f32(split.local) * area_pdf * ray.t * ray.t / NdotV_hit;
+            let p_cosine = max(dot(geometry_data.world_normal, ray_direction), 0.0) / PI;
+            new_radiance += PI * ray_hit.material.emissive * power_heuristic(p_cosine, p_light);
+        }
+
         if ray.front_face || ray_hit.double_sided {
             let cell_life = atomicLoad(&world_cache.life[cell_index]);
             let radiance = query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, cell_life, &rng);
@@ -94,6 +110,14 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
         unbiased_contribution_weight = ris.weight_sum * inverse_target_function;
 
         unbiased_contribution_weight *= trace_visibility(world_position + (world_normal * RAY_T_MIN), ris.selected_sample_world_position, WORLD_CACHE_RAY_FLAG);
+
+        // MIS against the GI ray hitting the same emitter in update_world_cache. inverse_solid_angle_pdf already
+        // includes the local candidate count (generate_local_light_candidate), so its inverse is the effective pdf.
+        if ris.selected_brdf_rays_can_hit && ris.selected_inverse_solid_angle_pdf > 0.0 {
+            let p_light = 1.0 / ris.selected_inverse_solid_angle_pdf;
+            let p_cosine = max(dot(world_normal, ris.selected_wi), 0.0) / PI;
+            unbiased_contribution_weight *= power_heuristic(p_light, p_cosine);
+        }
     }
 
     return ris.selected_sample_radiance * unbiased_contribution_weight;
@@ -104,6 +128,9 @@ struct WorldCacheLightRisState {
     selected_sample_radiance: vec3<f32>,
     selected_sample_target_function: f32,
     selected_sample_world_position: vec4<f32>,
+    selected_wi: vec3<f32>,
+    selected_inverse_solid_angle_pdf: f32,
+    selected_brdf_rays_can_hit: bool,
 }
 
 fn add_world_cache_light_ris_candidate(ris: ptr<function, WorldCacheLightRisState>, candidate: LightCandidate, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) {
@@ -120,5 +147,8 @@ fn add_world_cache_light_ris_candidate(ris: ptr<function, WorldCacheLightRisStat
         (*ris).selected_sample_radiance = contribution;
         (*ris).selected_sample_target_function = target_function;
         (*ris).selected_sample_world_position = resolved_light_sample.world_position;
+        (*ris).selected_wi = light_contribution.wi;
+        (*ris).selected_inverse_solid_angle_pdf = light_contribution.inverse_solid_angle_pdf;
+        (*ris).selected_brdf_rays_can_hit = light_contribution.brdf_rays_can_hit;
     }
 }

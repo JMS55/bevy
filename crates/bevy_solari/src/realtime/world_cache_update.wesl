@@ -113,7 +113,9 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
 
         // MIS against the GI ray hitting the same emitter in update_world_cache. inverse_solid_angle_pdf already
         // includes the local candidate count (generate_local_light_candidate), so its inverse is the effective pdf.
-        if ris.selected_brdf_rays_can_hit && ris.selected_inverse_solid_angle_pdf > 0.0 {
+        // The GI ray stops at world_cache_max_gi_ray_distance, so lights beyond it keep the full weight here.
+        if ris.selected_brdf_rays_can_hit && ris.selected_inverse_solid_angle_pdf > 0.0
+            && distance(ris.selected_sample_world_position.xyz, world_position) < constants.world_cache_max_gi_ray_distance {
             let p_light = 1.0 / ris.selected_inverse_solid_angle_pdf;
             let p_cosine = max(dot(world_normal, ris.selected_wi), 0.0) / PI;
             unbiased_contribution_weight *= power_heuristic(p_light, p_cosine);
